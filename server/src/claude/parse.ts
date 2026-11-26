@@ -23,10 +23,12 @@ export const planValidator = (team: RoleId[]) => (v: unknown): PlanWithMap | nul
   if (v.tasks.length === 0) return null;
   const tasks: PlanTask[] = [];
   for (const t of v.tasks) {
-    // PM plans, it doesn't implement: tasks for pm are rejected.
-    if (!isObj(t) || !isRole(t.role) || t.role === 'pm' || !team.includes(t.role) || typeof t.text !== 'string' || !strs(t.files)) return null;
+    // PM plans, it doesn't implement: tasks the PM assigns to itself (e.g. "check against acceptance", seen live) are dropped.
+    if (isObj(t) && t.role === 'pm') continue;
+    if (!isObj(t) || !isRole(t.role) || !team.includes(t.role) || typeof t.text !== 'string' || !strs(t.files)) return null;
     tasks.push({ role: t.role, text: t.text, files: t.files });
   }
+  if (tasks.length === 0) return null;
   const plan: PlanWithMap = { summary: v.summary, acceptance: v.acceptance, areas: v.areas, tasks };
   if (v.projectMap !== undefined) plan.projectMap = v.projectMap;
   return plan;
