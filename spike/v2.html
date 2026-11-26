@@ -1,0 +1,264 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Office Spike v2</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#141826;font-family:system-ui,sans-serif}
+  #ui{position:fixed;top:12px;left:12px;display:flex;gap:8px;z-index:10}
+  #ui button{background:#1b2340;color:#cfe;border:1px solid #3a4a80;border-radius:6px;padding:8px 12px;cursor:pointer;font-size:13px}
+  #hint{position:fixed;bottom:10px;left:12px;color:#8899bb;font-size:12px;z-index:10}
+  #err{position:fixed;top:60px;left:12px;color:#f88;font:12px monospace;z-index:10;white-space:pre}
+</style>
+</head>
+<body>
+<div id="ui"><button id="btnDay">☀ Day / 🌙 Night</button></div>
+<div id="hint">SPIKE v2 — Isometric Pixel Props · drag to pan, scroll to zoom</div>
+<div id="err"></div>
+<script src="vendor/pixi.min.js"></script>
+<script>
+window.onerror = (m) => { document.getElementById('err').textContent += m + '\n'; };
+(async () => {
+  const PX = 91, PY = 45.5, PZ = 111;               // screen px per metre along iso x / iso y / height (128 ppm art)
+  const S = '../assets/office/Isometric_Pixel_Props/';
+  const C = '../assets/characters/OfficeCharacters_Basic_v1.0/characters/';
+  const iso = (mx, my) => ({ x: (mx - my) * PX, y: (mx + my) * PY });
+
+  // --- piece metadata ---
+  const meta = {};
+  for (const line of (await (await fetch(S + 'pieces.csv')).text()).trim().split('\n').slice(1)) {
+    const [cat, piece, w, h, , , , gx, gy, anim] = line.split(',');
+    meta[piece] = { cat, w: +w, h: +h, gx: +gx, gy: +gy, anim: +anim };
+  }
+
+  const app = new PIXI.Application();
+  await app.init({ resizeTo: window, background: '#141826', antialias: false });
+  document.body.appendChild(app.canvas);
+  PIXI.TextureSource.defaultOptions.scaleMode = 'nearest';
+
+  const world = new PIXI.Container(); world.sortableChildren = true; app.stage.addChild(world);
+
+  const texCache = new Map();
+  const load = (u) => { if (!texCache.has(u)) texCache.set(u, PIXI.Assets.load(u)); return texCache.get(u); };
+  // --- generic piece placement ---
+  async function put(piece, mx, my, view = 0, o = {}) {
+    const m = meta[piece]; if (!m) throw new Error('no piece ' + piece);
+    const dir = `${S}${m.cat}/${piece}/`;
+    let spr;
+    if (m.anim && o.anim !== false) {
+      const strip = await load(`${dir}anim/${piece}_${view}_16frames.png`);
+      const frames = []; for (let i = 0; i < m.anim; i++) frames.push(new PIXI.Texture({ source: strip.source, frame: new PIXI.Rectangle(i * m.w, 0, m.w, m.h) }));
+      spr = new PIXI.AnimatedSprite(frames); spr.animationSpeed = 0.2; spr.play();
+    } else spr = new PIXI.Sprite(await load(`${dir}sprites/${piece}_${view}.png`));
+    spr.anchor.set(m.gx / m.w, m.gy / m.h);
+    const p = iso(mx, my);
+    spr.position.set(p.x, p.y - (o.lift || 0) * PZ);
+    spr.zIndex = (o.zi !== undefined) ? o.zi : p.y + (o.z || 0);
+    world.addChild(spr); return spr;
+  }
+
+  const Q = [];
+  // ===== LAYOUT (metres) =====  project room x0-8, hallway x8-10, breakroom x10-16, depth y0-6
+  const RX = 8, HX = 10, BX = 20, D = 8, BD = 8;   // whole building is 8 m deep
+
+  // floors
+  for (let x = 0; x < RX; x += 2) for (let y = 0; y < D; y += 2) Q.push(put('Floor_Carpet_2x2', x + 1, y + 1, 0, { zi: -1e5 }));
+  for (let x = HX; x < BX; x += 2) for (let y = 0; y < BD; y += 2) Q.push(put('Floor_Vinyl_2x2', x + 1, y + 1, 0, { zi: -1e5 }));
+  const hall = new PIXI.Graphics(); hall.zIndex = -1e5 + 1; world.addChild(hall);
+  for (let x = RX; x < HX; x += 0.5) for (let y = 0; y < D; y += 0.5) {
+    const a = iso(x, y), b = iso(x + .5, y), c = iso(x + .5, y + .5), d = iso(x, y + .5);
+    hall.poly([a.x, a.y, b.x, b.y, c.x, c.y, d.x, d.y]).fill(((x + y) * 2) % 2 === 0 ? 0x1d1f26 : 0xe9e6dc);
+  }
+  // wooden threshold in the doorway (x=8, y 2..4)
+  { const a = iso(RX - .12, 2), b = iso(RX + .12, 2), c = iso(RX + .12, 4), d = iso(RX - .12, 4); hall.poly([a.x, a.y, b.x, b.y, c.x, c.y, d.x, d.y]).fill(0x9a6a3c); }
+
+  // back walls: along y=0 (view 0) and x=0 (view 2)
+  const backRow = ['Wall_Window_2m', 'Wall_2m', 'Blinds_Window_2m', 'Wall_2m', 'Wall_2m', 'Wall_Window_2m', 'Wall_2m', 'Wall_Window_2m', 'Wall_2m', 'Wall_Window_2m'];
+  for (let i = 0; i < 10; i++) Q.push(put(backRow[i], i * 2 + 1, -0.08, 0, { zi: -5e4 }));
+  for (let i = 0; i < 4; i++) Q.push(put(i === 1 ? 'Wall_Window_2m' : 'Wall_2m', -0.08, i * 2 + 1, 2, { zi: -5e4 }));
+  // glass partition room|hallway at x=8 with open doorway y 2..4
+  for (const y of [1, 5, 7]) Q.push(put('Glass_Partition_2m', RX, y, 2));
+
+  // wall-mounted decor
+  await put('Neon_Sign', 3.5, 0.1, 0, { lift: 1.7 });           // project nameplate
+  Q.push(put('Wall_Clock', 12.0, 0.08, 0, { lift: 1.95 }));
+    Q.push(put('String_Lights', 19, 0.12, 0, { lift: 1.2, zi: -4e4 }));
+
+  // ---- project room: 4 workstations ----
+  // bots face the camera: chair behind them, desk in front hides the legs, laptop keeps faces visible
+  const deskSpots = [[2, 2.0], [5.2, 2.0], [2, 5.2], [5.2, 5.2]];
+  const clutter = [['Mug', 'Notebook'], ['Headphones', 'Lava_Lamp'], ['Mug', 'Trophy'], ['Notebook', 'Cola_Can']];
+  const seats = [];
+  for (let i = 0; i < 4; i++) {
+    const [x, y] = deskSpots[i];
+    Q.push(put('Desk_Straight', x, y, 4));
+    if (i < 2) {   // developers: dual monitor arm + desk phone + headset stand
+      Q.push(put('Dual_Monitor_Arm', x, y + 0.15, 4, { lift: 0.834, z: 2 }));
+      Q.push(put('VoIP_Phone', x + 0.55, y - 0.1, 5, { lift: 0.834, z: 6 }));
+      Q.push(put('Headset_Stand', x - 0.6, y - 0.1, 3, { lift: 0.834, z: 6 }));
+    } else Q.push(put('Monitor', x, y + 0.1, 4, { lift: 0.834, z: 2 }));          // one screen, facing the bot
+    Q.push(put('Keyboard_Mouse', x, y - 0.15, 4, { lift: 0.834, z: 10 }));
+    Q.push(put(clutter[i][0], x - 0.55, y + 0.05, 0, { lift: 0.834, z: 3 }));
+    Q.push(put(clutter[i][1], x - 0.4, y + 0.2, 0, { lift: 0.834, z: 3 }));
+    seats.push([x, y - 0.75]);
+  }
+  Q.push(put('Open_Shelf', 0.35, 1.0, 6));
+  Q.push(put('Cubby_Shelf', 0.3, 3.2, 6));
+  Q.push(put('Whiteboard_Mobile', 0.6, 6.0, 6));
+  Q.push(put('Recycle_Bins', 0.75, 7.6, 0));
+  Q.push(put('Monstera', 7.2, 0.7, 0));
+  Q.push(put('Fiddle_Leaf', 7.3, 7.4, 0));
+  Q.push(put('Snake_Plant', 3.6, 0.35, 0));
+
+  // ---- breakroom (10 x 8 m): kitchen wall · family table · cafe window bar · lounge ----
+  Q.push(put('Kitchen_Sink', 11.0, 0.42, 0));
+  Q.push(put('Espresso_Machine', 10.75, 0.38, 0, { lift: 0.9, z: 2 }));
+  Q.push(put('Capsule_Coffee', 11.3, 0.38, 0, { lift: 0.9, z: 2 }));
+  Q.push(put('Mini_Fridge', 12.1, 0.4, 0));
+  Q.push(put('Vending_Machine', 13.5, 0.5, 0));
+  Q.push(put('Water_Cooler', 14.8, 0.35, 0));
+  Q.push(put('Cork_Board', 16.0, 0.55, 0));
+  // family table, well clear of the kitchen
+  const TX = 13.0, TY = 3.4;
+  Q.push(put('Meeting_Table', TX, TY, 0));
+  for (const dx of [-0.8, 0, 0.8]) {
+    Q.push(put('Meeting_Chair', TX + dx, TY - 0.95, 0, { z: -2 }));
+    Q.push(put('Meeting_Chair', TX + dx, TY + 0.85, 4));
+  }
+  Q.push(put('Plate_Burger', TX - 0.8, TY - 0.25, 0, { lift: 0.844, z: 4 }));
+  Q.push(put('Plate_Fruit', TX + 0.8, TY - 0.25, 0, { lift: 0.844, z: 4 }));
+  Q.push(put('Drinks_Tray', TX + 0.05, TY + 0.1, 0, { lift: 0.844, z: 4 }));
+  Q.push(put('Fairy_Jar', TX - 0.35, TY + 0.15, 0, { lift: 0.844, z: 4 }));
+  Q.push(put('Mug', TX - 0.6, TY + 0.25, 0, { lift: 0.844, z: 4 }));
+  Q.push(put('Cola_Can', TX + 0.55, TY + 0.25, 0, { lift: 0.844, z: 4 }));
+  // cafe bar under the string-lights window
+  Q.push(put('High_Table_Stools', 18.6, 1.3, 0));
+  Q.push(put('Beer_Mug', 18.4, 1.25, 0, { lift: 1.12, z: 3 }));
+  Q.push(put('Juice_Glass', 18.9, 1.3, 0, { lift: 1.12, z: 3 }));
+  // lounge corner (front right)
+  Q.push(put('Sofa_Modular', 19.35, 5.9, 2));
+  Q.push(put('Coffee_Table', 18.2, 5.9, 0));
+  Q.push(put('Mug', 18.05, 5.8, 0, { lift: 0.52, z: 3 }));
+  Q.push(put('Plate_Fruit', 18.3, 6.0, 0, { lift: 0.52, z: 3 }));
+  Q.push(put('Lounge_Chair', 17.0, 5.9, 6));                         // armchair facing the sofa (no TV)
+  Q.push(put('Lava_Lamp', 18.45, 5.75, 0, { lift: 0.52, z: 3 }));
+  Q.push(put('Lounge_Chair', 18.2, 7.1, 4));
+  Q.push(put('Pedestal_Drawer', 19.55, 4.55, 0));
+  Q.push(put('Aquarium', 19.55, 4.55, 0, { lift: 0.6, z: 3 }));
+  Q.push(put('Arc_Floor_Lamp', 19.6, 7.2, 6));
+  Q.push(put('Paper_Lantern_Floor', 16.6, 7.3, 0));
+  // greenery
+  Q.push(put('Fiddle_Leaf', 17.2, 0.6, 0));
+  Q.push(put('Monstera', 10.7, 7.3, 0));
+  Q.push(put('Snake_Plant', 13.0, 7.6, 0));
+  Q.push(put('Fiddle_Leaf', 19.55, 3.5, 0));
+
+  await Promise.all(Q);
+  // ---- characters (2x sheets = 128 ppm, same as props) ----
+  const ROWS = ['S', 'SW', 'W', 'NW', 'N', 'NE', 'E', 'SE'];
+  const FW = 168, FH = 248;
+  const cache = {};
+  const HIP = 172, SEAT = 0.42;   // fake sit: crop legs at the hip line, lift onto the seat
+  async function sheet(name, clip, n, crop) {
+    const k = name + clip + (crop ? 'sit' : ''); if (cache[k]) return cache[k];
+    const base = await load(`${C}${name}/a/2x/${clip}.png`);
+    return cache[k] = ROWS.map((_, r) => Array.from({ length: n }, (_, i) => new PIXI.Texture({ source: base.source, frame: new PIXI.Rectangle(i * FW, r * FH, FW, crop ? HIP : FH) })));
+  }
+  const chars = [];
+  async function addChar(name, mx, my, dir, mode, path, sit) {
+    const clips = { idle: await sheet(name, 'idle', 4, sit), walk: await sheet(name, 'walk', 8), drinking: await sheet(name, 'drinking', 8, sit) };
+    const s = new PIXI.AnimatedSprite(clips[mode][ROWS.indexOf(dir)]);
+    s.anchor.set(0.5, sit ? 1 : 202 / 248); s.animationSpeed = mode === 'walk' ? 0.17 : 0.1; s.play(); world.addChild(s);
+    const c = { s, clips, mx, my, dir, path, pi: 0, lift: sit ? SEAT * PZ : 0 }; chars.push(c); place(c); return c;
+  }
+  function place(c) { const p = iso(c.mx, c.my); c.s.position.set(p.x, p.y - (c.lift || 0)); c.s.zIndex = p.y + 1; }
+  function dirFrom(dx, dy) { const a = Math.atan2((dx + dy) * PY, (dx - dy) * PX) * 180 / Math.PI; const m = [['E', 0], ['SE', 45], ['S', 90], ['SW', 135], ['W', 180], ['W', -180], ['NW', -135], ['N', -90], ['NE', -45]]; return m.reduce((b, x) => Math.abs(a - x[1]) < Math.abs(a - b[1]) ? x : b)[0]; }
+
+  const names = ['Clara', 'Hugo', 'Jade', 'Leo'];
+  for (let i = 0; i < 4; i++) await addChar(names[i], seats[i][0], seats[i][1], 'SW', 'idle', null, true);
+  // chair sits behind the bot (backrest peeks out above the shoulders)
+  await Promise.all(seats.map(([x, y]) => put('Ergo_Chair', x - 0.02, y - 0.1, 0, { z: -2 })));
+  await addChar('Maya', 6.5, 3, 'E', 'walk', [[6.5, 3], [9, 3], [9, 5.4], [15.5, 5.4], [15.5, 2.2], [11, 1.6], [9, 3]]);
+  await addChar('Otto', 14.8, 1.2, 'NE', 'drinking');
+  await addChar('Sam', 18.1, 2.0, 'NE', 'drinking');                              // at the cafe bar
+  await addChar('Rosa', 13.0 - 0.8, 3.4 - 0.85, 'SW', 'drinking', null, true);
+  await addChar('Nina', 13.0 + 0.8, 3.4 - 0.85, 'SW', 'idle', null, true);
+  await addChar('Theo', 9.4, 0.8, 'SW', 'walk', [[9.4, 0.8], [9.4, 7.6]]);
+
+  app.ticker.add((t) => {
+    for (const c of chars) {
+      if (!c.path) continue;
+      const [gx, gy] = c.path[c.pi], dx = gx - c.mx, dy = gy - c.my, d = Math.hypot(dx, dy), sp = 0.02 * t.deltaTime;
+      if (d < sp) { c.mx = gx; c.my = gy; c.pi = (c.pi + 1) % c.path.length; }
+      else { c.mx += dx / d * sp; c.my += dy / d * sp; const nd = dirFrom(dx, dy); if (nd !== c.dir) { c.dir = nd; c.s.textures = c.clips.walk[ROWS.indexOf(nd)]; c.s.play(); } }
+      place(c);
+    }
+  });
+
+  // ---- night: multiply darkness + additive warm light pools ----
+  const g = document.createElement('canvas'); g.width = g.height = 256;
+  const gx = g.getContext('2d'), grad = gx.createRadialGradient(128, 128, 0, 128, 128, 128);
+  grad.addColorStop(0, 'rgba(255,255,255,1)'); grad.addColorStop(1, 'rgba(255,255,255,0)'); gx.fillStyle = grad; gx.fillRect(0, 0, 256, 256);
+  const glowTex = PIXI.Texture.from(g);
+  // Night = every world object is tinted down (no overlay shape, so no dark frame / bright edges).
+  // Light pools are additive and clipped to the exact floor + back-wall silhouette.
+  const NIGHT_TINT = 0xa39ac4;   // lights are on inside: only a gentle evening dim
+  const WALLH = 2.8 * PZ;
+  const A = iso(0, D), C0 = iso(0, 0), E = iso(BX, 0), F = iso(BX, BD);
+  const sil = new PIXI.Graphics().poly([A.x, A.y, A.x, A.y - WALLH, C0.x, C0.y - WALLH, E.x, E.y - WALLH, E.x, E.y, F.x, F.y]).fill(0xffffff);
+  world.addChild(sil);
+  const nightLayer = new PIXI.Container(); nightLayer.zIndex = 1e6; nightLayer.mask = sil; world.addChild(nightLayer);   // halos (on top)
+  // floor pools sit just above the floor tiles and below walls/furniture, so they light the floor without fogging objects
+  const floorSil = new PIXI.Graphics().poly([C0.x, C0.y, E.x, E.y, F.x, F.y, A.x, A.y]).fill(0xffffff); world.addChild(floorSil);
+  const poolLayer = new PIXI.Container(); poolLayer.zIndex = -9e4; poolLayer.mask = floorSil; world.addChild(poolLayer);
+  // light(): a soft pool on the floor under the source + a small halo at the source itself
+  const glow = (x, y, w, h, color, a, layer = nightLayer) => { const s = new PIXI.Sprite(glowTex); s.anchor.set(.5); s.position.set(x, y); s.width = w; s.height = h; s.tint = color; s.alpha = a; s.blendMode = 'add'; layer.addChild(s); };
+  const light = (mx, my, lift, r, color, a, pool = true, halo = true) => {
+    const p = iso(mx, my);
+    if (pool) glow(p.x, p.y, r * 2, r, color, a * 0.8, poolLayer);
+    if (halo) glow(p.x, p.y - lift * PZ, r * 0.45, r * 0.45, color, a * 0.7);
+  };
+  // office: warm ceiling lamps + cool screen light on each face
+  for (const [x, y] of [[2, 3.5], [5.2, 3.5], [3.6, 6.8]]) light(x, y, 0, 440, 0xffb070, 0.2, true, false);
+  for (const [x, y] of deskSpots) light(x, y - 0.35, 0, 180, 0x5fb8ff, 0.22, true, false);
+  light(3.5, 0.1, 1.7, 300, 0xff4fb8, 0.5, false);   // neon sign (wall halo only)
+  // hallway ceiling spots
+  for (let y = 0.8; y < 8; y += 1.6) light(9, y, 0, 220, 0xffc080, 0.2, true, false);
+  // breakroom
+  light(13.0, 3.4, 0.95, 480, 0xffc070, 0.45);   // fairy jar on the family table
+  light(11.0, 0.9, 0, 300, 0xffe0b0, 0.25, true, false); // kitchen counter
+  light(13.5, 1.0, 0, 300, 0x9fe8ff, 0.3, true, false);   // vending
+  light(18.6, 1.3, 1.4, 440, 0xffc070, 0.38);    // string lights over the cafe bar
+  light(18.9, 6.4, 1.6, 460, 0xffb35c, 0.3);   // arc lamp over the sofa
+  light(18.45, 5.75, 0.7, 180, 0xff7fd0, 0.25);  // lava lamp
+  light(19.55, 4.55, 0.7, 200, 0x4fa8ff, 0.3); // aquarium
+  light(16.6, 7.3, 1.0, 280, 0xffd9a0, 0.3);   // paper lantern
+  // windows glow faintly with moonlight
+  for (const x of [1, 5, 11, 15, 19]) light(x, 0.9, 0, 200, 0x8fa8ff, 0.14, true, false);   // moonlight on the floor
+
+  // night sky: stars + moon behind the building
+  const sky = new PIXI.Graphics(); sky.zIndex = -2e5; world.addChild(sky);
+  let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < 260; i++) sky.circle(-2600 + rnd() * 6400, -1400 + rnd() * 3200, rnd() < 0.15 ? 2.5 : 1.3).fill({ color: 0xffffff, alpha: 0.35 + rnd() * 0.6 });
+  sky.circle(2300, -900, 70).fill(0xfff4d6); sky.circle(2330, -925, 64).fill(0x0b0e1c);
+
+  let night = true;
+  const applyTime = () => {
+    for (const ch of world.children) if (ch !== nightLayer && ch !== poolLayer && ch !== sky && ch !== sil && ch !== floorSil) ch.tint = night ? NIGHT_TINT : 0xffffff;
+    nightLayer.visible = poolLayer.visible = night; sky.visible = night; app.renderer.background.color = night ? 0x0b0e1c : 0x9fb4cc; };
+  applyTime(); document.getElementById('btnDay').onclick = () => { night = !night; applyTime(); };
+
+  // ---- camera ----
+  world.scale.set(0.55); world.position.set(app.screen.width / 2 - 150, 230);
+  let drag = null;
+  app.canvas.addEventListener('pointerdown', e => drag = { x: e.clientX - world.x, y: e.clientY - world.y });
+  window.addEventListener('pointerup', () => drag = null);
+  window.addEventListener('pointermove', e => { if (drag) world.position.set(e.clientX - drag.x, e.clientY - drag.y); });
+  app.canvas.addEventListener('wheel', e => { e.preventDefault(); const f = e.deltaY < 0 ? 1.15 : 1 / 1.15, ns = Math.min(2, Math.max(0.2, world.scale.x * f)), k = ns / world.scale.x; world.position.set(e.clientX - (e.clientX - world.x) * k, e.clientY - (e.clientY - world.y) * k); world.scale.set(ns); }, { passive: false });
+  if (location.hash === '#day') { night = false; applyTime(); }
+  window.__world = world;
+  document.title = 'READY';
+})().catch(e => { document.getElementById('err').textContent += e.stack; });
+</script>
+</body>
+</html>

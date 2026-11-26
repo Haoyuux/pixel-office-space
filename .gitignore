@@ -1,0 +1,7 @@
+node_modules/
+dist/
+assets/
+server/data/
+spike/vendor/
+shots/
+.superpowers/

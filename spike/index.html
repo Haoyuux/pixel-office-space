@@ -1,0 +1,192 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Office Spike</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#0b0f1e;font-family:system-ui,sans-serif}
+  #ui{position:fixed;top:12px;left:12px;display:flex;gap:8px;z-index:10}
+  #ui button{background:#1b2340;color:#cfe;border:1px solid #3a4a80;border-radius:6px;padding:8px 12px;cursor:pointer;font-size:13px}
+  #ui button.on{background:#2b6cff;color:#fff}
+  #hint{position:fixed;bottom:10px;left:12px;color:#8899bb;font-size:12px;z-index:10}
+</style>
+</head>
+<body>
+<div id="ui">
+  <button id="btnDay">☀ Day / 🌙 Night</button>
+  <button id="btn1x" class="on">Characters 1x (64ppm)</button>
+  <button id="btn075">Characters 0.75x (match props)</button>
+</div>
+<div id="hint">SPIKE — drag to pan, scroll to zoom</div>
+<script src="https://cdn.jsdelivr.net/npm/pixi.js@8.6.6/dist/pixi.min.js"></script>
+<script>
+(async () => {
+  const TW = 64, TH = 32;
+  const P = '../assets/office/neon-office-free/large/iso/';
+  const C = '../assets/characters/OfficeCharacters_Basic_v1.0/characters/';
+  const PIV = {"workstation":{"x":50,"y":85},"office_chair":{"x":33,"y":79},"lounge_sofa":{"x":58,"y":67},"coffee_table":{"x":39,"y":47},"vending_machine":{"x":40,"y":104},"coffee_machine":{"x":32,"y":80},"arcade_cabinet":{"x":35,"y":96},"data_shelf":{"x":37,"y":100},"water_cooler":{"x":22,"y":75},"neon_sign":{"x":31,"y":86},"planter_box":{"x":39,"y":55},"glass_board":{"x":43,"y":106}};
+  const NOGLOW = new Set(['office_chair','lounge_sofa']);
+
+  const app = new PIXI.Application();
+  await app.init({ resizeTo: window, background: '#0b0f1e', antialias: false });
+  document.body.appendChild(app.canvas);
+  PIXI.TextureSource.defaultOptions.scaleMode = 'nearest';
+
+  const world = new PIXI.Container();
+  world.sortableChildren = true;
+  app.stage.addChild(world);
+  world.position.set(app.screen.width / 2, 120);
+
+  const iso = (tx, ty) => ({ x: (tx - ty) * TW / 2, y: (tx + ty) * TH / 2 });
+  const W = 10, H = 8;
+
+  // ---------- floor + walls (code-drawn) ----------
+  const floor = new PIXI.Graphics(); floor.zIndex = -100000; world.addChild(floor);
+  const walls = new PIXI.Graphics(); walls.zIndex = -99999; world.addChild(walls);
+  function drawRoom(night) {
+    floor.clear(); walls.clear();
+    for (let x = 0; x < W; x++) for (let y = 0; y < H; y++) {
+      const p = iso(x, y), lounge = x >= 7;
+      const a = (x + y) % 2 === 0;
+      let col = lounge ? (night ? (a ? 0x2a2035 : 0x241b2e) : (a ? 0xc9b8d8 : 0xbfaed0))
+                       : (night ? (a ? 0x1a2238 : 0x161d31) : (a ? 0xd5dbe6 : 0xcad1de));
+      floor.poly([p.x, p.y, p.x + TW/2, p.y + TH/2, p.x, p.y + TH, p.x - TW/2, p.y + TH/2]).fill(col);
+    }
+    // seam glow between work + lounge
+    const s0 = iso(7, 0), s1 = iso(7, H);
+    floor.moveTo(s0.x, s0.y).lineTo(s1.x, s1.y).stroke({ width: 2, color: night ? 0x3df0ff : 0x9aa6bd, alpha: night ? 0.7 : 0.5 });
+    const WH = 110;
+    const wallL = night ? 0x1e2742 : 0xe8ecf3, wallR = night ? 0x253052 : 0xf3f5f9, trim = night ? 0x3df0ff : 0x8a96ad;
+    // left wall (along y=0 edge going +x) and right wall (along x=0 edge going +y)
+    const o = iso(0, 0), ex = iso(W, 0), ey = iso(0, H);
+    walls.poly([o.x, o.y, ex.x, ex.y, ex.x, ex.y - WH, o.x, o.y - WH]).fill(wallR);
+    walls.poly([o.x, o.y, ey.x, ey.y, ey.x, ey.y - WH, o.x, o.y - WH]).fill(wallL);
+    walls.moveTo(ey.x, ey.y - WH).lineTo(o.x, o.y - WH).lineTo(ex.x, ex.y - WH).stroke({ width: 3, color: trim });
+    walls.moveTo(ey.x, ey.y).lineTo(o.x, o.y).lineTo(ex.x, ex.y).stroke({ width: 2, color: trim, alpha: 0.6 });
+    // windows on right wall
+    for (const t of [2, 5]) {
+      const a = iso(t, 0), b = iso(t + 1.5, 0);
+      walls.poly([a.x, a.y - 30, b.x, b.y - 30, b.x, b.y - 85, a.x, a.y - 85]).fill(night ? 0x0a1330 : 0x9fd3ff);
+      if (night) { walls.circle((a.x + b.x) / 2 + 6, (a.y + b.y) / 2 - 70, 1.5).fill(0xffffff); walls.circle((a.x + b.x) / 2 - 10, (a.y + b.y) / 2 - 52, 1).fill(0xffffff); }
+    }
+  }
+
+  // ---------- props ----------
+  const props = [];
+  async function addProp(kind, tx, ty, wallOffset = 0) {
+    const base = `${P}${kind}/${kind}_graphite_cyan_`;
+    const urls = { on: base + 'on.png', off: base + 'off.png', shOn: base + 'on_shadow.png', shOff: base + 'off_shadow.png' };
+    if (!NOGLOW.has(kind)) urls.glow = base + 'on_glow.png';
+    const tex = {};
+    for (const [k, u] of Object.entries(urls)) tex[k] = await PIXI.Assets.load(u);
+    const piv = PIV[kind]; const p = iso(tx, ty);
+    const mk = (t) => { const s = new PIXI.Sprite(t); s.anchor.set(piv.x / t.width, piv.y / t.height); s.position.set(p.x, p.y + TH / 2 + wallOffset); return s; };
+    const shadow = mk(tex.shOn); shadow.zIndex = -50000;
+    const sprite = mk(tex.on); sprite.zIndex = p.y + TH / 2;
+    let glow = null;
+    if (tex.glow) { glow = mk(tex.glow); glow.blendMode = 'add'; glow.zIndex = sprite.zIndex + 0.1; world.addChild(glow); }
+    world.addChild(shadow, sprite);
+    props.push({ sprite, shadow, glow, tex });
+  }
+
+  // work area: 4 workstations + chairs
+  const seats = [];
+  for (const [tx, ty] of [[1.5, 1.5], [4, 1.5], [1.5, 4.5], [4, 4.5]]) {
+    await addProp('workstation', tx, ty);
+    await addProp('office_chair', tx + 0.9, ty + 0.9);
+    seats.push([tx + 1.1, ty + 1.1]);
+  }
+  await addProp('glass_board', 0.4, 6.5);
+  await addProp('data_shelf', 6, 0.4);
+  await addProp('planter_box', 0.5, 0.5);
+  await addProp('planter_box', 6.2, 6.8);
+  // lounge
+  await addProp('coffee_machine', 7.4, 0.4);
+  await addProp('water_cooler', 8.6, 0.4);
+  await addProp('vending_machine', 9.4, 1.6);
+  await addProp('lounge_sofa', 8.6, 4.2);
+  await addProp('coffee_table', 8.2, 5.8);
+  await addProp('arcade_cabinet', 9.4, 6.8);
+  await addProp('neon_sign', 3, 0.2);
+
+  // ---------- characters ----------
+  const ROWS = ['S', 'SW', 'W', 'NW', 'N', 'NE', 'E', 'SE'];
+  const FW = 84, FH = 124, ANCH = { x: 42 / 84, y: 101 / 124 };
+  async function sheet(name, clip, n) {
+    const base = await PIXI.Assets.load(`${C}${name}/a/1x/${clip}.png`);
+    const rows = [];
+    for (let r = 0; r < 8; r++) {
+      const fr = [];
+      for (let i = 0; i < n; i++) fr.push(new PIXI.Texture({ source: base.source, frame: new PIXI.Rectangle(i * FW, r * FH, FW, FH) }));
+      rows.push(fr);
+    }
+    return rows;
+  }
+  const chars = [];
+  let charScale = 1;
+  async function addChar(name, tx, ty, dir, mode, path) {
+    const clips = { idle: await sheet(name, 'idle', 4), walk: await sheet(name, 'walk', 8), drinking: await sheet(name, 'drinking', 8) };
+    const s = new PIXI.AnimatedSprite(clips[mode === 'walk' ? 'walk' : mode][ROWS.indexOf(dir)]);
+    s.anchor.set(ANCH.x, ANCH.y); s.animationSpeed = mode === 'walk' ? 0.17 : 0.1; s.play();
+    world.addChild(s);
+    const c = { s, clips, tx, ty, dir, mode, path, pi: 0, name };
+    chars.push(c); place(c); return c;
+  }
+  function place(c) { const p = iso(c.tx, c.ty); c.s.position.set(p.x, p.y + TH / 2); c.s.zIndex = p.y + TH / 2 + 1; c.s.scale.set(charScale); }
+  function dirFrom(dx, dy) { const sx = (dx - dy), sy = (dx + dy) / 2; const a = Math.atan2(sy, sx) * 180 / Math.PI; const map = [['E', 0], ['SE', 45], ['S', 90], ['SW', 135], ['W', 180], ['W', -180], ['NW', -135], ['N', -90], ['NE', -45]]; let best = 'S', bd = 999; for (const [d, ang] of map) { const dd = Math.abs(a - ang); if (dd < bd) { bd = dd; best = d; } } return best; }
+
+  const names = ['Clara', 'Hugo', 'Jade', 'Leo'];
+  for (let i = 0; i < 4; i++) await addChar(names[i], seats[i][0], seats[i][1], 'NW', 'idle');
+  await addChar('Maya', 8, 2, 'SE', 'walk', [[8, 2], [8, 6.6], [7.4, 6.6], [7.4, 2]]);
+  await addChar('Otto', 8.4, 3.2, 'NE', 'drinking');
+  await addChar('Theo', 3, 6.8, 'E', 'walk', [[1, 6.8], [6, 6.8], [6, 3.2], [1, 3.2]]);
+
+  app.ticker.add((t) => {
+    for (const c of chars) {
+      if (!c.path) continue;
+      const [gx, gy] = c.path[c.pi]; const dx = gx - c.tx, dy = gy - c.ty; const d = Math.hypot(dx, dy);
+      const sp = 0.025 * t.deltaTime;
+      if (d < sp) { c.tx = gx; c.ty = gy; c.pi = (c.pi + 1) % c.path.length; }
+      else {
+        c.tx += dx / d * sp; c.ty += dy / d * sp;
+        const nd = dirFrom(dx, dy);
+        if (nd !== c.dir) { c.dir = nd; c.s.textures = c.clips.walk[ROWS.indexOf(nd)]; c.s.play(); }
+      }
+      place(c);
+    }
+  });
+
+  // ---------- day/night ----------
+  let night = true;
+  function applyTime() {
+    app.renderer.background.color = night ? 0x0b0f1e : 0x9fb4cc;
+    drawRoom(night);
+    for (const pr of props) {
+      pr.sprite.texture = night ? pr.tex.on : pr.tex.off;
+      pr.shadow.texture = night ? pr.tex.shOn : pr.tex.shOff;
+      if (pr.glow) pr.glow.visible = night;
+    }
+  }
+  applyTime();
+  document.getElementById('btnDay').onclick = () => { night = !night; applyTime(); };
+  const setScale = (v, id) => { charScale = v; chars.forEach(place); document.querySelectorAll('#btn1x,#btn075').forEach(b => b.classList.toggle('on', b.id === id)); };
+  document.getElementById('btn1x').onclick = () => setScale(1, 'btn1x');
+  document.getElementById('btn075').onclick = () => setScale(0.75, 'btn075');
+
+  // ---------- pan / zoom ----------
+  let drag = null;
+  app.canvas.addEventListener('pointerdown', e => drag = { x: e.clientX - world.x, y: e.clientY - world.y });
+  window.addEventListener('pointerup', () => drag = null);
+  window.addEventListener('pointermove', e => { if (drag) world.position.set(e.clientX - drag.x, e.clientY - drag.y); });
+  app.canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    const f = e.deltaY < 0 ? 1.15 : 1 / 1.15, ns = Math.min(4, Math.max(0.4, world.scale.x * f));
+    const mx = e.clientX, my = e.clientY, k = ns / world.scale.x;
+    world.position.set(mx - (mx - world.x) * k, my - (my - world.y) * k); world.scale.set(ns);
+  }, { passive: false });
+  world.scale.set(1.6);
+  world.position.set(app.screen.width / 2, 200);
+})();
+</script>
+</body>
+</html>
