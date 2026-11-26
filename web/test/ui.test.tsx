@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react';
-import type { Project, Ticket } from '@office/shared';
+import { render, screen, fireEvent, cleanup, waitFor, act, within } from '@testing-library/react';
+import { roleDef, type Project, type Ticket } from '@office/shared';
 import { useOffice, resetOffice, type FeedItem } from '../src/state/store';
 import { AddProjectDialog } from '../src/ui/AddProjectDialog';
 import { Drawer } from '../src/ui/Drawer';
@@ -267,7 +267,7 @@ describe('fix round 1', () => {
     openDrawer([]);
     fireEvent.click(screen.getByRole('button', { name: /project menu/i }));
     fireEvent.click(screen.getByRole('menuitem', { name: /delete project/i }));
-    expect(calls).toHaveLength(0);
+    expect(calls.filter(c => c.method !== 'GET')).toHaveLength(0); // only the claude status GET
     const yes = screen.getByRole('button', { name: /^delete project$/i });
     fireEvent.click(yes); fireEvent.click(yes);
     await waitFor(() => expect(useOffice.getState().selectedProjectId).toBeNull());
@@ -278,7 +278,7 @@ describe('fix round 1', () => {
     openDrawer([ticket()]);
     fireEvent.click(screen.getByRole('button', { name: /project menu/i }));
     fireEvent.click(screen.getByRole('menuitem', { name: /cancel running ticket/i }));
-    expect(calls).toHaveLength(0);
+    expect(calls.filter(c => c.method !== 'GET')).toHaveLength(0);
     const yes = screen.getByRole('button', { name: /^cancel ticket$/i });
     fireEvent.click(yes); fireEvent.click(yes);
     await waitFor(() => expect(posts()).toHaveLength(1));
@@ -304,5 +304,134 @@ describe('fix round 1', () => {
     rerender({ present: true });
     expect(reveal).toHaveBeenCalledTimes(1);
     expect(reveal).toHaveBeenCalledWith({ x0: 0, y0: 0, x1: 1, y1: 1 }, 560);
+  });
+});
+
+describe('M2: real agents UI', () => {
+  const NOW = Date.now();
+  const claude = (o: Record<string, unknown> = {}) => ({ found: true, version: '2.0.0', loggedIn: true, accountType: 'pro', signInEndsAt: null, ...o });
+  let sys: Record<string, unknown>;
+  beforeEach(() => {
+    sys = claude();
+    reply = url => (url === '/api/system/claude' ? { status: 200, body: sys } : { status: 200, body: { ok: true } });
+  });
+  const openDrawer = (tickets: Ticket[] = [], project: Partial<Project> = {}) => {
+    useOffice.setState({ projects: { p: { ...P, ...project } }, tickets: Object.fromEntries(tickets.map(t => [t.id, t])), selectedProjectId: 'p', synced: true });
+    return render(<Drawer projectId="p" />);
+  };
+  const box = () => screen.getByRole('textbox', { name: /message/i }) as HTMLTextAreaElement;
+
+  it('fetches /api/system/claude and shows the missing banner', async () => {
+    sys = claude({ found: false, loggedIn: false });
+    openDrawer();
+    expect(await screen.findByText("Claude Code isn't installed — install it, then run `claude` and `/login`")).toBeTruthy();
+    expect(calls.some(c => c.url === '/api/system/claude' && c.method === 'GET')).toBe(true);
+  });
+
+  it('shows the logged-out banner', async () => {
+    sys = claude({ loggedIn: false });
+    openDrawer();
+    expect(await screen.findByText('Run `claude` then `/login` in a terminal')).toBeTruthy();
+  });
+
+  it('shows the sign-in-ends banner within 10 days only', async () => {
+    sys = claude({ signInEndsAt: new Date(NOW + 3 * 864e5).toISOString() });
+    openDrawer();
+    expect(await screen.findByText(/^Your Claude sign-in ends on .+ — run `claude` then `\/login` to renew$/)).toBeTruthy();
+    cleanup();
+    sys = claude({ signInEndsAt: new Date(NOW + 30 * 864e5).toISOString() });
+    const { refreshClaude } = await import('../src/ui/claudeStatus');
+    await act(async () => { await refreshClaude(); });
+    openDrawer();
+    expect(screen.queryByText(/sign-in ends on/)).toBeNull();
+  });
+
+  it('Toolbar shows a small global banner when claude is missing', async () => {
+    const { Toolbar } = await import('../src/ui/Toolbar');
+    sys = claude({ found: false, loggedIn: false });
+    render(<Toolbar onFit={() => {}} />);
+    expect(await screen.findByText(/Claude Code isn't installed/)).toBeTruthy();
+  });
+
+  it('Initialize git banner posts git-init and shows the result inline', async () => {
+    reply = url => (url === '/api/system/claude' ? { status: 200, body: sys } : { status: 200, body: { ok: true, message: 'Initialized git in . with an initial commit.' } });
+    openDrawer([ticket({ status: 'failed', reason: 'not-a-git-repo', agentsMode: 'claude' })]);
+    fireEvent.click(screen.getByRole('button', { name: /initialize git/i }));
+    expect(await screen.findByText('Initialized git in . with an initial commit.')).toBeTruthy();
+    expect(posts().find(c => c.url === '/api/projects/p/git-init')).toBeTruthy();
+  });
+
+  it('Past conversations list: title, date, status, roles, estimate; selecting shows that history', async () => {
+    const a = ticket({ id: 'a', title: 'Add login', status: 'done', stage: 'done', createdAt: new Date(NOW - 2 * 864e5).toISOString(), agentStates: { pm: 'done', frontend: 'done' }, usage: { turns: 12, costUsd: 0.84, durationMs: 360000 } });
+    const b = ticket({ id: 'b', title: 'Dark mode', status: 'failed', stage: 'build', reason: 'interrupted', createdAt: new Date(NOW - 3600e3).toISOString() });
+    useOffice.setState({ feed: { a: [{ kind: 'message', role: 'pm', text: 'Login planned.', id: 'm1', ts: a.createdAt }] } });
+    openDrawer([a, b]);
+    fireEvent.click(screen.getByRole('button', { name: /past conversations/i }));
+    const list = screen.getByRole('list', { name: /past conversations/i });
+    const item = within(list).getByRole('button', { name: /Add login/ });
+    expect(item.textContent).toMatch(/~\$0\.84 est\./);
+    expect(item.textContent).toMatch(/done/);
+    expect(item.textContent).toMatch(/2d ago/);
+    expect(item.textContent).toContain(roleDef('frontend').emoji);
+    fireEvent.click(item);
+    expect(await screen.findByText('Login planned.')).toBeTruthy();
+  });
+
+  it('a selected finished ticket turns the composer into Continue and posts {text, parentTicketId}', async () => {
+    const a = ticket({ id: 'a', title: 'Add login', status: 'done', stage: 'done' });
+    openDrawer([a, ticket({ id: 'b', title: 'Other', status: 'done', stage: 'done', createdAt: '2026-11-26T11:00:00Z' })]);
+    fireEvent.click(screen.getByRole('button', { name: /past conversations/i }));
+    fireEvent.click(within(screen.getByRole('list', { name: /past conversations/i })).getByRole('button', { name: /Add login/ }));
+    expect(box().placeholder).toBe('Continue this conversation…');
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeTruthy();
+    fireEvent.change(box(), { target: { value: 'Also add logout' } });
+    fireEvent.keyDown(box(), { key: 'Enter' });
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(posts()[0]).toMatchObject({ url: '/api/projects/p/tickets', body: { text: 'Also add logout', parentTicketId: 'a' } });
+  });
+
+  it('Resume on an interrupted claude ticket posts resume and shows a 409 inline', async () => {
+    reply = url => (url === '/api/system/claude' ? { status: 200, body: sys } : { status: 409, body: { error: 'Another ticket is running' } });
+    openDrawer([ticket({ status: 'failed', reason: 'interrupted', agentsMode: 'claude', sessions: { pm: 's1' } })]);
+    fireEvent.click(screen.getByRole('button', { name: /^resume/i }));
+    expect(await screen.findByText('Another ticket is running')).toBeTruthy();
+    expect(posts()[0].url).toBe('/api/tickets/t/resume');
+  });
+
+  it('no Resume on a not-a-git-repo failure (the git banner handles it)', () => {
+    openDrawer([ticket({ status: 'failed', reason: 'not-a-git-repo', agentsMode: 'claude' })]);
+    expect(screen.queryByRole('button', { name: /^resume/i })).toBeNull();
+    expect(screen.getByRole('button', { name: /initialize git/i })).toBeTruthy();
+  });
+
+  it('no Resume button on simulated or done tickets', () => {
+    openDrawer([ticket({ status: 'failed', reason: 'interrupted', agentsMode: 'simulated' })]);
+    expect(screen.queryByRole('button', { name: /^resume/i })).toBeNull();
+    cleanup();
+    openDrawer([ticket({ status: 'done', stage: 'done', agentsMode: 'claude' })]);
+    expect(screen.queryByRole('button', { name: /^resume/i })).toBeNull();
+  });
+
+  it('usage line at the end of a finished ticket feed', () => {
+    openDrawer([ticket({ status: 'done', stage: 'done', usage: { turns: 12, costUsd: 0.84, durationMs: 360000 } })]);
+    expect(screen.getByText('12 turns · ~$0.84 estimated · 6 min')).toBeTruthy();
+  });
+
+  it('agents badge in the drawer header', () => {
+    openDrawer();
+    expect(screen.getByText('Claude Code')).toBeTruthy();
+    cleanup();
+    openDrawer([], { agentsMode: 'simulated' });
+    expect(screen.getByText('Simulated')).toBeTruthy();
+  });
+
+  it('Team dialog agents switch PATCHes agentsMode and shows a 409 inline', async () => {
+    const { TeamDialog } = await import('../src/ui/TeamDialog');
+    reply = () => ({ status: 409, body: { error: 'Agents mode can only change when no ticket is running for this project' } });
+    render(<TeamDialog project={P} onClose={() => {}} />);
+    fireEvent.click(screen.getByRole('radio', { name: /simulated/i }));
+    expect(await screen.findByText('Agents mode can only change when no ticket is running for this project')).toBeTruthy();
+    expect(calls.find(c => c.method === 'PATCH')).toMatchObject({ url: '/api/projects/p', body: { agentsMode: 'simulated' } });
+    expect((screen.getByRole('radio', { name: /claude code/i }) as HTMLInputElement).checked).toBe(true);
   });
 });
