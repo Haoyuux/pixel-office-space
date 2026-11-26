@@ -90,9 +90,9 @@ const initial = () => ({
 
 const NIGHT_KEY = 'pixel-office.night';
 type NightStorage = Pick<Storage, 'getItem'>;
-/** Day by default; the owner's last ☀/🌙 choice is remembered in this browser. */
+/** Night by default; the owner's last ☀/🌙 choice is remembered in this browser. */
 export function initialNight(storage: NightStorage | undefined = typeof localStorage === 'undefined' ? undefined : localStorage): boolean {
-  try { return storage?.getItem(NIGHT_KEY) === '1'; } catch { return false; }
+  try { return storage?.getItem(NIGHT_KEY) !== '0'; } catch { return true; }
 }
 
 export const useOffice = create<OfficeState>()((set, get) => ({

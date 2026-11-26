@@ -80,15 +80,15 @@ describe('day/night default', () => {
     const m = new Map(Object.entries(init));
     return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => { m.set(k, v); }, map: m };
   };
-  it('opens in day mode when nothing is remembered', () => {
-    expect(initialNight(fakeStorage())).toBe(false);
+  it('opens in night mode when nothing is remembered', () => {
+    expect(initialNight(fakeStorage())).toBe(true);
   });
   it('restores the remembered choice', () => {
     expect(initialNight(fakeStorage({ 'pixel-office.night': '1' }))).toBe(true);
     expect(initialNight(fakeStorage({ 'pixel-office.night': '0' }))).toBe(false);
   });
   it('survives storage that throws', () => {
-    expect(initialNight({ getItem: () => { throw new Error('blocked'); } } as any)).toBe(false);
+    expect(initialNight({ getItem: () => { throw new Error('blocked'); } } as any)).toBe(true);
   });
   it('setNight remembers the choice', () => {
     const s = fakeStorage();

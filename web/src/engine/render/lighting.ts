@@ -37,7 +37,7 @@ export class Lighting {
   private sky!: Graphics;
   private byTag = new Map<string, Sprite[]>();
 
-  constructor(private app: Application, private world: Container, night = false) {
+  constructor(private app: Application, private world: Container, night = true) {
     this.night = night;
   }
 
