@@ -47,6 +47,8 @@ const GATE_DECISIONS: Record<GateKind, GateDecision[]> = {
 };
 export const MAX_BOUNCES = 3;
 export const NOT_A_GIT_REPO = 'not-a-git-repo';
+const EDITORS: RoleId[] = ['frontend', 'backend', 'devops', 'uiux', 'writer'];
+const TEST_FILE = /(^|[\\/])(tests?|__tests__|spec)[\\/]|\.(test|spec)\.[a-z0-9]+$/i;
 const MAP_FILE = path.join('.claude', 'office', 'project-map.md');
 
 interface Issue { role: RoleId; file?: string; note: string }
@@ -64,6 +66,8 @@ interface Run {
   base?: { branch: string; head: string };
   wt?: { path: string; branch: string };
   usage: { turns: number; costUsd: number; durationMs: number };
+  /** The final merge is in progress: cancel is refused. */
+  merging?: boolean;
   /** Set once the ticket ended (done/failed/cancelled): late async results are dropped. */
   ended: boolean;
 }
@@ -106,6 +110,7 @@ export class ClaudeOrchestrator implements Orchestrator {
   adopt(project: Project, ticket: Ticket): void {
     const run = this.newRun(project, ticket, 1_000_000);
     run.sessions = { ...(ticket.sessions ?? {}) };
+    if (ticket.usage) run.usage = { ...ticket.usage };
     this.enqueue(run);
   }
 
@@ -121,6 +126,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     }
     if (gate === 'final') {
       if (decision === 'changes') return this.bg(run, () => this.reworkFinal(run, note));
+      run.merging = true;
       return this.bg(run, () => this.approveFinal(run));
     }
     // stuck
@@ -157,6 +163,7 @@ export class ClaudeOrchestrator implements Orchestrator {
       return;
     }
     if (run.ended || this.currentByProject.get(run.project.id) !== ticketId) throw new ConflictError('Ticket is not active');
+    if (run.merging) throw new ConflictError("Ticket is merging — can't cancel now");
     this.finish(run, 'cancelled');
   }
 
@@ -228,6 +235,7 @@ export class ClaudeOrchestrator implements Orchestrator {
       prompt = planPrompt(run.ticket, run.project, map);
       if (note) prompt += `\n\nOwner note on the previous plan:\n<owner-note>\n${note}\n</owner-note>`;
     }
+    prompt = this.withNotes(run, 'pm', prompt);
     const plan = await this.structured(run, 'pm', 'plan', folder, prompt, resume, planValidator(run.project.team), 'plan');
     const { projectMap, ...clean } = plan;
     run.plan = clean;
@@ -253,12 +261,43 @@ export class ClaudeOrchestrator implements Orchestrator {
       fs.mkdirSync(path.dirname(f), { recursive: true });
       fs.writeFileSync(f, run.projectMap);
     }
+    if (info.branch === 'HEAD') {
+      this.message(run, 'pm', 'Heads-up: your project folder is on a detached HEAD (not on a branch). I will work on a new branch, ' +
+        'but it cannot be merged automatically at the end; you will get the commands to run.');
+    }
     this.log(run, 'pm', `Working on branch ${run.wt.branch} (base ${info.branch} @ ${info.head.slice(0, 7)})`);
   }
 
+  /**
+   * Roles with a plan task that are still on the team (a role can be removed while the plan gate is open). Reviewers
+   * (techlead, security) and QA on the team are always included once any design/build role is tasked, so review and
+   * test never depend on the PM tasking them.
+   */
   private tasked(run: Run): Set<RoleId> {
     const team = run.project.team;
-    return new Set((run.plan?.tasks ?? []).map(t => t.role).filter(r => team.includes(r)));
+    const set = new Set((run.plan?.tasks ?? []).map(t => t.role).filter(r => team.includes(r)));
+    if ([...STAGE_ROLES.design, ...STAGE_ROLES.build].some(r => set.has(r))) {
+      for (const r of [...STAGE_ROLES.review, ...STAGE_ROLES.test]) if (team.includes(r)) set.add(r);
+    }
+    return set;
+  }
+
+  /**
+   * Route review/test issues to roles that can fix them: tasked editable roles keep theirs (qa only for test files
+   * flagged by review); everything else (pm, reviewers, untasked or off-team roles) goes to every tasked builder.
+   */
+  private route(run: Run, stage: BounceFrom, issues: Issue[]): Issue[] {
+    const tasked = this.tasked(run);
+    const can = (i: Issue) => tasked.has(i.role) && (EDITORS.includes(i.role)
+      || (i.role === 'qa' && stage === 'review' && !!i.file && TEST_FILE.test(i.file)));
+    let fixers = this.rolesFor(run, 'build');
+    if (!fixers.length) fixers = [...tasked].filter(r => EDITORS.includes(r));
+    const out: Issue[] = [];
+    for (const i of issues) {
+      if (can(i)) out.push(i);
+      else for (const f of fixers) out.push({ role: f, file: i.file, note: `[for ${i.role}] ${i.note}` });
+    }
+    return out;
   }
 
   private rolesFor(run: Run, stage: WorkStage): RoleId[] {
@@ -310,15 +349,13 @@ export class ClaudeOrchestrator implements Orchestrator {
       if (stage === 'test') await this.commit(run, 'office: test (qa)');
       for (const r of roles) this.state(run, r, 'waiting');
       if (unassigned.length) {
-        this.message(run, 'pm', `Some ${stage} findings are for roles not on this team, so no one can fix them automatically:\n` +
+        this.message(run, 'pm', `Some ${stage} findings are for roles not on this team; passing them to the builders:\n` +
           unassigned.map(i => `- [${i.role}] ${i.file ? i.file + ': ' : ''}${i.note}`).join('\n'));
       }
-      // nobody on the team owns the problems (or a bare "not approved"): give them to the builders
-      if (!approved && !issues.length) {
-        const builders = this.rolesFor(run, 'build');
-        const note = unassigned.length ? unassigned.map(i => i.note).join('\n') : `The ${stage === 'review' ? 'review' : 'tests'} did not pass.`;
-        for (const b of builders) issues.push({ role: b, note });
-      }
+      const all: Issue[] = [...issues, ...unassigned];
+      // a bare "not approved" with no items still goes to the builders
+      if (!approved && !all.length) all.push({ role: 'pm', note: `The ${stage === 'review' ? 'review' : 'tests'} did not pass.` });
+      issues.splice(0, issues.length, ...this.route(run, stage, all));
       if (approved || !issues.length) return this.next(run, stage);
       run.lastIssues = issues;
       run.bounces[stage]++;
@@ -366,6 +403,10 @@ export class ClaudeOrchestrator implements Orchestrator {
     for (const r of owners) this.state(run, r, 'waiting');
   }
 
+  /**
+   * Final "Request changes": the note goes straight to every tasked builder and Build re-runs. Deliberate deviation
+   * from design §5 step 9 ("PM decides which devs" by resuming the PM's session), ratified by the designer.
+   */
   private async reworkFinal(run: Run, note?: string) {
     const builders = this.rolesFor(run, 'build');
     if (note) {

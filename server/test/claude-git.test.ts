@@ -144,6 +144,27 @@ describe('git helper', () => {
     expect(git(r, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('other');
   });
 
+  it('merge refused when the base or the owner is on a detached HEAD', async () => {
+    const r = await mkRepo();
+    const base = (await baseInfo(r)).branch;
+    const wt = path.join(tmp(), 'wt');
+    await createWorktree(r, wt, 'office/d-444444', base);
+    fs.writeFileSync(path.join(wt, 'b.txt'), 'b');
+    await commitAll(wt, 'm');
+    const head = git(r, 'rev-parse', 'HEAD');
+    git(r, 'checkout', '-q', '--detach');
+    for (const b of ['HEAD', base]) {
+      const res = await mergeIntoBase(r, 'office/d-444444', b);
+      expect(res.merged).toBe(false);
+      if (!res.merged) {
+        expect(res.reason).toMatch(/not on a branch/i);
+        expect(res.instructions).toContain('git merge --no-ff office/d-444444');
+        expect(res.instructions).toMatch(/git checkout/);
+      }
+    }
+    expect(git(r, 'rev-parse', 'HEAD')).toBe(head);
+  });
+
   it('merge conflict is aborted and reported', async () => {
     const r = await mkRepo();
     const base = (await baseInfo(r)).branch;
