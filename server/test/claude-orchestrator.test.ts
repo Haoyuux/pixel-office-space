@@ -405,3 +405,175 @@ describe('ClaudeOrchestrator', () => {
     }
   });
 });
+
+const until = async (cond: () => boolean, ms = 5000) => {
+  const end = Date.now() + ms;
+  while (!cond()) { if (Date.now() > end) throw new Error('timeout'); await new Promise(r => setTimeout(r, 5)); }
+};
+const tevents = (id: string) => events.filter((e: any) => e.ticketId === id) as any[];
+
+describe('ClaudeOrchestrator: follow-ups, resume, messages', () => {
+  let repo: string;
+  beforeEach(() => { repo = mkRepo(); });
+
+  async function doneUnmerged(o: ClaudeOrchestrator) {
+    const t = await toFinal(o, repo);
+    fs.writeFileSync(path.join(repo, 'dirty.txt'), 'x');
+    o.decide(t.id, 'final', 'approved');
+    await o.idle();
+    fs.rmSync(path.join(repo, 'dirty.txt'));
+    return t;
+  }
+
+  it('follow-up resumes the parent PM session; re-tasked devs resume theirs; unmerged → same branch (worktree recreated)', async () => {
+    const o = make();
+    const t1 = await doneUnmerged(o);
+    const parent = o.find(t1.id)!;
+    expect(parent.workspace?.merged).toBeUndefined();
+    expect(fs.existsSync(parent.workspace!.worktree)).toBe(false);
+    const t2 = o.startTicket(project(repo), 'Also add a help link', { parentTicketId: t1.id });
+    expect(t2.parentTicketId).toBe(t1.id);
+    expect(t2.agentsMode).toBe('claude');
+    await o.idle();
+    const pm = runner.of('pm', 'plan').at(-1)!;
+    expect(pm.o.resume).toBe(parent.sessions!.pm);
+    expect(pm.o.prompt).toContain('follow-up');
+    expect(pm.o.prompt).toContain('Also add a help link');
+    o.decide(t2.id, 'plan', 'approved');
+    await o.idle();
+    const fe = runner.of('frontend', 'stage').at(-1)!;
+    expect(fe.o.resume).toBe(parent.sessions!.frontend);
+    const ws = o.find(t2.id)!.workspace!;
+    expect(ws.branch).toBe(parent.workspace!.branch);
+    expect(fe.o.cwd).toBe(parent.workspace!.worktree);
+    expect(git(ws.worktree, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(parent.workspace!.branch);
+    // the inherited sessions are persisted in the follow-up's own log (Resume after restart)
+    expect(tevents(t2.id).filter(e => e.type === 'agent.session').map(e => e.role)).toContain('pm');
+  });
+
+  it('follow-up of a merged parent → new branch from the current base', async () => {
+    const o = make();
+    const t1 = await toFinal(o, repo);
+    o.decide(t1.id, 'final', 'approved');
+    await o.idle();
+    expect(o.find(t1.id)!.workspace!.merged).toBe(true);
+    const t2 = o.startTicket(project(repo), 'Next thing', { parentTicketId: t1.id });
+    await o.idle();
+    o.decide(t2.id, 'plan', 'approved');
+    await o.idle();
+    const ws = o.find(t2.id)!.workspace!;
+    expect(ws.branch).not.toBe(o.find(t1.id)!.workspace!.branch);
+    expect(ws.base.head).toBe(git(repo, 'rev-parse', 'HEAD'));
+  });
+
+  it('expired parent session → fresh session with the parent plan + diff summary', async () => {
+    const o = make();
+    const t1 = await doneUnmerged(o);
+    const old = o.find(t1.id)!.sessions!.pm;
+    runner.script = c => c.o.role === 'pm' && c.o.resume === old ? { isError: true, result: 'No conversation found', subtype: 'error_during_execution' } : undefined;
+    const t2 = o.startTicket(project(repo), 'More', { parentTicketId: t1.id });
+    await o.idle();
+    const pms = runner.of('pm').slice(-2);
+    expect(pms[0].o.resume).toBe(old);
+    expect(pms[1].o.resume).toBeUndefined();
+    expect(pms[1].o.prompt).toContain('<previous-work>');
+    expect(pms[1].o.prompt).toContain('Add link');
+    expect(pms[1].o.prompt).toContain('ui.txt');
+    expect(o.find(t2.id)!.openGate).toBe('plan');
+    expect(o.find(t2.id)!.sessions!.pm).not.toBe(old);
+  });
+
+  it('follow-up while the parent is running is queued (never two runs on one session)', async () => {
+    const o = make();
+    const t1 = await toPlanGate(o, repo);
+    const t2 = o.startTicket(project(repo), 'Follow', { parentTicketId: t1.id });
+    await o.idle();
+    expect(o.queue('p1').map(t => t.id)).toEqual([t2.id]);
+    expect(runner.of('pm')).toHaveLength(1);
+    o.cancel(t1.id);
+    await o.idle();
+    expect(runner.of('pm').at(-1)!.o.resume).toBe(o.find(t1.id)!.sessions!.pm);
+    expect(runner.of('pm').at(-1)!.started).toBeGreaterThan(runner.of('pm')[0].ended!);
+  });
+
+  it('interrupted ticket → resume re-runs the interrupted stage with the stored sessions after a restart', async () => {
+    const o = make();
+    runner.script = c => c.o.role === 'frontend' && c.kind === 'stage' ? { hang: true } : undefined;
+    const t = await toPlanGate(o, repo);
+    o.decide(t.id, 'plan', 'approved');
+    await until(() => runner.of('frontend', 'stage').length === 1 && runner.of('backend', 'stage')[0]?.ended !== undefined);
+    const feSession = o.find(t.id)!.sessions!.frontend!;
+    // restart: a new orchestrator over the same log
+    const log = new TicketLog(path.join(dataDir, 'tickets'));
+    const rec = log.recover().find(x => x.id === t.id)!;
+    expect(rec.reason).toBe('interrupted');
+    const r2 = new FakeRunner();
+    const o2 = new ClaudeOrchestrator({ log, runner: r2, dataDir, getProject: () => project(repo) });
+    const resumed = o2.resume(t.id);
+    expect(resumed.status).not.toBe('failed');
+    await o2.idle();
+    const fe = r2.of('frontend', 'stage')[0];
+    expect(fe.o.resume).toBe(feSession);
+    expect(fe.o.prompt.startsWith('Continue where you left off.')).toBe(true);
+    expect(fe.o.cwd).toBe(path.join(dataDir, 'worktrees', 'p1', t.id));
+    expect(r2.of('pm')).toHaveLength(0);
+    expect(o2.find(t.id)!.openGate).toBe('final');
+    expect(() => o2.resume(t.id)).toThrow(/active/);
+  });
+
+  it('resume refuses tickets that did not fail', async () => {
+    const o = make();
+    const t = await toPlanGate(o, repo);
+    expect(() => o.resume(t.id)).toThrow(/active/);
+    o.cancel(t.id);
+    await o.idle();
+    expect(() => o.resume(t.id)).toThrow(/failed or interrupted/);
+  });
+
+  it('mid-ticket message → immediate ack, prepended in <owner-notes> to the role’s next prompt', async () => {
+    const o = make();
+    runner.script = (c, n) => c.o.role === 'techlead' && c.kind === 'review' && n === 1
+      ? { result: fence({ approved: false, issues: [{ role: 'backend', file: 'api.txt', note: 'fix' }] }), delay: 150 } : undefined;
+    const t = await toPlanGate(o, repo);
+    o.decide(t.id, 'plan', 'approved');
+    await until(() => runner.of('techlead', 'review').length === 1);
+    o.sendMessage(t.id, 'Check the error handling');
+    const ack = of('agent.message').at(-1)!;
+    expect(ack.role).toBe('techlead');
+    expect(ack.text).toMatch(/Got it/);
+    await o.idle();
+    const second = runner.of('techlead', 'review')[1];
+    expect(second.o.prompt.indexOf('<owner-notes>')).toBeGreaterThan(-1);
+    expect(second.o.prompt.indexOf('<owner-notes>')).toBeLessThan(second.o.prompt.indexOf('Review the changes'));
+    expect(second.o.prompt).toContain('Check the error handling');
+  });
+
+  it('message with no further step pending → role session resumed with it after its current run ends', async () => {
+    const o = make();
+    runner.script = c => c.o.role === 'frontend' && c.kind === 'stage' && !c.o.prompt.includes('owner-notes')
+      ? { result: 'done', write: { 'ui.txt': 'ui\n' }, delay: 120 } : undefined;
+    const t = await toPlanGate(o, repo);
+    o.decide(t.id, 'plan', 'approved');
+    await until(() => runner.of('frontend', 'stage').length === 1 && runner.of('backend', 'stage')[0]?.ended !== undefined);
+    o.sendMessage(t.id, 'Make the link bold');
+    await o.idle();
+    const fes = runner.of('frontend');
+    const delivery = fes.find(c => c.o.prompt.includes('Make the link bold'))!;
+    expect(delivery).toBeTruthy();
+    expect(delivery.o.resume).toBe(o.find(t.id)!.sessions!.frontend);
+    expect(delivery.started).toBeGreaterThan(fes[0].ended!);
+    // delivered before the stage commit and the review
+    expect(delivery.ended!).toBeLessThan(runner.of('techlead', 'review')[0].started);
+  });
+
+  it('PM between stages: message resumes the PM session right away', async () => {
+    const o = make();
+    const t = await toPlanGate(o, repo);
+    o.sendMessage(t.id, 'Keep it small');
+    await o.idle();
+    const last = runner.of('pm').at(-1)!;
+    expect(last.o.prompt).toContain('Keep it small');
+    expect(last.o.resume).toBe(o.find(t.id)!.sessions!.pm);
+    expect(o.find(t.id)!.openGate).toBe('plan');
+  });
+});
