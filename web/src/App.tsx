@@ -35,6 +35,8 @@ function DemoOffice({ n }: { n: number }) {
 /** Projects and tickets from the server: snapshot + events over the socket, driven by the ticket director. */
 function LiveOffice() {
   useEffect(() => startOffice(), []);
+  // dev-only hook so tools/e2e.mjs can select a room / read the feed without pixel-hunting
+  if (import.meta.env.DEV) (window as unknown as { __store?: typeof useOffice }).__store = useOffice;
   const synced = useOffice(s => s.synced);
   const map = useOffice(s => s.projects);
   const selected = useOffice(s => s.selectedProjectId);

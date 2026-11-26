@@ -16,16 +16,22 @@ assets/
 
 ## Run
 
-```
-npm install
-npm run dev
-```
+1. `npm install`
+2. Put the art packs in `assets/` (layout above).
+3. `npm run dev` (starts the server and Vite together)
+4. Open http://127.0.0.1:5173
 
-Open http://127.0.0.1:5173. The server listens on 127.0.0.1:5175 and keeps data in `server/data/`.
+The server listens on 127.0.0.1:5175 (Vite proxies `/api`, `/ws`, `/assets`) and keeps data in `server/data/`.
+Environment overrides: `OFFICE_DATA` (data dir), `OFFICE_PORT`, `OFFICE_STAGE_MS="min,max"` (simulated stage length in ms).
 
 ## Test
 
 ```
 npm test                                   # unit tests, all packages
-node tools/shot.mjs <url> <out.png> [js]   # headless screenshot once the page reports READY
+npx tsc -p web --noEmit                    # type-check the web app
+node tools/e2e.mjs                         # full walkthrough: starts server + Vite + headless Chrome, prints "e2e ok", screenshots to shots/
+node tools/shot.mjs <url> <out.png> [js]   # one headless screenshot once the page reports READY
 ```
+
+The e2e needs Chrome at `C:/Program Files/Google/Chrome/Application/chrome.exe` and free ports 5173 and 5175.
+`spike/v2.html` is the original visual reference for the look of the office.
