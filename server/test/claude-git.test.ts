@@ -229,6 +229,46 @@ describe('git helper', () => {
     expect(d.path).toBe(wt);
   });
 
+  it('gitInit refuses an unreadable pre-existing .git and leaves it untouched', async () => {
+    const d = tmp();
+    fs.mkdirSync(path.join(d, '.git'));
+    fs.writeFileSync(path.join(d, '.git', 'junk'), 'garbage\u0000bytes');
+    fs.writeFileSync(path.join(d, 'a.txt'), 'a');
+    await expect(gitInit(d)).rejects.toThrow(/\.git/);
+    expect(fs.readdirSync(path.join(d, '.git'))).toEqual(['junk']);
+    expect(fs.readFileSync(path.join(d, '.git', 'junk'), 'utf8')).toBe('garbage\u0000bytes');
+    expect(fs.existsSync(path.join(d, '.gitignore'))).toBe(false);
+  });
+
+  it('gitInit failure cleanup removes only what it created', async () => {
+    const d = tmp();
+    fs.writeFileSync(path.join(d, 'a.txt'), 'a');
+    process.env.GIT_INDEX_FILE = path.join(d, 'no-such-dir', 'index');
+    try {
+      await expect(gitInit(d)).rejects.toThrow(/Could not initialize/);
+    } finally {
+      delete process.env.GIT_INDEX_FILE;
+    }
+    expect(fs.existsSync(path.join(d, '.git'))).toBe(false);
+    expect(fs.existsSync(path.join(d, '.gitignore'))).toBe(false);
+    expect(fs.readFileSync(path.join(d, 'a.txt'), 'utf8')).toBe('a');
+  });
+
+  it('gitInit failure keeps a pre-existing .gitignore and real repo', async () => {
+    const r = await mkRepo();
+    fs.writeFileSync(path.join(r, '.gitignore'), 'mine\n');
+    git(r, 'add', '-A');
+    git(r, 'commit', '-q', '-m', 'x');
+    process.env.GIT_INDEX_FILE = path.join(r, 'no-such-dir', 'index');
+    try {
+      await expect(gitInit(r)).rejects.toThrow();
+    } finally {
+      delete process.env.GIT_INDEX_FILE;
+    }
+    expect(fs.existsSync(path.join(r, '.git'))).toBe(true);
+    expect(fs.readFileSync(path.join(r, '.gitignore'), 'utf8')).toBe('mine\n');
+  });
+
   it('ignores local gpgsign and failing hooks', async () => {
     const r = await mkRepo();
     git(r, 'config', 'commit.gpgsign', 'true');
