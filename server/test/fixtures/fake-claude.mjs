@@ -43,7 +43,14 @@ switch (mode) {
     const env = {};
     for (const k of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY']) env[k] = k in process.env;
     env.PATH = Object.keys(process.env).some(k => k.toUpperCase() === 'PATH');
-    result(JSON.stringify({ args: process.argv.slice(3), env, cwd: process.cwd() }));
+    const prompt = fs.readFileSync(0, 'utf8'); // like `claude -p` with no prompt arg: the prompt is stdin
+    result(JSON.stringify({ args: process.argv.slice(3), env, cwd: process.cwd(), prompt }));
+    break;
+  }
+  case 'auth-error': {
+    // Shape of the CLI's failure when login/credentials are bad: an error result line, then a non-zero exit.
+    result('Invalid API key · Please run /login', { is_error: true, num_turns: 0, total_cost_usd: 0 });
+    process.exitCode = 1;
     break;
   }
   default:

@@ -41,7 +41,7 @@ export interface TranslateContext {
 
 export const newTranslateContext = (cwd?: string): TranslateContext => ({ cwd, tools: new Map() });
 
-function toolDetail(name: string, input: Record<string, unknown>): string | undefined {
+function toolDetail(input: Record<string, unknown>): string | undefined {
   if (typeof input?.command === 'string') return cap(input.command, DETAIL_MAX);
   const keys = Object.keys(input ?? {});
   if (!keys.length) return undefined;
@@ -50,14 +50,14 @@ function toolDetail(name: string, input: Record<string, unknown>): string | unde
 
 /**
  * Runner event → partial ServerEvents (no projectId/ticketId/seq/ts; the orchestrator adds those).
- * Pass one context per run so tool results get the summary of their tool_use.
+ * `ctx` is required: create one per run with newTranslateContext(cwd) so tool results repeat their tool_use summary.
  */
-export function translate(role: RoleId, e: RunnerEvent, ctx: TranslateContext = newTranslateContext()): Partial<ServerEvent>[] {
+export function translate(role: RoleId, e: RunnerEvent, ctx: TranslateContext): Partial<ServerEvent>[] {
   switch (e.kind) {
     case 'text':
       return [{ type: 'agent.message', role, text: e.text, streaming: false, messageId: randomUUID() }];
     case 'tool_use': {
-      const info = { tool: e.name, summary: toolSummary(e.name, e.input, ctx.cwd), detail: toolDetail(e.name, e.input) };
+      const info = { tool: e.name, summary: toolSummary(e.name, e.input, ctx.cwd), detail: toolDetail(e.input) };
       ctx.tools.set(e.id, info);
       return [{ type: 'agent.tool', role, ...info, status: 'running', toolId: e.id }];
     }

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ClaudeRunner, buildArgs, childEnv, parseLine, resolveClaudeBin, resolveClaudeBinArgs,
-  type RunnerEvent, type RunOptions, type RunResult,
+  type RunnerEvent, type RunOptions, type ResultLine,
 } from '../src/claude/runner';
 import { translate, toolSummary, newTranslateContext } from '../src/claude/translate';
 
@@ -15,7 +15,7 @@ const FAKE = path.join(here, 'fixtures', 'fake-claude.mjs');
 
 function parseFixture(name: string) {
   const events: RunnerEvent[] = [];
-  let result: RunResult | undefined;
+  let result: ResultLine | undefined;
   for (const line of fs.readFileSync(path.join(FIX, name), 'utf8').split('\n')) {
     if (!line.trim()) continue;
     const r = parseLine(line);
@@ -84,14 +84,15 @@ describe('env, args, binary', () => {
   it('builds args exactly, without and with resume', () => {
     const base = { cwd: '.', role: 'backend' as const, prompt: 'do it', allowedTools: ['Read', 'Bash(npm *)'], maxTurns: 80, onEvent: () => {} };
     expect(buildArgs(base)).toEqual([
-      '-p', 'do it', '--agent', 'backend', '--output-format', 'stream-json', '--verbose',
+      '-p', '--agent', 'backend', '--output-format', 'stream-json', '--verbose',
       '--permission-mode', 'dontAsk', '--max-turns', '80', '--allowedTools', 'Read', 'Bash(npm *)',
     ]);
     expect(buildArgs({ ...base, resume: 'sess-1' })).toEqual([
-      '-p', 'do it', '--agent', 'backend', '--output-format', 'stream-json', '--verbose',
+      '-p', '--agent', 'backend', '--output-format', 'stream-json', '--verbose',
       '--permission-mode', 'dontAsk', '--max-turns', '80', '--resume', 'sess-1', '--allowedTools', 'Read', 'Bash(npm *)',
     ]);
     expect(buildArgs(base)).not.toContain('--bare');
+    expect(buildArgs(base)).not.toContain('do it'); // the prompt goes via stdin
   });
 
   it('resolves the binary: CLAUDE_BIN → ~/.local/bin/claude(.exe) → claude', () => {
@@ -112,7 +113,7 @@ describe('ClaudeRunner with a fake binary', () => {
   it('runs a recorded fixture end to end', async () => {
     const got: RunnerEvent[] = [];
     const r = await fake('fixture', path.join(FIX, 'dev-read-edit.jsonl')).run(opts({ onEvent: e => got.push(e) }));
-    expect(r).toMatchObject({ sessionId: '8b0a1d87-dee6-4493-90d2-5aba2ca6e6be', result: 'done', isError: false });
+    expect(r).toMatchObject({ sessionId: '8b0a1d87-dee6-4493-90d2-5aba2ca6e6be', result: 'done', isError: false, exitCode: 0 });
     expect(got.filter(e => e.kind === 'tool_use')).toHaveLength(2);
   });
 
@@ -126,6 +127,7 @@ describe('ClaudeRunner with a fake binary', () => {
       const r = await new ClaudeRunner().run(opts({ cwd, resume: 's9', allowedTools: ['Read', 'Glob'] }));
       const info = JSON.parse(r.result);
       expect(info.args).toEqual(buildArgs(opts({ resume: 's9', allowedTools: ['Read', 'Glob'] })));
+      expect(info.prompt).toBe('hi');
       expect(info.env.ANTHROPIC_API_KEY).toBe(false);
       expect(info.env.PATH).toBe(true);
       expect(fs.realpathSync(info.cwd)).toBe(fs.realpathSync(cwd));
@@ -133,6 +135,19 @@ describe('ClaudeRunner with a fake binary', () => {
       for (const k of ['CLAUDE_BIN', 'CLAUDE_BIN_ARGS', 'ANTHROPIC_API_KEY']) delete process.env[k];
       Object.assign(process.env, saved);
     }
+  });
+
+  it('sends the prompt via stdin: huge, multi-line, quotes, leading dash', async () => {
+    const prompt = '-starts with a dash\nline "two" with quotes & %PATH% \\ back — ünïcode\n' + 'x'.repeat(100_000);
+    const r = await fake('introspect').run(opts({ prompt }));
+    const info = JSON.parse(r.result);
+    expect(info.prompt).toBe(prompt);
+    expect(info.args).not.toContain(prompt);
+  });
+
+  it('an error result (e.g. auth) resolves with isError and the exit code; callers must check', async () => {
+    const r = await fake('auth-error').run(opts());
+    expect(r).toMatchObject({ isError: true, subtype: 'success', result: 'Invalid API key · Please run /login', exitCode: 1 });
   });
 
   it('non-JSON stdout line → raw event, run still resolves', async () => {
@@ -204,12 +219,12 @@ describe('translate', () => {
   });
 
   it('text → agent.message, everything raw → log.raw', () => {
-    const [m] = translate('pm', { kind: 'text', text: 'hello' });
+    const [m] = translate('pm', { kind: 'text', text: 'hello' }, newTranslateContext());
     expect(m).toMatchObject({ type: 'agent.message', role: 'pm', text: 'hello', streaming: false });
     expect(typeof (m as any).messageId).toBe('string');
-    expect(translate('pm', { kind: 'raw', line: '{"a":1}' })).toEqual([{ type: 'log.raw', role: 'pm', line: '{"a":1}' }]);
-    expect(translate('pm', { kind: 'init', sessionId: 's', model: 'm' })).toEqual([]);
-    for (const e of [...translate('pm', { kind: 'text', text: 'x' }), ...translate('pm', { kind: 'raw', line: 'x' })]) {
+    expect(translate('pm', { kind: 'raw', line: '{"a":1}' }, newTranslateContext())).toEqual([{ type: 'log.raw', role: 'pm', line: '{"a":1}' }]);
+    expect(translate('pm', { kind: 'init', sessionId: 's', model: 'm' }, newTranslateContext())).toEqual([]);
+    for (const e of [...translate('pm', { kind: 'text', text: 'x' }, newTranslateContext()), ...translate('pm', { kind: 'raw', line: 'x' }, newTranslateContext())]) {
       expect(e).not.toHaveProperty('projectId'); expect(e).not.toHaveProperty('seq'); expect(e).not.toHaveProperty('ts');
     }
   });

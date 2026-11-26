@@ -29,9 +29,20 @@ export interface RunOptions {
   onEvent(e: RunnerEvent): void;
 }
 
+/**
+ * Outcome of a run that produced a `result` line. NOTE: a run can resolve and still have failed. The CLI reports
+ * failures such as bad login/credentials, API errors or max-turns as an error result (often with a non-zero exit).
+ * Callers must check `isError`, `subtype` (e.g. 'error_max_turns') and `exitCode`. The promise rejects only on
+ * abort, timeout, a failed spawn, or an exit with no result line.
+ */
 export interface RunResult {
   sessionId: string; result: string; isError: boolean; subtype: string; numTurns: number; costUsd: number; durationMs: number;
+  /** Process exit code (null if it ended by a signal). */
+  exitCode: number | null;
 }
+
+/** The fields carried by a `result` line (everything but the exit code). */
+export type ResultLine = Omit<RunResult, 'exitCode'>;
 
 /** `CLAUDE_BIN` env → `~/.local/bin/claude(.exe)` → `claude` on PATH. */
 export function resolveClaudeBin(env: NodeJS.ProcessEnv = process.env, exists: (p: string) => boolean = existsSync): string {
@@ -61,8 +72,12 @@ export function childEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return out;
 }
 
-export function buildArgs(o: Pick<RunOptions, 'prompt' | 'role' | 'maxTurns' | 'resume' | 'allowedTools'>): string[] {
-  const args = ['-p', o.prompt, '--agent', o.role, '--output-format', 'stream-json', '--verbose',
+/**
+ * CLI args. The prompt is NOT among them: a bare `-p` makes the CLI read the prompt from stdin, which avoids the
+ * ~32K Windows command-line limit and any quoting issues (newlines, quotes, a leading '-'). Checked with claude 2.1.332.
+ */
+export function buildArgs(o: Pick<RunOptions, 'role' | 'maxTurns' | 'resume' | 'allowedTools'>): string[] {
+  const args = ['-p', '--agent', o.role, '--output-format', 'stream-json', '--verbose',
     '--permission-mode', 'dontAsk', '--max-turns', String(o.maxTurns)];
   if (o.resume) args.push('--resume', o.resume);
   // --allowedTools is variadic, so it goes last. Omitted when empty (the CLI rejects a bare flag).
@@ -80,7 +95,7 @@ function contentText(c: unknown): string {
 }
 
 /** Parse one stdout line. Every line yields a `raw` event first; known JSON shapes add typed events. */
-export function parseLine(line: string): { events: RunnerEvent[]; result?: RunResult } {
+export function parseLine(line: string): { events: RunnerEvent[]; result?: ResultLine } {
   const events: RunnerEvent[] = [{ kind: 'raw', line }];
   let o: any;
   try { o = JSON.parse(line); } catch { return { events }; }
@@ -137,14 +152,18 @@ export class ClaudeRunner {
       try {
         child = spawn(this.bin, [...this.binArgs, ...buildArgs(o)], {
           cwd: o.cwd, env: childEnv(process.env), shell: false, windowsHide: true,
-          detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'],
+          detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'],
         });
       } catch (e) {
         reject(new Error(`could not start claude (${this.bin}): ${(e as Error).message}`));
         return;
       }
 
-      let result: RunResult | undefined;
+      // The prompt goes via stdin. If the child dies early, writing fails with EPIPE; the exit is handled by 'close'.
+      child.stdin!.on('error', () => {});
+      child.stdin!.end(o.prompt);
+
+      let result: ResultLine | undefined;
       let sessionId = '';
       let stderr = '';
       let stopReason: Error | null = null;
@@ -164,7 +183,9 @@ export class ClaudeRunner {
         stopReason = reason;
         killTree(child, this.graceMs, () => {
           // Forced kill issued; if streams never close (an orphan holding a pipe), settle anyway.
-          timers.push(setTimeout(() => finish(stopReason), 2000));
+          const t = setTimeout(() => finish(stopReason), 2000);
+          t.unref();
+          timers.push(t);
         });
       };
       const onAbort = () => stop(namedError('AbortError', 'claude run aborted'));
@@ -194,7 +215,7 @@ export class ClaudeRunner {
       });
       child.on('close', code => {
         if (stopReason) return finish(stopReason);
-        if (result) return finish(null, { ...result, sessionId: result.sessionId || sessionId });
+        if (result) return finish(null, { ...result, sessionId: result.sessionId || sessionId, exitCode: code });
         finish(new Error(`claude exited with code ${code} without a result${stderr.trim() ? `:\n${stderr.trim()}` : ''}`));
       });
     });
