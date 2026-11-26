@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { Project, ServerEvent, Ticket } from '@office/shared';
-import { useOffice, resetOffice } from '../src/state/store';
+import { useOffice, resetOffice, initialNight } from '../src/state/store';
 
 const P: Project = { id: 'p', name: 'Shop', folder: '.', accent: 'cyan', team: ['pm', 'frontend'], slot: 0, looks: {} as Project['looks'], createdAt: '' };
 const T: Ticket = { id: 't', projectId: 'p', title: 'Add login', text: 'Add login', status: 'queued', stage: null, agentStates: {}, createdAt: '' };
@@ -72,5 +72,31 @@ describe('office store', () => {
     useOffice.getState().applyHistory('p', [T], { t: all });
     expect(feed()).toHaveLength(3);
     expect(useOffice.getState().tickets.t.stage).toBe('plan');
+  });
+});
+
+describe('day/night default', () => {
+  const fakeStorage = (init: Record<string, string> = {}) => {
+    const m = new Map(Object.entries(init));
+    return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => { m.set(k, v); }, map: m };
+  };
+  it('opens in day mode when nothing is remembered', () => {
+    expect(initialNight(fakeStorage())).toBe(false);
+  });
+  it('restores the remembered choice', () => {
+    expect(initialNight(fakeStorage({ 'pixel-office.night': '1' }))).toBe(true);
+    expect(initialNight(fakeStorage({ 'pixel-office.night': '0' }))).toBe(false);
+  });
+  it('survives storage that throws', () => {
+    expect(initialNight({ getItem: () => { throw new Error('blocked'); } } as any)).toBe(false);
+  });
+  it('setNight remembers the choice', () => {
+    const s = fakeStorage();
+    vi.stubGlobal('localStorage', s);
+    useOffice.getState().setNight(true);
+    expect(s.map.get('pixel-office.night')).toBe('1');
+    useOffice.getState().setNight(false);
+    expect(s.map.get('pixel-office.night')).toBe('0');
+    vi.unstubAllGlobals();
   });
 });

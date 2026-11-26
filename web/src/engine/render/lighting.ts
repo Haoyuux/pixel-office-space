@@ -1,7 +1,7 @@
 import { Container, Graphics, Sprite, Texture, type Application } from 'pixi.js';
 import { iso, PZ } from '../iso';
 import type { BuildingLayout, Light } from '../layout/types';
-import { rectPoly, screenBox, wallPoly, buildingBox, isNightAt } from './geom';
+import { rectPoly, screenBox, wallPoly, buildingBox } from './geom';
 
 /** Approved spike values (spike/v2.html, final night lighting). */
 export const NIGHT_TINT = 0xa39ac4;
@@ -37,8 +37,8 @@ export class Lighting {
   private sky!: Graphics;
   private byTag = new Map<string, Sprite[]>();
 
-  constructor(private app: Application, private world: Container, now = new Date()) {
-    this.night = isNightAt(now);
+  constructor(private app: Application, private world: Container, night = false) {
+    this.night = night;
   }
 
   /** (Re)build every light for a layout. Call after the world's sprites are in place. */
