@@ -83,10 +83,23 @@ export class Director {
   private moves = new Map<string, number>();
   private doneSeen = new Map<string, number>();
   private after: (ms: number, fn: () => void) => void;
+  private dead = false;
+  private timers = new Set<ReturnType<typeof setTimeout>>();
 
   constructor(private scene: DirectorScene, private life: DirectorLife, private bots: DirectorBots,
     private grid: DirectorGrid | null = null, private opts: DirectorOptions = {}) {
-    this.after = opts.after ?? ((ms, fn) => { setTimeout(fn, ms); });
+    const raw = opts.after ?? ((ms: number, fn: () => void) => {
+      const h = setTimeout(() => { this.timers.delete(h); fn(); }, ms);
+      this.timers.add(h);
+    });
+    this.after = (ms, fn) => raw(ms, () => { if (!this.dead) fn(); });
+  }
+
+  /** Teardown: pending timers no longer act. */
+  destroy(): void {
+    this.dead = true;
+    for (const h of this.timers) clearTimeout(h);
+    this.timers.clear();
   }
 
   apply(e: ServerEvent): void {
@@ -161,7 +174,7 @@ export class Director {
   /** Population hook: a bot is being taken out. A removed team member walks to the hallway end first. */
   onRemoved(bot: DirectorBot): Promise<void> | void {
     this.arriving.delete(bot.id);
-    this.duty.delete(bot.id);
+    if (this.duty.delete(bot.id)) this.off(bot.id);
     const tok = this.move(bot.id);
     const end = this.scene.layout?.hallEnd;
     if (!this.leaving.delete(bot.id) || !end) return;
@@ -204,7 +217,11 @@ export class Director {
     }
     for (const [pid] of was) if (!this.active.has(pid) && this.teams.has(pid)) this.scene.setWhiteboard(pid, null);
     // bots whose ticket ended while we were away go back to office life
-    for (const [id] of this.duty) if (!want.has(id)) { this.duty.delete(id); this.off(id); this.life.resume(id); }
+    for (const [id] of this.duty) if (!want.has(id)) {
+      this.duty.delete(id); this.off(id); this.move(id);
+      this.bots.get(id)?.bubble(null);
+      this.life.resume(id);
+    }
     for (const [id, d] of want) {
       const had = this.duty.get(id);
       this.duty.set(id, d);
@@ -222,11 +239,19 @@ export class Director {
   }
 
   private state(projectId: string, ticketId: string, role: RoleId, s: AgentState): void {
-    if (s === 'idle') return;
     const id = botId(projectId, role);
     const t = this.tickets.get(ticketId) ?? this.placeholder(ticketId, projectId);
     const had = this.duty.get(id);
     const mine = had?.ticketId === ticketId ? had : undefined;
+    if (s === 'idle') {
+      // not working any more, but still on duty until the ticket ends (end() hands it back to office life)
+      if (!mine || mine.state === 'done' || mine.state === 'failed') return;
+      const prev = mine.state;
+      mine.state = s;
+      if (prev === 'reviewing') this.toSeat(id);
+      this.render(id);
+      return;
+    }
     if (s === 'done' || s === 'failed') {
       if (!mine) return;
       mine.state = s;
@@ -258,7 +283,7 @@ export class Director {
     if (!bot) return;
     if (working) { bot.bubble('…'); return; }
     const gate = this.tickets.get(d.ticketId)?.gate;
-    const owner = gate === 'final' || ((gate === 'plan' || gate === 'stuck') && role === 'pm');
+    const owner = d.state !== 'idle' && (gate === 'final' || ((gate === 'plan' || gate === 'stuck') && role === 'pm'));
     bot.bubble(owner ? '!' : null);
   }
 
@@ -270,6 +295,7 @@ export class Director {
       if (d.ticketId !== ticketId) continue;
       this.duty.delete(id);
       this.off(id);
+      this.move(id); // in-flight walks / timers (whiteboard hold, review tour) must not act after the hand-back
       const bot = this.bots.get(id);
       if (how === 'failed') bot?.bubble('✗');
       else if (bot && d.state !== 'done') this.wave(bot);
@@ -318,7 +344,7 @@ export class Director {
       if (!this.current(id, tok)) return;
       bot.face(spot.facing);
       bot.play('idle');
-      this.after(BOARD_MS, () => { if (this.current(id, tok)) this.toSeat(id); });
+      this.after(BOARD_MS, () => { if (this.current(id, tok) && this.duty.has(id)) this.toSeat(id); });
     });
   }
 

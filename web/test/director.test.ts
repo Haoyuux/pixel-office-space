@@ -6,6 +6,7 @@ import { buildLayout } from '../src/engine/layout/building';
 import { parsePieces } from '../src/engine/pieces';
 import type { Spot } from '../src/engine/layout/types';
 import { Director, type DirectorBot } from '../src/engine/bots/director';
+import { OfficeLife } from '../src/engine/bots/officeLife';
 
 const META = parsePieces(readFileSync(resolve(__dirname, '../../assets/office/Isometric_Pixel_Props/pieces.csv'), 'utf8'));
 const TEAM: RoleId[] = ['pm', 'techlead', 'frontend', 'backend', 'qa'];
@@ -188,5 +189,75 @@ describe('Director', () => {
     d2.onAdded(pm, L.seats['p:pm'].seat);
     expect(pm.bubbleKind).toBe('!');
     expect(pm.seated).toBe(true);
+  });
+
+  it('a ticket cancelled while the PM stands at the whiteboard: no walk or sit after life resumes', () => {
+    director.apply(ev({ type: 'ticket.created', ticket: T }));
+    director.apply(ev({ type: 'ticket.stage', stage: 'plan', roles: ['pm'] }));
+    state('pm', 'summoned'); state('pm', 'planning');
+    const pm = bot('pm');
+    pm.arrive(); // at the whiteboard, BOARD_MS hold starts
+    tick(500);
+    director.apply(ev({ type: 'ticket.cancelled' }));
+    tick(2600); // FAIL_MS: resumed
+    expect(life).toContain('resume p:pm');
+    const n = pm.calls.length;
+    tick(10000); // the board timer would have fired here
+    pm.arrive();
+    expect(pm.calls.slice(n).filter(c => c.startsWith('goTo') || c.startsWith('sit'))).toEqual([]);
+  });
+
+  it('working -> idle mid-ticket turns the monitor off and clears the bubble, keeping the duty', () => {
+    state('frontend', 'summoned'); bot('frontend').arrive(); state('frontend', 'coding');
+    expect(bot('frontend').bubbleKind).toBe('…');
+    scene.calls = [];
+    state('frontend', 'idle');
+    expect(scene.calls).toContain('working p:frontend false');
+    expect(bot('frontend').bubbleKind).toBe(null);
+    director.apply(ev({ type: 'ticket.done' }));
+    tick(10000);
+    expect(life).toContain('resume p:frontend');
+  });
+
+  it('a removed member that was working gets its monitor turned off', () => {
+    state('qa', 'summoned'); bot('qa').arrive(); state('qa', 'testing');
+    director.apply({ type: 'project.updated', project: proj(TEAM.filter(r => r !== 'qa')), projectId: 'p', ts: '' });
+    scene.calls = [];
+    void director.onRemoved(bot('qa'));
+    expect(scene.calls).toContain('working p:qa false');
+  });
+
+  it('a snapshot that ends a duty clears the bubble', () => {
+    state('backend', 'summoned'); bot('backend').arrive(); state('backend', 'coding');
+    director.apply({ type: 'snapshot', snapshot: { projects: [proj()], tickets: [] }, ts: '' });
+    expect(life).toContain('resume p:backend');
+    expect(bot('backend').bubbleKind).toBe(null);
+  });
+
+  it('destroy() stops pending timers from acting', () => {
+    state('frontend', 'summoned'); bot('frontend').arrive();
+    director.apply(ev({ type: 'ticket.cancelled' }));
+    director.destroy();
+    tick(10000);
+    expect(life).not.toContain('resume p:frontend');
+  });
+
+  it("office life's first desk intent cannot take over a walking-in bot", () => {
+    let now = 0;
+    const real = new OfficeLife({ spots: L.spots, seats: L.seats, random: () => 0.5, now: () => now, isNight: () => false });
+    const d = new Director(scene, real, bots, null, { after: (ms, fn) => { timers.push({ at: clock + ms, fn }); } });
+    d.apply({ type: 'snapshot', snapshot: { projects: [proj()], tickets: [] }, ts: '' });
+    d.apply({ type: 'project.updated', project: proj([...TEAM, 'writer']), projectId: 'p', ts: '' });
+    const w = new FakeBot('p:writer', 'p', 'writer');
+    bots.set(w.id, w);
+    real.register(w); // Population registers, then calls the hook
+    d.onAdded(w, L.seats['p:writer'].seat);
+    now += 1000;
+    expect(real.tick().filter(i => i.botId === w.id)).toEqual([]);
+    w.arrive(); tick(10000);
+    expect(w.seated).toBe(true);
+    now += 1000;
+    const next = real.tick().filter(i => i.botId === w.id);
+    expect(next).toHaveLength(1); // back in office life after the wave
   });
 });

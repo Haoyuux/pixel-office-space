@@ -111,7 +111,7 @@ export function OfficeCanvas({ projects, live = false, onRoomClick, onReady }: P
     };
     sync(s0);
     const unsub = useOffice.subscribe((s, prev) => { if (s.tickets !== prev.tickets || s.projects !== prev.projects || s.selectedProjectId !== prev.selectedProjectId) sync(s); });
-    return () => { off(); unsub(); bots.hooks = {}; if (window.__director === director) delete window.__director; };
+    return () => { off(); unsub(); director.destroy(); bots.hooks = {}; if (window.__director === director) delete window.__director; };
   }
 
   async function draw(list: Project[]) {
