@@ -77,8 +77,11 @@ export function childEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  * ~32K Windows command-line limit and any quoting issues (newlines, quotes, a leading '-'). Checked with claude 2.1.332.
  */
 export function buildArgs(o: Pick<RunOptions, 'role' | 'maxTurns' | 'resume' | 'allowedTools'>): string[] {
+  // dontAsk denies Edit/Write even when listed in --allowedTools (found by the live run, claude 2.1.x), so roles that
+  // edit files use acceptEdits (auto-accepts edits in the cwd; anything not allowed is still denied non-interactively).
+  const edits = o.allowedTools.some(t => t === 'Edit' || t === 'Write' || t === 'MultiEdit');
   const args = ['-p', '--agent', o.role, '--output-format', 'stream-json', '--verbose',
-    '--permission-mode', 'dontAsk', '--max-turns', String(o.maxTurns)];
+    '--permission-mode', edits ? 'acceptEdits' : 'dontAsk', '--max-turns', String(o.maxTurns)];
   if (o.resume) args.push('--resume', o.resume);
   // --allowedTools is variadic, so it goes last. Omitted when empty (the CLI rejects a bare flag).
   if (o.allowedTools.length) args.push('--allowedTools', ...o.allowedTools);

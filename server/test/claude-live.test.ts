@@ -42,18 +42,23 @@ describe.skipIf(!LIVE)('live claude ticket (OFFICE_LIVE=1)', () => {
     let usage: { turns: number; costUsd: number; durationMs: number } | undefined;
     let done = false;
     let failed: string | undefined;
+    let finish!: () => void;
+    const finished = new Promise<void>(r => { finish = r; });
     orch.onEvent((e: ServerEvent) => {
       if (e.type === 'gate.open') {
         const decision = e.gate === 'stuck' ? 'accept' : 'approved';
         setTimeout(() => orch.decide(e.ticketId, e.gate, decision), 50);
       }
       if (e.type === 'ticket.usage') usage = { turns: e.turns, costUsd: e.costUsd, durationMs: e.durationMs };
-      if (e.type === 'ticket.done') done = true;
-      if (e.type === 'ticket.failed') failed = e.reason;
+      if (e.type === 'ticket.done') { done = true; finish(); }
+      if (e.type === 'ticket.failed') { failed = e.reason; finish(); }
+      if (e.type === 'ticket.cancelled') finish();
+      if (e.type === 'gate.open') console.log('LIVE gate', e.gate);
       if (e.type === 'agent.tool' || e.type === 'ticket.stage') console.log('LIVE', e.type, (e as any).stage ?? (e as any).summary);
     });
 
     orch.startTicket(project, 'Add a multiply(a, b) function to sum.js next to sum, exported, with a test in sum.test.js.');
+    await finished; // gates park the run, so idle() alone returns early
     await orch.idle();
 
     console.log('LIVE usage', JSON.stringify(usage), 'failed:', failed);

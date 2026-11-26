@@ -91,6 +91,7 @@ describe('env, args, binary', () => {
       '-p', '--agent', 'backend', '--output-format', 'stream-json', '--verbose',
       '--permission-mode', 'dontAsk', '--max-turns', '80', '--resume', 'sess-1', '--allowedTools', 'Read', 'Bash(npm *)',
     ]);
+    expect(buildArgs({ ...base, allowedTools: ['Read', 'Edit'] })).toContain('acceptEdits');
     expect(buildArgs(base)).not.toContain('--bare');
     expect(buildArgs(base)).not.toContain('do it'); // the prompt goes via stdin
   });
