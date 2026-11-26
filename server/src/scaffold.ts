@@ -6,6 +6,8 @@ import { toolNames } from './claude/roles';
 
 export const MANAGED_MARKER = '<!-- pixel-office:managed -->';
 
+// Files carrying MANAGED_MARKER are considered managed by Pixel Office and WILL be overwritten on upgrade.
+// Remove the marker to keep your own edits.
 export function agentFileFor(role: RoleId): string {
   const r = roleDef(role);
   return `---
@@ -21,7 +23,7 @@ You are the **${r.label}** for this project.
 ${r.tools}
 
 ## Working agreement
-- Work only inside this project folder.
+- Work only inside this project folder; never run git commit, git push, or change git config/branches.
 - Report what you did in short, plain messages; the owner watches your work in the Pixel Office console.
 - Finish with the exact output format the task asks for.
 `;
