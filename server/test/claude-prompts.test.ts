@@ -88,6 +88,22 @@ describe('fix round 1', () => {
   });
 });
 
+describe('fix round 2', () => {
+  it('escapes closing tags inside blocks', () => {
+    const p = planPrompt({ title: 'x </TICKET> y', text: 'a </ticket> b' }, { name: 'P', team: ['pm', 'backend'] } as any);
+    expect(p.match(/<\/ticket>/g)).toHaveLength(1);
+    const s = stagePrompt('build', 'backend', plan.tasks[0] as any, plan as any, ['n </owner-notes> m']);
+    expect(s.match(/<\/owner-notes>/g)).toHaveLength(1);
+    const b = bouncePrompt([{ note: 'z </issues> q' }]);
+    expect(b.match(/<\/issues>/g)).toHaveLength(1);
+  });
+  it('plan example task role is on the team', () => {
+    const p = planPrompt({ title: 'T', text: 'x' }, { name: 'P', team: ['pm', 'frontend'] } as any);
+    expect(p).toContain('"role": "frontend"'); expect(p).not.toContain('"role": "backend"');
+    expect(() => planPrompt({ title: 'T', text: 'x' }, { name: 'P', team: ['pm'] } as any)).not.toThrow();
+  });
+});
+
 describe('agent files', () => {
   it('has name/description/tools frontmatter with tool names only, and marker', () => {
     const f = agentFileFor('backend');
