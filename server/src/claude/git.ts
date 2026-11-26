@@ -46,9 +46,17 @@ export async function hasCommit(dir: string): Promise<boolean> {
 }
 
 export async function gitInit(dir: string): Promise<void> {
-  const wasRepo = await isRepo(dir);
+  const dotGit = path.join(dir, '.git');
+  const hadGit = fs.existsSync(dotGit);
   const ignore = path.join(dir, '.gitignore');
   const hadIgnore = fs.existsSync(ignore);
+  const wasRepo = await isRepo(dir);
+  if (hadGit && !wasRepo) {
+    throw new Error(
+      `${dir} has a .git that git can't read (e.g. safe.directory/ownership or a corrupt .git) — fix it first: ` +
+      `run "git status" in that folder to see the error, or add it with "git config --global --add safe.directory ${dir}".`,
+    );
+  }
   try {
     if (!wasRepo) await must(dir, ['init']);
     if (!hadIgnore) fs.writeFileSync(ignore, 'node_modules/\ndist/\n.env\n');
@@ -56,7 +64,7 @@ export async function gitInit(dir: string): Promise<void> {
     await must(dir, ['commit', '--no-verify', '--allow-empty', '-m', 'Initial commit (Pixel Office)']);
   } catch (e) {
     // do not leave a half-initialised repo behind
-    if (!wasRepo) fs.rmSync(path.join(dir, '.git'), { recursive: true, force: true, maxRetries: 3 });
+    if (!hadGit) fs.rmSync(dotGit, { recursive: true, force: true, maxRetries: 3 });
     if (!hadIgnore) fs.rmSync(ignore, { force: true });
     throw new Error(`Could not initialize git in ${dir}: ${(e as Error).message}`);
   }
