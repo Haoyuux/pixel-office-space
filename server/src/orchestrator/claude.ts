@@ -137,7 +137,11 @@ export class ClaudeOrchestrator implements Orchestrator {
     const ticket = found?.ticket ?? live?.ticket;
     if (!ticket) throw new ConflictError('Unknown ticket');
     if (ticket.status !== 'failed') throw new ConflictError('Only failed or interrupted tickets can be resumed');
-    if (ticket.agentsMode === 'simulated') throw new ConflictError('Simulated tickets cannot be resumed');
+    // tickets from before agents modes existed (no agentsMode) were all simulated: never resume them with real agents
+    if (ticket.agentsMode !== 'claude') throw new ConflictError('Simulated tickets cannot be resumed');
+    if (!Object.keys(ticket.sessions ?? {}).length && !ticket.workspace) {
+      throw new ConflictError('Nothing to resume: this ticket has no stored agent sessions or branch');
+    }
     const project = this.opts.getProject?.(ticket.projectId) ?? live?.project;
     if (!project) throw new ConflictError('Project not found');
     const seq = Math.max(0, ...(found?.events ?? []).map(e => (e as { seq?: number }).seq ?? 0), live?.seq ?? 0);
@@ -152,7 +156,12 @@ export class ClaudeOrchestrator implements Orchestrator {
     run.continuing = new Set(Object.keys(run.sessions) as RoleId[]);
     run.resumeFrom = { stage: ticket.stage };
     if (ticket.parentTicketId) run.parent = this.parentOf(ticket);
-    this.emit(run, { type: 'ticket.resumed', stage: ticket.stage });
+    // if a stored session has expired, the role restarts fresh with this ticket's plan + changes so far
+    const files = (found?.events ?? []).filter(e => e.type === 'ticket.diff')
+      .flatMap(e => (e as { files: { path: string }[] }).files.map(f => f.path));
+    run.fallback = previousContext({ title: ticket.title, plan: ticket.plan, files: [...new Set(files)] });
+    const queued = this.currentByProject.has(project.id);
+    this.emit(run, { type: 'ticket.resumed', stage: ticket.stage, ...(queued ? { queued: true } : {}) });
     this.message(run, 'pm', `Resuming from the ${ticket.stage ?? 'plan'} stage.`);
     this.enqueue(run);
     return run.ticket;
@@ -302,6 +311,12 @@ export class ClaudeOrchestrator implements Orchestrator {
     }
     this.summonTeam(run);
     await this.prepareWorktree(run);
+    if (run.base && run.wt) {
+      // refresh the fallback context with what the branch already holds (best effort)
+      const files = await this.git.diff(run.project.folder, run.base.head, run.wt.branch).catch(() => []);
+      this.alive(run);
+      if (files.length) run.fallback = previousContext({ title: run.ticket.title, plan: run.plan, files: files.map(f => f.path) });
+    }
     if (stage === 'done') return this.next(run, 'docs');
     const work = stage as WorkStage;
     if (this.rolesFor(run, work).length) return this.runStage(run, work);
@@ -322,7 +337,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     if (!note && run.continuing.has('pm') && run.sessions.pm) {
       resume = run.sessions.pm;
       prompt = 'As the project manager, reply with the full plan as one fenced ```json block in the required shape.';
-      fresh = planPrompt(run.ticket, run.project, readMap());
+      fresh = (run.fallback ?? '') + planPrompt(run.ticket, run.project, readMap());
     } else if (!note && run.parent && !run.plan) {
       fresh = (run.fallback ?? '') + planPrompt(run.ticket, run.project, readMap());
       if (run.inherited.has('pm') && run.sessions.pm) { resume = run.sessions.pm; prompt = followUpPrompt(run.ticket, run.project); }
@@ -576,16 +591,17 @@ export class ClaudeOrchestrator implements Orchestrator {
   }
 
   /**
-   * Queue a run on the role's session (never two at once). A resumed session that came from a parent ticket and
-   * fails (expired) falls back to a fresh session given the parent's plan + diff; Resume prefixes "Continue...".
+   * Queue a run on the role's session (never two at once). A resumed session that came from a parent ticket or
+   * from Resume ("Continue where you left off.") and fails (expired) falls back to a fresh session given the plan + diff.
    */
   private exec(run: Run, role: RoleId, stage: Exclude<Stage, 'done'>, cwd: string, prompt: string, resume?: string, fresh?: string): Promise<RunResult> {
     const prev = run.locks.get(role) ?? Promise.resolve();
     const p = prev.catch(() => undefined).then(async () => {
       const sid = resume ?? run.sessions[role];
       let text = prompt;
-      if (sid && run.continuing.delete(role)) text = `${CONTINUE}\n\n${prompt}`;
-      if (!sid || !run.inherited.has(role)) return this.execNow(run, role, stage, cwd, text, sid);
+      const continuing = !!sid && run.continuing.delete(role);
+      if (continuing) text = `${CONTINUE}\n\n${prompt}`;
+      if (!sid || !(run.inherited.has(role) || continuing)) return this.execNow(run, role, stage, cwd, text, sid);
       try {
         const r = await this.execNow(run, role, stage, cwd, text, sid);
         run.inherited.delete(role);

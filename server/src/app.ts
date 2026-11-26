@@ -17,7 +17,7 @@ export interface OfficeOptions {
   dataDir: string; orchestrator: Orchestrator; log: TicketLog; assetsDir?: string;
   /** `GET /api/system/claude` source (tests inject a fake; never the real CLI). */
   claudeSystem?: { status(): Promise<ClaudeStatus> };
-  git?: Pick<typeof realGit, 'isRepo' | 'gitInit'>;
+  git?: Pick<typeof realGit, 'isRepo' | 'hasCommit' | 'gitInit'>;
 }
 
 const GATES: GateKind[] = ['plan', 'final', 'stuck'];
@@ -128,7 +128,8 @@ export function createOffice(opts: OfficeOptions): Office {
   app.post('/api/projects/:id/git-init', async (req, res, next) => {
     try {
       const p = mustProject(req.params.id);
-      if (await git.isRepo(p.folder)) throw new ConflictError('This folder is already a git repository');
+      // a repo with no commits still needs the initial commit (gitInit handles an existing repo)
+      if (await git.isRepo(p.folder) && await git.hasCommit(p.folder)) throw new ConflictError('This folder is already a git repository');
       await git.gitInit(p.folder);
       res.json({ ok: true, message: `Initialized git in ${p.folder} with an initial commit.` });
     } catch (e) { next(e); }

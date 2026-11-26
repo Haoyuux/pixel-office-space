@@ -28,7 +28,7 @@ export type ServerEvent =
   | ({ type: 'ticket.usage'; turns: number; costUsd: number; durationMs: number } & TBase)
   | ({ type: 'ticket.workspace'; workspace: Workspace } & TBase)
   /** A failed/interrupted ticket was resumed (Resume button). */
-  | ({ type: 'ticket.resumed'; stage: Stage | null } & TBase);
+  | ({ type: 'ticket.resumed'; stage: Stage | null; queued?: boolean } & TBase);
 
 export type TicketEvent = Extract<ServerEvent, { seq: number }>;
 export type EventOf<T extends ServerEvent['type']> = Extract<ServerEvent, { type: T }>;

@@ -348,7 +348,7 @@ describe('ClaudeOrchestrator', () => {
     const t = await toPlanGate(o, repo);
     runner.script = c => c.kind === 'stage' ? { hang: true } : undefined;
     o.decide(t.id, 'plan', 'approved');
-    await new Promise(r => setTimeout(r, 300));
+    await until(() => runner.of('frontend', 'stage').length === 1);
     const wt = path.join(dataDir, 'worktrees', 'p1', t.id);
     expect(fs.existsSync(wt)).toBe(true);
     const running = runner.of('frontend', 'stage')[0];
@@ -641,6 +641,46 @@ describe('ClaudeOrchestrator: follow-ups, resume, messages', () => {
     expect(r2.of('pm')).toHaveLength(0);
     expect(o2.find(t.id)!.openGate).toBe('final');
     expect(() => o2.resume(t.id)).toThrow(/active/);
+  });
+
+  it('resume with an expired stored session → fresh session given the plan + changes so far', async () => {
+    const o = make();
+    runner.script = c => c.o.role === 'frontend' && c.kind === 'stage' ? { hang: true } : undefined;
+    const t = await toPlanGate(o, repo);
+    o.decide(t.id, 'plan', 'approved');
+    await until(() => runner.of('frontend', 'stage').length === 1 && runner.of('backend', 'stage')[0]?.ended !== undefined);
+    const feSession = o.find(t.id)!.sessions!.frontend!;
+    const log = new TicketLog(path.join(dataDir, 'tickets'));
+    log.recover();
+    const r2 = new FakeRunner();
+    r2.script = c => c.o.resume === feSession ? { isError: true, result: 'No conversation found', subtype: 'error_during_execution' } : undefined;
+    const o2 = new ClaudeOrchestrator({ log, runner: r2, dataDir, getProject: () => project(repo) });
+    o2.resume(t.id);
+    await o2.idle();
+    const fes = r2.of('frontend', 'stage');
+    expect(fes[0].o.resume).toBe(feSession);
+    expect(fes[1].o.resume).toBeUndefined();
+    expect(fes[1].o.prompt).toContain('<previous-work>');
+    expect(fes[1].o.prompt).toContain('Add link');
+    expect(fes[1].o.prompt).not.toContain('Continue where you left off.');
+    expect(o2.find(t.id)!.openGate).toBe('final');
+  });
+
+  it('resume while another ticket runs → ticket shows queued until it starts', async () => {
+    const o = make();
+    runner.script = c => c.o.role === 'frontend' && c.kind === 'stage' ? { hang: true } : undefined;
+    const t = await toPlanGate(o, repo);
+    o.decide(t.id, 'plan', 'approved');
+    await until(() => runner.of('frontend', 'stage').length === 1);
+    const log = new TicketLog(path.join(dataDir, 'tickets'));
+    log.recover();
+    const o2 = new ClaudeOrchestrator({ log, runner: new FakeRunner(), dataDir, getProject: () => project(repo) });
+    const other = o2.startTicket(project(repo), 'Other work');
+    await o2.idle();
+    expect(o2.resume(t.id).status).toBe('queued');
+    o2.cancel(other.id);
+    await o2.idle();
+    expect(o2.find(t.id)!.openGate).toBe('final');
   });
 
   it('resume refuses tickets that did not fail', async () => {

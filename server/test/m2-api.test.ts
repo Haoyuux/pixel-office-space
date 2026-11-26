@@ -76,6 +76,27 @@ describe('agents mode + routing', () => {
     expect(new ProjectStore(join(dataDir, 'projects.json')).get(p.id)!.agentsMode).toBe('claude');
   });
 
+  it('recovered tickets without agentsMode (pre-M2) stay simulated; claude Resume refuses them', async () => {
+    const dataDir = tmp();
+    const { ProjectStore } = await import('../src/store');
+    const p = new ProjectStore(join(dataDir, 'projects.json')).add({ name: 'Shop', folder: projectDir(), accent: 'cyan', team: ['pm', 'frontend'] });
+    expect(p.agentsMode).toBe('claude');
+    const log = new TicketLog(join(dataDir, 'projects'));
+    const base = { projectId: p.id, ts: '' };
+    const tk = (id: string) => ({ id, projectId: p.id, title: id, text: id, status: 'queued', stage: null, agentStates: {}, createdAt: '2026-01-01T00:00:00Z' });
+    log.append({ ...base, type: 'ticket.created', ticket: tk('old-run'), ticketId: 'old-run', seq: 1 } as any);
+    log.append({ ...base, type: 'ticket.stage', stage: 'build', roles: ['frontend'], ticketId: 'old-run', seq: 2 } as any);
+    log.append({ ...base, type: 'ticket.created', ticket: tk('old-wait'), ticketId: 'old-wait', seq: 1 } as any);
+    const runner = { calls: 0, run() { this.calls++; return new Promise<RunResult>(() => undefined); } };
+    const b = boot({ dataDir, scheduler: new ManualScheduler(), stageMs: [100, 200], random: () => 0.99, runner });
+    office = b.office;
+    expect(b.simulated.find('old-wait')).toBeTruthy();
+    expect(b.claude.find('old-wait')).toBeUndefined();
+    const r = await request(b.office.server).post('/api/tickets/old-run/resume').send({});
+    expect(r.status).toBe(409);
+    expect(runner.calls).toBe(0);
+  });
+
   it('RoutingOrchestrator sends ticket calls to the owner', () => {
     const calls: string[] = [];
     const stub = (name: string, owns: string): Orchestrator => ({
@@ -114,7 +135,9 @@ describe('follow-ups + resume REST', () => {
 });
 
 describe('git-init + system', () => {
-  const mk = (git: { isRepo: (d: string) => Promise<boolean>; gitInit: (d: string) => Promise<void> }, exec?: Exec) => {
+  type G = { isRepo: (d: string) => Promise<boolean>; hasCommit?: (d: string) => Promise<boolean>; gitInit: (d: string) => Promise<void> };
+  const mk = (g: G, exec?: Exec) => {
+    const git = { hasCommit: async () => true, ...g };
     const dataDir = tmp();
     const log = new TicketLog(join(dataDir, 'projects'));
     const orchestrator = new SimulatedOrchestrator({ log, scheduler: new ManualScheduler() });
@@ -136,6 +159,15 @@ describe('git-init + system', () => {
     repo = true;
     expect((await request(o.server).post(`/api/projects/${p.id}/git-init`).send({})).status).toBe(409);
     expect(inits).toHaveLength(1);
+  });
+
+  it('git-init on a repo with no commits runs gitInit (initial commit), not 409', async () => {
+    const inits: string[] = [];
+    const o = mk({ isRepo: async () => true, hasCommit: async () => false, gitInit: async d => { inits.push(d); } });
+    const p = (await add(o)).body as Project;
+    const r = await request(o.server).post(`/api/projects/${p.id}/git-init`).send({});
+    expect(r.status).toBe(200);
+    expect(inits).toEqual([p.folder]);
   });
 
   it('origin/JSON guards apply to the new routes', async () => {
