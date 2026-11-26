@@ -6,6 +6,17 @@ export interface Placed {
   /** 'floor' | 'wall' | 'glass' | 'monitor:<pid>:<role>' | 'whiteboard:<pid>' | 'shelf:<pid>' | 'corkboard' | 'lamp' */
   tag?: string;
   room?: string;
+  /** 'neon' = a NEON OFFICE prop (`piece` is its folder name, e.g. 'arcade_cabinet'); default = Isometric_Pixel_Props. */
+  pack?: 'neon';
+  /** Neon props: `<finish>_<neon>`, e.g. 'graphite_magenta'. */
+  variant?: string;
+}
+/** A code-drawn rug on the floor (world metres), under a seating group or a zone. */
+export interface Rug {
+  id: string; room: string;
+  x0: number; y0: number; x1: number; y1: number;
+  color: number; border: number; accent: number;
+  pattern: 'stripes' | 'diamonds' | 'checks' | 'plain';
 }
 export type Pose = 'sit' | 'stand' | 'drink';
 export interface Spot {
@@ -31,6 +42,7 @@ export interface BuildingLayout {
   spots: Spot[];
   walls: Segment[];
   lights: Light[];
+  rugs: Rug[];
   seats: Record<string, Seat>;       // key `${projectId}:${role}`
   nameplates: Nameplate[];
   bounds: { x0: number; y0: number; x1: number; y1: number };

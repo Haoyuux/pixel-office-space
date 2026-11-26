@@ -9,7 +9,9 @@ import { fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const shots = join(root, 'shots');
 mkdirSync(shots, { recursive: true });
-const API = 'http://127.0.0.1:5175', WEB = 'http://127.0.0.1:5173';
+// E2E_API_PORT / E2E_WEB_PORT run the walkthrough beside a dev stack already on 5175 / 5173.
+const API_PORT = process.env.E2E_API_PORT ?? '5175', WEB_PORT = process.env.E2E_WEB_PORT ?? '5173';
+const API = `http://127.0.0.1:${API_PORT}`, WEB = `http://127.0.0.1:${WEB_PORT}`;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const children = [];
 const killTree = (c) => { try { if (process.platform === 'win32') execSync(`taskkill /pid ${c.pid} /T /F`, { stdio: 'ignore' }); else c.kill('SIGKILL'); } catch {} };
@@ -48,7 +50,7 @@ const quickFetch = (url) => fetch(url, { signal: AbortSignal.timeout(3000) });
 async function main() {
 for (const u of [API + '/api/projects', WEB + '/']) {
   let up = false; try { up = (await quickFetch(u)).status > 0; } catch {}
-  if (up) fail(`${u} already responds: stop whatever is using ports 5173/5175 first`);
+  if (up) fail(`${u} already responds: stop whatever is using ports ${WEB_PORT}/${API_PORT} first (or set E2E_WEB_PORT / E2E_API_PORT)`);
 }
 const tmp = mkTemp('office-e2e-');
 const dataDir = join(tmp, 'data');
@@ -60,8 +62,8 @@ const start = (args, env, cwd = root) => {
   children.push(c);
   return c;
 };
-start(['tsx', 'server/src/main.ts'], { OFFICE_DATA: dataDir, OFFICE_PORT: '5175', OFFICE_STAGE_MS: '800,1500' });
-start(['vite', '--host', '127.0.0.1', '--port', '5173', '--strictPort'], {}, join(root, 'web'));
+start(['tsx', 'server/src/main.ts'], { OFFICE_DATA: dataDir, OFFICE_PORT: API_PORT, OFFICE_STAGE_MS: '800,1500' });
+start(['vite', '--host', '127.0.0.1', '--port', WEB_PORT, '--strictPort'], { OFFICE_PORT: API_PORT }, join(root, 'web'));
 await waitFor(async () => (await quickFetch(API + '/api/projects')).ok, 'server');
 await waitFor(async () => (await quickFetch(WEB + '/')).ok, 'vite');
 

@@ -22,7 +22,7 @@ export function slotPlace(slot: number): { side: 'left' | 'right'; row: number }
 /** Builds the whole office from the project list. `_meta` is accepted so callers pass the parsed pieces.csv once. */
 export function buildLayout(projects: Project[], _meta?: Record<string, PieceMeta>): BuildingLayout {
   const rooms: RoomRect[] = [], pieces: Placed[] = [], spots: Spot[] = [], walls: Segment[] = [];
-  const L: BuildingLayout = { rooms, pieces, spots, walls, lights: [], seats: {}, nameplates: [], bounds: { x0: -1, y0: -4, x1: CAFE.x1, y1: 8 }, hallEnd: { mx: 15, my: 7.5 } };
+  const L: BuildingLayout = { rooms, pieces, spots, walls, lights: [], rugs: [], seats: {}, nameplates: [], bounds: { x0: -1, y0: -4, x1: CAFE.x1, y1: 8 }, hallEnd: { mx: 15, my: 7.5 } };
   const sorted = [...projects].sort((a, b) => a.slot - b.slot);
   const maxRow = sorted.reduce((m, p) => Math.max(m, slotPlace(p.slot).row), 0);
   const hallY1 = (maxRow + 1) * ROOM_D;
@@ -61,7 +61,9 @@ export function buildLayout(projects: Project[], _meta?: Record<string, PieceMet
   sideWall(0);
 
   // lounge + cafeteria (open to the hallway) + hallway
-  for (const part of [buildLounge(), buildCafeteria()]) { pieces.push(...part.pieces); spots.push(...part.spots); L.lights.push(...part.lights); }
+  const lounge = buildLounge();
+  for (const part of [lounge, buildCafeteria()]) { pieces.push(...part.pieces); spots.push(...part.spots); L.lights.push(...part.lights); }
+  L.rugs.push(...lounge.rugs);
   rooms.push({ id: 'lounge', kind: 'lounge', ...LOUNGE });
   rooms.push({ id: 'cafeteria', kind: 'cafeteria', ...CAFE });
   rooms.push({ id: 'hall', kind: 'hall', x0: HALL.x0, x1: HALL.x1, y0: 0, y1: hallY1 });

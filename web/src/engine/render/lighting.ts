@@ -30,6 +30,8 @@ export class Lighting {
   night: boolean;
   /** World children that must keep their own colours (light layers, masks, emissive overlays). */
   readonly untinted = new Set<Container>();
+  /** Emissive layers (neon glows) shown only at night; register them after build(). */
+  readonly nightOnly = new Set<Container>();
   private pools!: Container;
   private halos!: Container;
   private sky!: Graphics;
@@ -42,7 +44,7 @@ export class Lighting {
   /** (Re)build every light for a layout. Call after the world's sprites are in place. */
   build(L: BuildingLayout): void {
     // The scene clears (and destroys) every world child before a rebuild; just drop old references.
-    this.untinted.clear(); this.byTag.clear();
+    this.untinted.clear(); this.nightOnly.clear(); this.byTag.clear();
 
     // Floor mask: every room rect (gaps of empty slots stay unlit). Silhouette = floors + walls/glass extruded.
     const floorMask = new Graphics();
@@ -111,6 +113,7 @@ export class Lighting {
     const t = this.night ? NIGHT_TINT : 0xffffff;
     for (const ch of this.world.children) if (!this.untinted.has(ch)) ch.tint = t;
     if (this.pools) this.pools.visible = this.halos.visible = this.sky.visible = this.night;
+    for (const c of this.nightOnly) c.visible = this.night;
     this.app.renderer.background.color = this.night ? NIGHT_BG : DAY_BG;
   }
 
