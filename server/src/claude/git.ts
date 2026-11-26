@@ -129,6 +129,16 @@ export type MergeResult = { merged: true } | { merged: false; reason: string; in
 export async function mergeIntoBase(repo: string, branch: string, base: string): Promise<MergeResult> {
   const manual = `cd "${repo}"\ngit checkout ${base}\ngit merge --no-ff ${branch}`;
   const info = await baseInfo(repo);
+  if (base === 'HEAD' || info.branch === 'HEAD') {
+    const target = base === 'HEAD' ? '<your-branch>' : base;
+    return {
+      merged: false,
+      reason: base === 'HEAD'
+        ? 'The work started from a detached HEAD (not on a branch), so there is no branch to merge into.'
+        : 'Your project folder is not on a branch (detached HEAD), so Pixel Office did not merge.',
+      instructions: `cd "${repo}"\ngit checkout ${target}\ngit merge --no-ff ${branch}`,
+    };
+  }
   if (info.branch !== base) {
     return {
       merged: false,
