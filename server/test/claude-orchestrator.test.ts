@@ -317,6 +317,56 @@ describe('ClaudeOrchestrator', () => {
     expect(o.find(t.id)!.usage!.turns).toBe(u[0].turns);
   });
 
+  it('pre-existing repo with untracked agent files: worktree gets them, they are never committed, merge succeeds', async () => {
+    const agents = path.join(repo, '.claude', 'agents');
+    fs.mkdirSync(agents, { recursive: true });
+    for (const r of CORE) fs.writeFileSync(path.join(agents, `${r}.md`), `agent ${r}\n`);
+    const o = make();
+    const t = await toFinal(o, repo);
+    const wt = path.join(dataDir, 'worktrees', 'p1', t.id);
+    expect(fs.readFileSync(path.join(wt, '.claude', 'agents', 'frontend.md'), 'utf8')).toBe('agent frontend\n');
+    expect(git(wt, 'ls-files', '.claude/agents')).toBe('');
+    expect(git(wt, 'status', '--porcelain', '--untracked-files=all')).toBe('');
+    const files = of('ticket.diff')[0].files.map(f => f.path);
+    expect(files.some(f => f.startsWith('.claude/agents'))).toBe(false);
+    o.decide(t.id, 'final', 'approved');
+    await o.idle();
+    expect(o.find(t.id)!.status).toBe('done');
+    expect(pmText()).toMatch(/Merged office\//);
+    expect(fs.existsSync(path.join(repo, 'ui.txt'))).toBe(true);
+  });
+
+  it('final approve with no changes on the branch → no merge, PM says so, done', async () => {
+    const o = make();
+    const { projectMap: _, ...noMap } = PLAN;
+    runner.script = c => c.kind === 'plan' ? { result: fence(noMap) } : c.kind === 'stage' ? { result: 'nothing to do' } : undefined;
+    const t = await toFinal(o, repo);
+    expect(of('ticket.diff')[0].files).toEqual([]);
+    const before = git(repo, 'rev-parse', 'HEAD');
+    o.decide(t.id, 'final', 'approved');
+    await o.idle();
+    expect(o.find(t.id)!.status).toBe('done');
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(before);
+    expect(pmText()).toContain('No changes were made — nothing to merge');
+    expect(pmText()).not.toMatch(/Merged /);
+    expect(o.find(t.id)!.workspace?.merged).toBeUndefined();
+    expect(fs.existsSync(path.join(dataDir, 'worktrees', 'p1', t.id))).toBe(false);
+  });
+
+  it('notes for a non-PM role are never delivered in the owner folder (kept until there is a worktree)', async () => {
+    const o = make();
+    const t = await toPlanGate(o, repo);
+    const run = (o as any).runs.get(t.id);
+    expect(run.wt).toBeUndefined();
+    run.notes.frontend = ['Use blue'];
+    run.sessions.frontend = 'frontend-old';
+    await (o as any).deliverNotes(run, 'frontend');
+    await o.idle();
+    expect(runner.of('frontend')).toHaveLength(0);
+    expect(run.notes.frontend).toEqual(['Use blue']);
+    expect(runner.calls.every(c => c.o.role === 'pm' || c.o.cwd !== repo)).toBe(true);
+  });
+
   it('final approve with a dirty tree → done anyway with merge-pending instructions', async () => {
     const o = make();
     const t = await toFinal(o, repo);

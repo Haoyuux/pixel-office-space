@@ -73,8 +73,14 @@ export async function gitInit(dir: string): Promise<void> {
 export async function baseInfo(dir: string): Promise<{ branch: string; head: string; clean: boolean }> {
   const branch = await must(dir, ['rev-parse', '--abbrev-ref', 'HEAD']);
   const head = await must(dir, ['rev-parse', 'HEAD']);
-  const status = await must(dir, ['status', '--porcelain', '--untracked-files=all']);
-  return { branch, head, clean: status === '' };
+  const status = await must(dir, ['status', '--porcelain', '-z', '--untracked-files=all']);
+  return { branch, head, clean: status.split('\0').filter(Boolean).every(isOfficeUntracked) };
+}
+
+/** Pixel Office's own files in the owner's folder (agent definitions, project map): untracked ones aren't "dirty". */
+export const OFFICE_PATHS = ['.claude/agents/', '.claude/office/'];
+function isOfficeUntracked(entry: string): boolean {
+  return entry.startsWith('?? ') && OFFICE_PATHS.some(p => entry.slice(3).startsWith(p));
 }
 
 function suffix(): string {
@@ -101,6 +107,16 @@ export async function createWorktree(
     lastErr = (r.stderr || r.stdout).trim();
   }
   throw new Error(`Could not create a git worktree for ${branch}: ${lastErr}`);
+}
+
+/** Add a pattern to the repo's info/exclude (as seen from `wt`) so `commitAll` never picks it up. Idempotent. */
+export async function excludePath(wt: string, pattern: string): Promise<void> {
+  const rel = await must(wt, ['rev-parse', '--git-path', 'info/exclude']);
+  const file = path.resolve(wt, rel);
+  const cur = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  if (cur.split(/\r?\n/).some(l => l.trim() === pattern)) return;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, `${cur && !cur.endsWith('\n') ? '\n' : ''}${pattern}\n`);
 }
 
 export async function commitAll(wt: string, message: string): Promise<boolean> {
