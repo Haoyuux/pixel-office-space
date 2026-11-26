@@ -33,6 +33,8 @@ export class OfficeScene {
 
   private gen = 0;
   private drawnOnce = false;
+  /** World children that survive setLayout (bots), and whether they stay untinted. */
+  private persistent = new Map<Container, { untinted: boolean }>();
   private projects = new Map<string, Project>();
   private monitors = new Map<string, Monitor>();
   private working = new Set<string>();
@@ -76,7 +78,7 @@ export class OfficeScene {
     this.trophyTex = await loadPiece('Trophy', 0) as Texture;
     if (gen !== this.gen) return;
 
-    for (const ch of this.world.removeChildren()) ch.destroy({ children: true });
+    for (const ch of this.world.removeChildren()) if (!this.persistent.has(ch)) ch.destroy({ children: true });
     this.layout = layout;
     this.projects = new Map(projects.map(p => [p.id, p]));
     this.monitors.clear(); this.plates.clear(); this.boards.clear(); this.shelves.clear();
@@ -98,6 +100,7 @@ export class OfficeScene {
 
     this.world.addChild(this.drawHall(layout.rooms));
     this.lighting.build(layout);
+    for (const [c, o] of this.persistent) { this.world.addChild(c); if (o.untinted) this.lighting.untinted.add(c); }
     for (const n of layout.nameplates) this.addNameplate(n.projectId, n.mx, n.my, n.lift);
 
     this.overlay = new Graphics({ zIndex: -8.9e4 });
@@ -166,6 +169,20 @@ export class OfficeScene {
     // At night the sign is also a real lamp: a halo clipped to the building silhouette.
     this.lighting.add({ mx, my, lift, r: 320, color: accent, a: 0.45, pool: false, halo: true });
     this.plates.set(id, { root, glow, plate, text, accent, x, y });
+  }
+
+  /** Adds a world child that is kept (not destroyed) across setLayout, e.g. a bot. */
+  keep(c: Container, opts: { untinted?: boolean } = {}): void {
+    this.persistent.set(c, { untinted: !!opts.untinted });
+    this.world.addChild(c);
+    if (opts.untinted) this.lighting.untinted.add(c); else this.lighting.tint(c);
+  }
+
+  /** Removes a kept child from the world (the caller destroys it). */
+  unkeep(c: Container): void {
+    this.persistent.delete(c);
+    this.lighting.untinted.delete(c);
+    c.removeFromParent();
   }
 
   setNight(on: boolean): void { this.lighting.setNight(on); this.drawOverlay(); }

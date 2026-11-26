@@ -45,6 +45,7 @@ export class Bot {
 
   private sheets: CharacterSheets;
   private grid: WalkGrid;
+  private scene: OfficeScene | null = null;
   private sprite: AnimatedSprite;
   private clip: Clip = 'idle';
   private path: Pt[] = [];
@@ -78,17 +79,22 @@ export class Bot {
 
   get walking(): boolean { return this.path.length > 0; }
 
-  /** Adds the bot to the scene's world; the sprite gets the night tint like the rest of the building. */
+  /** Adds the bot to the scene's world (kept across layout rebuilds); the sprite gets the night tint like the building. */
   attach(scene: OfficeScene): void {
-    scene.world.addChild(this.view, this.hud);
-    scene.lighting.untinted.add(this.hud);
-    scene.lighting.tint(this.view);
+    this.scene = scene;
+    scene.keep(this.view);
+    scene.keep(this.hud, { untinted: true });
   }
 
   destroy(): void {
+    this.scene?.unkeep(this.view); this.scene?.unkeep(this.hud);
+    this.scene = null;
     if (!this.view.destroyed) this.view.destroy({ children: true });
     if (!this.hud.destroyed) this.hud.destroy({ children: true });
   }
+
+  /** The building changed: later walks use the new grid (rooms never move, so a walk in progress stays valid). */
+  setGrid(grid: WalkGrid): void { this.grid = grid; }
 
   /** Walk to a spot (or point) along the walk grid, then call `then`. Stands up first if seated. */
   goTo(target: Spot | Pt, then?: () => void): void {

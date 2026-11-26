@@ -7,7 +7,7 @@ import type { BuildingLayout, Spot } from '../layout/types';
 import { WalkGrid } from '../walkgrid';
 import type { OfficeScene } from '../render/scene';
 import { Bot } from './bot';
-import { OfficeLife, type Intent } from './officeLife';
+import { OfficeLife, diffRoster, type Intent } from './officeLife';
 
 const LIFE_TICK_MS = 250;
 /** Longest frame step we simulate; a stalled tab should not teleport bots through furniture. */
@@ -23,6 +23,9 @@ export class Population {
   grid: WalkGrid | null = null;
   private plans = new Map<string, Plan>();
   private released = new Set<string>();
+  /** look key per bot id, for the roster diff */
+  private keys = new Map<string, string>();
+  private leaving = new Set<Bot>();
   private working = new Set<string>();
   private since = 0;
   private gen = 0;
@@ -38,26 +41,57 @@ export class Population {
     this.clear();
   }
 
-  /** One bot per team role per project, each entering seated at its own desk. Call after scene.setLayout(layout). */
+  /**
+   * Sync the bots with a new layout/roster (call after scene.setLayout(layout)). Bots whose id and look are
+   * unchanged are kept as they are, mid-activity; new team members are created (seated at their desk unless
+   * `onAdded` places them) and removed ones are taken out (destroyed at once unless `onRemoved` animates them).
+   */
   async build(layout: BuildingLayout, projects: Project[], meta: Record<string, PieceMeta>): Promise<void> {
     const gen = ++this.gen;
-    const roster = projects.flatMap(p => p.team.filter(r => layout.seats[`${p.id}:${r}`]).map(role => ({ p, role })));
-    const sheets = await Promise.all(roster.map(({ p, role }) => loadCharacter(p.looks[role])));
-    if (gen !== this.gen || this.scene.layout !== layout) return;
-    this.clear();
+    const roster = projects.flatMap(p => p.team.filter(r => layout.seats[`${p.id}:${r}`])
+      .map(role => ({ id: `${p.id}:${role}`, p, role, look: p.looks[role], key: `${p.looks[role].character}/${p.looks[role].palette}` })));
+    const diff = diffRoster(this.keys, roster);
+    for (const id of diff.remove) this.remove(id);
     const grid = this.grid = new WalkGrid(layout, meta);
-    roster.forEach(({ p, role }, i) => {
-      const id = `${p.id}:${role}`, seat = layout.seats[id].seat;
-      const bot = new Bot({ id, projectId: p.id, role, look: p.looks[role], sheets: sheets[i], grid, at: seat });
+    for (const b of this.bots.values()) b.setGrid(grid);
+    if (this.life) this.life.setLayout(layout.spots, layout.seats);
+    else {
+      this.life = new OfficeLife({ spots: layout.spots, seats: layout.seats, random: this.random, now: () => performance.now(), isNight: () => this.scene.night });
+      this.since = LIFE_TICK_MS;
+    }
+    const adds = roster.filter(r => diff.add.includes(r.id));
+    const sheets = await Promise.all(adds.map(r => loadCharacter(r.look)));
+    if (gen !== this.gen || this.scene.layout !== layout || !this.life) return;
+    adds.forEach((r, i) => {
+      const seat = layout.seats[r.id].seat;
+      const bot = new Bot({ id: r.id, projectId: r.p.id, role: r.role, look: r.look, sheets: sheets[i], grid, at: seat });
       bot.sit(seat);
       bot.attach(this.scene);
-      this.bots.set(id, bot);
+      this.bots.set(r.id, bot);
+      this.keys.set(r.id, r.key);
+      this.life!.register(bot);
+      if (this.released.has(r.id)) this.life!.release(r.id);
+      this.hooks.onAdded?.(bot, seat);
     });
-    const life = new OfficeLife({ spots: layout.spots, seats: layout.seats, random: this.random, now: () => performance.now(), isNight: () => this.scene.night });
-    for (const b of this.bots.values()) life.register(b);
-    for (const id of this.released) life.release(id);
-    this.life = life;
-    this.since = LIFE_TICK_MS;
+  }
+
+  /** Optional hooks for Task 10 (walk in from the door and wave / walk out to the hallway end). */
+  hooks: {
+    onAdded?: (bot: Bot, seat: Spot) => void;
+    /** Resolve when the bot may be destroyed; it keeps being updated until then. */
+    onRemoved?: (bot: Bot) => Promise<void> | void;
+  } = {};
+
+  private remove(id: string): void {
+    const bot = this.bots.get(id);
+    this.bots.delete(id); this.keys.delete(id); this.plans.delete(id);
+    this.life?.unregister(id);
+    this.setWorking(id, false);
+    if (!bot) return;
+    const done = this.hooks.onRemoved?.(bot);
+    if (!done) { bot.destroy(); return; }
+    this.leaving.add(bot);
+    void Promise.resolve(done).finally(() => { this.leaving.delete(bot); bot.destroy(); });
   }
 
   /** Task 10 (ticket director) takes the bot over: it stops idling and its spots are freed. */
@@ -77,6 +111,7 @@ export class Population {
 
   update(dt: number): void {
     for (const b of this.bots.values()) b.update(dt);
+    for (const b of this.leaving) b.update(dt);
     if (!this.life) return;
     this.since += dt;
     if (this.since >= LIFE_TICK_MS) {
@@ -91,8 +126,8 @@ export class Population {
   private clear(): void {
     for (const id of this.working) { const [p, r] = id.split(':'); this.scene.setWorking(p, r as RoleId, false); }
     this.working.clear();
-    for (const b of this.bots.values()) b.destroy();
-    this.bots.clear(); this.plans.clear();
+    for (const b of [...this.bots.values(), ...this.leaving]) b.destroy();
+    this.bots.clear(); this.plans.clear(); this.keys.clear(); this.leaving.clear();
     this.life = null;
   }
 

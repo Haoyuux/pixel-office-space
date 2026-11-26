@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import type { Project, RoleId } from '@office/shared';
 import { buildLayout } from '../src/engine/layout/building';
 import { parsePieces } from '../src/engine/pieces';
-import { OfficeLife, DAY_WEIGHTS, NIGHT_WEIGHTS, type ActivityId, type Intent } from '../src/engine/bots/officeLife';
+import { OfficeLife, diffRoster, DAY_WEIGHTS, NIGHT_WEIGHTS, type ActivityId, type Intent } from '../src/engine/bots/officeLife';
 
 const META = parsePieces(readFileSync(resolve(__dirname, '../../assets/office/Isometric_Pixel_Props/pieces.csv'), 'utf8'));
 const TEAM: RoleId[] = ['pm', 'techlead', 'frontend', 'backend', 'qa'];
@@ -13,6 +13,7 @@ const proj = (id: string, slot: number): Project =>
 const L = buildLayout([proj('a', 0), proj('b', 1)], META);
 const BOTS = ['a', 'b'].flatMap(p => TEAM.map(r => `${p}:${r}`));
 const projectOf = (botId: string) => botId.split(':')[0];
+const SEEDS = [7, 1, 2, 3, 11];
 const ACTS: ActivityId[] = ['desk', 'coffee', 'table', 'bar', 'lounge', 'chat', 'wander'];
 
 /** mulberry32: small seeded PRNG */
@@ -35,10 +36,13 @@ function world(seed = 1, night = false) {
   return { life, current, step, get t() { return t; } };
 }
 
-/** chats are counted once per pair (the initiator's pick); every other activity once per intent */
+/**
+ * Share of each bot's chosen activities (a chat counts for both partners: the weight is the share of time-slots
+ * a bot spends chatting). `filler` intents (stand-ins while the chosen activity is blocked) are left out.
+ */
 function frequencies(intents: Intent[]) {
   const n: Record<string, number> = Object.fromEntries(ACTS.map(a => [a, 0]));
-  for (const i of intents) n[i.activity] += i.activity === 'chat' ? 0.5 : 1;
+  for (const i of intents) if (!i.filler) n[i.activity] += 1;
   const total = Object.values(n).reduce((a, b) => a + b, 0);
   return Object.fromEntries(ACTS.map(a => [a, n[a] / total])) as Record<ActivityId, number>;
 }
@@ -46,6 +50,12 @@ const share = (w: Record<ActivityId, number>) => {
   const total = ACTS.reduce((a, k) => a + w[k], 0);
   return Object.fromEntries(ACTS.map(a => [a, w[a] / total])) as Record<ActivityId, number>;
 };
+
+/** Frequencies averaged over SEEDS (layout-coupled: 2 lounge seats, 2 bar spots, 3 table chairs, 2 chat pairs). */
+function averaged(night: boolean) {
+  const runs = SEEDS.map(seed => frequencies(run(night, 1000, 5000, seed)));
+  return Object.fromEntries(ACTS.map(a => [a, runs.reduce((s, r) => s + r[a], 0) / runs.length])) as Record<ActivityId, number>;
+}
 
 function run(night: boolean, ticks = 1000, ms = 5000, seed = 7) {
   const w = world(seed, night);
@@ -71,20 +81,24 @@ describe('OfficeLife', () => {
   });
 
   it('follows the day weights within ±25% over 1000 ticks with 10 bots', () => {
-    const f = frequencies(run(false)), want = share(DAY_WEIGHTS);
+    // Averaged over several fixed seeds: a single seed is deterministic but only a few % inside the bound.
+    // Layout-coupled: the margins depend on the breakroom's spot counts (2 lounge seats, 2 bar spots, 3 table chairs).
+    const f = averaged(false);
+    const want = share(DAY_WEIGHTS);
     for (const a of ACTS) {
       expect.soft(Math.abs(f[a] - want[a]) / want[a], `${a}: got ${f[a].toFixed(3)} want ${want[a].toFixed(3)}`).toBeLessThanOrEqual(0.25);
     }
   });
 
   it('raises bar and lounge at night', () => {
-    // Night weights send ~85% of picks outside the room, so the 60% cap and the two lounge seats bind hard;
-    // exact night shares are not reachable. The spec only asks that bar and lounge rise accordingly.
-    const day = frequencies(run(false)), night = frequencies(run(true));
+    const day = averaged(false), night = averaged(true);
     const dayW = share(DAY_WEIGHTS), nightW = share(NIGHT_WEIGHTS);
     expect(night.bar).toBeGreaterThan(day.bar * 0.75 * (nightW.bar / dayW.bar));
     expect(night.lounge).toBeGreaterThan(day.lounge * 0.75 * (nightW.lounge / dayW.lounge));
     expect(night.desk).toBeLessThan(day.desk);
+    for (const a of ACTS) {
+      expect.soft(Math.abs(night[a] - nightW[a]) / nightW[a], `${a}: got ${night[a].toFixed(3)} want ${nightW[a].toFixed(3)}`).toBeLessThanOrEqual(0.25);
+    }
   });
 
   it('never lets two bots hold the same spot; a spot stays reserved until its intent ends', () => {
@@ -203,5 +217,68 @@ describe('OfficeLife', () => {
     w2.step(first.durationMs - 1);
     w2.life.arrived(first.botId);
     expect(w2.step(first.durationMs - 1).some(i => i.botId === first.botId)).toBe(false);
+  });
+  it('re-rolls a blocked pick on the same tick: a due bot only lingers when its desk is cooling down and nothing else is feasible', () => {
+    // no lounge seats at all, so every lounge roll is blocked
+    const spots = L.spots.filter(s => !s.tags.includes('lounge'));
+    let t = 0;
+    const life = new OfficeLife({ spots, seats: L.seats, random: seeded(21), now: () => t, isNight: () => true });
+    for (const id of BOTS) life.register({ id });
+    const cur = new Map<string, { i: Intent; at: number }>();
+    const hist = new Map<string, ActivityId[]>();
+    let due = 0, lingered = 0;
+    for (let k = 0; k < 3000; k++) {
+      t += 1000;
+      const out = life.tick();
+      const got = new Set(out.map(i => i.botId));
+      const outside = [...cur].filter(([bot, c]) => c.i.spots.some(s => s.room !== projectOf(bot))).length;
+      for (const [bot, c] of cur) {
+        if (t < c.at + c.i.durationMs) continue;
+        due++;
+        if (got.has(bot)) continue;
+        lingered++;
+        // allowed only when the bot is inside, the cap is full and its cooldown blocks the desk
+        // (the only other in-room activity, wander at the room's shelf, may be cooling down or taken)
+        expect(c.i.spots.some(s => s.room !== projectOf(bot))).toBe(false);
+        expect(outside).toBeGreaterThan(0);
+        expect(hist.get(bot)!.slice(-2)).toContain('desk');
+      }
+      for (const i of out) {
+        expect(i.activity).not.toBe('lounge');
+        cur.set(i.botId, { i, at: t });
+        hist.set(i.botId, [...(hist.get(i.botId) ?? []), i.activity]);
+      }
+    }
+    expect(due).toBeGreaterThan(500);
+    expect(due - lingered).toBeGreaterThan(500);
+  });
+
+  it('follows a layout change: kept bots keep their reservations, removed bots free theirs', () => {
+    const w = world(13);
+    for (let k = 0; k < 40; k++) w.step(3000);
+    const keptBot = BOTS.find(id => id.startsWith('a:'))!;
+    const kept = w.current.get(keptBot)!;
+    // project b leaves; a new project c arrives in slot 2
+    const L2 = buildLayout([proj('a', 0), proj('c', 2)], META);
+    for (const id of BOTS.filter(id => id.startsWith('b:'))) w.life.unregister(id);
+    w.life.setLayout(L2.spots, L2.seats);
+    for (const r of TEAM) w.life.register({ id: `c:${r}` });
+    for (const s of kept.spots) if (L2.spots.some(q => q.id === s.id)) expect(w.life.holder(s.id)).toBe(keptBot);
+    for (const s of L.spots) { const h = w.life.holder(s.id); if (h) expect(h.startsWith('b:')).toBe(false); }
+    const ids = new Set(L2.spots.map(s => s.id));
+    for (let k = 0; k < 300; k++) for (const i of w.step(3000)) {
+      expect(i.botId.startsWith('b:')).toBe(false);
+      for (const s of i.spots) expect(ids.has(s.id), `stale spot ${s.id}`).toBe(true);
+    }
+  });
+});
+
+describe('diffRoster', () => {
+  it('keeps unchanged bots, adds new ones, removes gone ones and replaces a changed look', () => {
+    const prev = new Map([['a:pm', 'Clara/a'], ['a:qa', 'Hugo/b'], ['b:pm', 'Leo/c']]);
+    const d = diffRoster(prev, [{ id: 'a:pm', key: 'Clara/a' }, { id: 'a:qa', key: 'Hugo/c' }, { id: 'c:pm', key: 'Nina/a' }]);
+    expect(d.keep).toEqual(['a:pm']);
+    expect(d.add.sort()).toEqual(['a:qa', 'c:pm']);
+    expect(d.remove.sort()).toEqual(['a:qa', 'b:pm']);
   });
 });
