@@ -113,8 +113,8 @@ async function toPlanGate(o: ClaudeOrchestrator, repo: string, team = CORE) {
   await o.idle();
   return t;
 }
-async function toFinal(o: ClaudeOrchestrator, repo: string) {
-  const t = await toPlanGate(o, repo);
+async function toFinal(o: ClaudeOrchestrator, repo: string, team = CORE) {
+  const t = await toPlanGate(o, repo, team);
   o.decide(t.id, 'plan', 'approved');
   await o.idle();
   return t;
@@ -391,6 +391,128 @@ describe('ClaudeOrchestrator', () => {
     expect(o.find(t2.id)!.openGate).toBe('plan');
   });
 
+  it('review/test run automatically when only a builder is tasked', async () => {
+    const o = make();
+    runner.script = c => c.kind === 'plan' ? { result: fence({ ...PLAN, tasks: [{ role: 'backend', text: 'API', files: [] }] }) } : undefined;
+    await toFinal(o, repo, [...CORE, 'security']);
+    expect(runner.of('techlead', 'review')).toHaveLength(1);
+    expect(runner.of('security', 'review')).toHaveLength(1);
+    expect(runner.of('qa', 'test')).toHaveLength(1);
+    expect(runner.of('frontend')).toHaveLength(0);
+    expect(states('techlead')[0]).toBe('summoned');
+  });
+
+  it('issues for roles that cannot edit (or untasked) go to all tasked builders', async () => {
+    const o = make();
+    runner.script = (c, n) => c.kind === 'review' && n === 1
+      ? { result: fence({ approved: false, issues: [{ role: 'security', file: 'a.txt', note: 'secret leak' }, { role: 'pm', file: '', note: 'scope' }] }) }
+      : c.kind === 'plan' ? { result: fence({ ...PLAN, tasks: [{ role: 'backend', text: 'API', files: [] }] }) } : undefined;
+    await toFinal(o, repo, [...CORE, 'security']);
+    expect(runner.of('security', 'bounce')).toHaveLength(0);
+    expect(runner.of('pm', 'bounce')).toHaveLength(0);
+    expect(runner.of('frontend', 'bounce')).toHaveLength(0); // untasked
+    const b = runner.of('backend', 'bounce');
+    expect(b).toHaveLength(1);
+    expect(b[0].o.prompt).toContain('secret leak');
+    expect(b[0].o.prompt).toContain('scope');
+  });
+
+  it('issues for a tasked editable role go to that role only', async () => {
+    const o = make();
+    runner.script = (c, n) => c.kind === 'review' && n === 1
+      ? { result: fence({ approved: false, issues: [{ role: 'frontend', file: 'ui.txt', note: 'ugly' }] }) } : undefined;
+    await toFinal(o, repo);
+    expect(runner.of('frontend', 'bounce')).toHaveLength(1);
+    expect(runner.of('backend', 'bounce')).toHaveLength(0);
+  });
+
+  it('detached HEAD base is noted at approval and the merge is refused', async () => {
+    const o = make();
+    git(repo, 'checkout', '-q', '--detach');
+    const t = await toFinal(o, repo);
+    expect(pmText()).toMatch(/detached HEAD/i);
+    o.decide(t.id, 'final', 'approved');
+    await o.idle();
+    expect(o.find(t.id)!.status).toBe('done');
+    expect(pmText()).toMatch(/Merge pending/);
+    expect(pmText()).toMatch(/not on a branch/i);
+  });
+
+  it('cancel is refused once the final merge has started', async () => {
+    const o = make();
+    const t = await toFinal(o, repo);
+    o.decide(t.id, 'final', 'approved');
+    expect(() => o.cancel(t.id)).toThrow(/merging/);
+    await o.idle();
+    expect(o.find(t.id)!.status).toBe('done');
+  });
+
+  it('cancel during review aborts the reviewer and removes the worktree', async () => {
+    const o = make();
+    runner.script = c => c.kind === 'review' ? { hang: true } : undefined;
+    const t = await toPlanGate(o, repo);
+    o.decide(t.id, 'plan', 'approved');
+    for (let i = 0; i < 100 && !runner.of('techlead', 'review').length; i++) await new Promise(r => setTimeout(r, 20));
+    const rv = runner.of('techlead', 'review')[0];
+    o.cancel(t.id);
+    await o.idle();
+    expect(rv.o.signal!.aborted).toBe(true);
+    expect(o.find(t.id)!.status).toBe('cancelled');
+    expect(fs.existsSync(path.join(dataDir, 'worktrees', 'p1', t.id))).toBe(false);
+    expect(states('techlead').at(-1)).toBe('idle');
+  });
+
+  it('one parallel builder failing aborts its sibling and fails the ticket', async () => {
+    const o = make();
+    runner.script = c => c.kind === 'stage' && c.o.role === 'frontend' ? { hang: true }
+      : c.kind === 'stage' && c.o.role === 'backend' ? { result: 'boom', isError: true, delay: 30 } : undefined;
+    const t = await toPlanGate(o, repo);
+    o.decide(t.id, 'plan', 'approved');
+    await o.idle();
+    expect(o.find(t.id)!.status).toBe('failed');
+    expect(runner.of('frontend', 'stage')[0].o.signal!.aborted).toBe(true);
+    expect(o.find(t.id)!.reason).toContain('boom');
+  });
+
+  it('error_max_turns fails with a turn-limit reason', async () => {
+    const o = make();
+    runner.script = c => c.kind === 'stage' && c.o.role === 'backend' ? { result: '', isError: true, subtype: 'error_max_turns' } : undefined;
+    const t = await toFinal(o, repo);
+    expect(o.find(t.id)!.status).toBe('failed');
+    expect(o.find(t.id)!.reason).toMatch(/turn limit \(80\)/);
+  });
+
+  it('an owner note reaches the role’s next prompt (PM re-plan and builder)', async () => {
+    const o = make();
+    const t = await toPlanGate(o, repo);
+    o.sendMessage(t.id, 'Use the brand color');
+    o.decide(t.id, 'plan', 'changes', 'tweak');
+    await o.idle();
+    const re = runner.of('pm', 'replan')[0].o.prompt;
+    expect(re).toContain('<owner-notes>');
+    expect(re).toContain('Use the brand color');
+    runner.script = (c, n) => c.kind === 'stage' && c.o.role === 'frontend' ? { result: 'ok', delay: 200 }
+      : c.kind === 'review' && n === 1 ? { result: fence({ approved: false, issues: [{ role: 'frontend', file: 'ui.txt', note: 'x' }] }) } : undefined;
+    o.decide(t.id, 'plan', 'approved');
+    for (let i = 0; i < 100 && !runner.of('frontend', 'stage').length; i++) await new Promise(r => setTimeout(r, 10));
+    o.sendMessage(t.id, 'Rounded corners please');
+    await o.idle();
+    const later = runner.calls.filter(c => c.o.role === 'frontend').slice(1).map(c => c.o.prompt).join('\n');
+    expect(later).toContain('Rounded corners please');
+  });
+
+  it('adopt seeds usage from the recovered ticket', async () => {
+    const o = make();
+    const t = await toPlanGate(o, repo);
+    const recovered = { ...o.find(t.id)!, usage: { turns: 10, costUsd: 1, durationMs: 1000 } };
+    const o2 = make();
+    o2.adopt(project(repo), recovered);
+    await o2.idle();
+    o2.cancel(t.id);
+    await o2.idle();
+    expect(of('ticket.usage').at(-1)!.turns).toBe(10 + 2);
+  });
+
   it('never runs two runs on one session at once', async () => {
     const o = make();
     const t = await toPlanGate(o, repo);
@@ -566,14 +688,27 @@ describe('ClaudeOrchestrator: follow-ups, resume, messages', () => {
     expect(delivery.ended!).toBeLessThan(runner.of('techlead', 'review')[0].started);
   });
 
-  it('PM between stages: message resumes the PM session right away', async () => {
+  it('PM note at the plan gate is held for a re-plan; on approval the PM session is resumed with it', async () => {
     const o = make();
     const t = await toPlanGate(o, repo);
     o.sendMessage(t.id, 'Keep it small');
     await o.idle();
+    expect(runner.of('pm')).toHaveLength(1);
+    o.decide(t.id, 'plan', 'approved');
+    await o.idle();
     const last = runner.of('pm').at(-1)!;
     expect(last.o.prompt).toContain('Keep it small');
     expect(last.o.resume).toBe(o.find(t.id)!.sessions!.pm);
-    expect(o.find(t.id)!.openGate).toBe('plan');
+    expect(o.find(t.id)!.openGate).toBe('final');
+  });
+
+  it('PM note at the final gate resumes the PM session right away', async () => {
+    const o = make();
+    const t = await toFinal(o, repo);
+    const n = runner.of('pm').length;
+    o.sendMessage(t.id, 'Nice work');
+    await o.idle();
+    expect(runner.of('pm')).toHaveLength(n + 1);
+    expect(runner.of('pm').at(-1)!.o.prompt).toContain('Nice work');
   });
 });

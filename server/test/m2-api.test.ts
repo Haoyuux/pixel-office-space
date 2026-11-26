@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import request from 'supertest';
 import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import type { Project, Ticket } from '@office/shared';
 import { createOffice, type Office } from '../src/app';
 import { boot } from '../src/boot';
@@ -148,16 +149,17 @@ describe('git-init + system', () => {
     expect(inits).toEqual([]);
   });
 
-  const AUTH = 'Logged in\nLogin method: Claude Max Account\nOrganization: Secret Org\nEmail: owner@example.com\nExpires: 2026-12-20T10:00:00Z\n';
+  /** Real `claude auth status --text` output from the owner's machine (organization/email redacted). */
+  const AUTH = readFileSync(new URL('./fixtures/auth-status.txt', import.meta.url), 'utf8');
 
   it('GET /api/system/claude → shape without email/organization; cached 60 s', async () => {
     const calls: string[][] = [];
-    const exec: Exec = async args => { calls.push(args); return args[0] === '--version' ? { code: 0, stdout: '2.1.3 (Claude Code)\n' } : { code: 0, stdout: AUTH }; };
+    const exec: Exec = async args => { calls.push(args); return args[0] === '--version' ? { code: 0, stdout: '2.1.332 (Claude Code)\n' } : { code: 0, stdout: AUTH }; };
     const o = mk({ isRepo: async () => true, gitInit: async () => undefined }, exec);
     const r = await request(o.server).get('/api/system/claude');
     expect(r.status).toBe(200);
-    expect(r.body).toEqual({ found: true, version: '2.1.3', loggedIn: true, accountType: 'Claude Max Account', signInEndsAt: '2026-12-20T10:00:00.000Z' });
-    expect(JSON.stringify(r.body)).not.toMatch(/example\.com|Secret Org|email|organization/i);
+    expect(r.body).toEqual({ found: true, version: '2.1.332', loggedIn: true, accountType: 'Claude Ultra account', signInEndsAt: '2026-12-20T08:54:14.645Z' });
+    expect(JSON.stringify(r.body)).not.toMatch(/example\.com|Example Org|redacted|email|organization/i);
     await request(o.server).get('/api/system/claude');
     expect(calls).toEqual([['--version'], ['auth', 'status', '--text']]);
   });
@@ -174,6 +176,8 @@ describe('git-init + system', () => {
     t = 60_000; await s.status();
     expect(n).toBe(4);
     expect(parseAuthStatus('Not logged in').loggedIn).toBe(false);
-    expect(parseAuthStatus('Account: user@example.com\nLogged in').accountType).toBeNull();
+    expect(parseAuthStatus('Login method: user@example.com').accountType).toBeNull();
+    expect(parseAuthStatus(AUTH)).toEqual({ loggedIn: true, accountType: 'Claude Ultra account', signInEndsAt: '2026-12-20T08:54:14.645Z' });
+    expect(parseAuthStatus('Organization: X\nEmail: a@b.c').loggedIn).toBe(false);
   });
 });

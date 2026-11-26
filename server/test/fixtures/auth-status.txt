@@ -1,0 +1,4 @@
+Login method: Claude Ultra account
+Organization: Example Org (redacted)
+Email: someone@example.com
+Sign-in ends: between 2026-12-17 and 2026-12-20 (2026-12-20T08:54:14.645Z)
