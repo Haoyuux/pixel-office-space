@@ -2,27 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { Project, ServerEvent, RoleId } from '@office/shared';
 import { SimulatedOrchestrator, ConflictError } from '../src/orchestrator/simulated';
 import { TicketLog } from '../src/ticketLog';
-import { tmp } from './helpers';
-
-export class ManualScheduler {
-  private q: { at: number; fn: () => void; dead: boolean }[] = [];
-  now = 0;
-  after(ms: number, fn: () => void) {
-    const e = { at: this.now + ms, fn, dead: false };
-    this.q.push(e);
-    return () => { e.dead = true; };
-  }
-  flush() {
-    let guard = 0;
-    while (this.q.some(e => !e.dead) && guard++ < 100000) {
-      this.q.sort((a, b) => a.at - b.at);
-      const e = this.q.shift()!;
-      if (e.dead) continue;
-      this.now = e.at;
-      e.fn();
-    }
-  }
-}
+import { tmp, ManualScheduler } from './helpers';
 
 const project = (team: RoleId[]): Project => ({ id: 'p1', name: 'Shop', folder: '.', accent: 'cyan', team, slot: 0, looks: {} as any, createdAt: '' });
 const CORE: RoleId[] = ['pm', 'techlead', 'frontend', 'backend', 'qa'];
