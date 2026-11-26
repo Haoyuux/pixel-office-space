@@ -67,3 +67,8 @@ Branch `m2-task5` (from `m2-real-agents` @ 3eed205). Status: DONE.
   That costs a PM turn, but nothing re-plans.
 - **Rough edge in Resume.** Resuming a ticket that failed during a final-gate merge re-runs its last work stage, then
   re-opens the final gate.
+
+## Follow-up: merged Task 4 fixes (a9de46f)
+- Merged m2-real-agents (Task 4 review fixes). Conflicts in claude.ts resolved keeping route()/tasked() bounce routing plus note delivery; PM notes at the plan gate are now held for a re-plan (Task 4 behaviour) and delivered to the PM session on approval; past the plan they are delivered immediately.
+- Auth status parser matches the real output: `Login method:` gives accountType and loggedIn; the ISO timestamp in parentheses on `Sign-in ends:` gives signInEndsAt; Organization/Email are never read. Redacted fixture: server/test/fixtures/auth-status.txt.
+- server: 147/147 tests pass; tsc (server, web) clean. The Task 4 cancel test failed once under full-suite load (it waits a fixed 300 ms), then passed on 2 reruns; it may be timing-flaky.
