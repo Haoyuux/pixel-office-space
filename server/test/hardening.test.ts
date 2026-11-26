@@ -203,7 +203,7 @@ describe('#11 restart', () => {
     log.append({ ...base, type: 'ticket.created', ticket: tk('wait', '2026-01-01T00:01:00Z'), ticketId: 'wait', seq: 1 } as ServerEvent);
 
     const s = new ManualScheduler();
-    const b = boot({ dataDir: dir, scheduler: s, stageMs: [100, 200], random: () => 0.99 });
+    const b = boot({ dataDir: dir, scheduler: s, stageMs: [100, 200], random: () => 0.99, forceMode: 'simulated' });
     try {
       const after = new TicketLog(join(dir, 'projects'));
       expect(after.read(p.id, 'run').at(-1)).toMatchObject({ type: 'ticket.failed', reason: 'interrupted' });

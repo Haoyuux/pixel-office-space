@@ -178,6 +178,20 @@ export async function mergeIntoBase(repo: string, branch: string, base: string):
   };
 }
 
+/** Re-attach an existing branch at wtPath (follow-ups / Resume after the worktree was removed). */
+export async function attachWorktree(repo: string, wtPath: string, branch: string): Promise<{ branch: string; path: string }> {
+  await run(repo, ['worktree', 'prune']);
+  if (fs.existsSync(path.join(wtPath, '.git'))) return { branch, path: wtPath };
+  if (fs.existsSync(wtPath)) fs.rmSync(wtPath, { recursive: true, force: true, maxRetries: 5 });
+  fs.mkdirSync(path.dirname(wtPath), { recursive: true });
+  await must(repo, ['worktree', 'add', wtPath, branch]);
+  return { branch, path: wtPath };
+}
+
+export async function branchExists(repo: string, branch: string): Promise<boolean> {
+  return (await run(repo, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`])).code === 0;
+}
+
 export async function removeWorktree(repo: string, wtPath: string): Promise<void> {
   await run(repo, ['worktree', 'remove', '--force', wtPath]);
   if (fs.existsSync(wtPath)) fs.rmSync(wtPath, { recursive: true, force: true, maxRetries: 5 });

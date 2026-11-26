@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, renameSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { ROLE_IDS, CHARACTERS, ACCENTS, type Accent, type Look, type Project, type RoleId } from '@office/shared';
+import { ROLE_IDS, CHARACTERS, ACCENTS, type Accent, type AgentsMode, type Look, type Project, type RoleId } from '@office/shared';
 import { ValidationError, NotFoundError } from './errors';
 
 export { ValidationError, NotFoundError };
@@ -9,8 +9,13 @@ export { ValidationError, NotFoundError };
 const PALETTES = ['a', 'b', 'c'] as const;
 const ALL_LOOKS: Look[] = PALETTES.flatMap(palette => CHARACTERS.map(character => ({ character, palette })));
 
-export interface ProjectInput { name: string; folder: string; accent: Accent; team: RoleId[] }
-export interface ProjectPatch { name?: string; accent?: Accent; team?: RoleId[] }
+export interface ProjectInput { name: string; folder: string; accent: Accent; team: RoleId[]; agentsMode?: AgentsMode }
+export interface ProjectPatch { name?: string; accent?: Accent; team?: RoleId[]; agentsMode?: AgentsMode }
+export const AGENTS_MODES: AgentsMode[] = ['claude', 'simulated'];
+const checkMode = (m: unknown): AgentsMode => {
+  if (!AGENTS_MODES.includes(m as AgentsMode)) throw new ValidationError(`Unknown agents mode: ${String(m)}`);
+  return m as AgentsMode;
+};
 /** Runs after validation and before anything is persisted; throwing aborts the change. */
 export type BeforeSave = (p: Project) => void;
 
@@ -34,6 +39,8 @@ export class ProjectStore {
   private projects: Project[] = [];
   constructor(private file: string) {
     if (existsSync(file)) this.projects = JSON.parse(readFileSync(file, 'utf8')).projects ?? [];
+    // M1 projects predate agentsMode: they run real agents (the M2 default)
+    for (const p of this.projects) p.agentsMode ??= 'claude';
   }
 
   list(): Project[] { return [...this.projects].sort((a, b) => a.slot - b.slot); }
@@ -46,12 +53,13 @@ export class ProjectStore {
     if (!statSync(folder).isDirectory()) throw new ValidationError(`Not a folder: ${folder}`);
     const accent = this.checkAccent(input.accent);
     const team = this.checkTeam(input.team);
+    const agentsMode = input.agentsMode === undefined ? 'claude' : checkMode(input.agentsMode);
     const used = new Set(this.projects.map(p => p.slot));
     let slot = 0; while (used.has(slot)) slot++;
     const looks = {} as Record<RoleId, Look>;
     const taken: Look[] = [];
     for (const r of ROLE_IDS) { looks[r] = this.nextLook(taken); taken.push(looks[r]); }
-    const p: Project = { id: randomUUID(), name, folder, accent, team, slot, looks, createdAt: new Date().toISOString() };
+    const p: Project = { id: randomUUID(), name, folder, accent, team, slot, looks, createdAt: new Date().toISOString(), agentsMode };
     beforeSave?.(p);
     this.projects.push(p);
     this.save();
@@ -65,6 +73,7 @@ export class ProjectStore {
     if (patch.name !== undefined) next.name = checkName(patch.name);
     if (patch.accent !== undefined) next.accent = this.checkAccent(patch.accent);
     if (patch.team !== undefined) next.team = this.checkTeam(patch.team);
+    if (patch.agentsMode !== undefined) next.agentsMode = checkMode(patch.agentsMode);
     beforeSave?.(next);
     Object.assign(p, next);
     this.save();

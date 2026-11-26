@@ -1,0 +1,183 @@
+import { describe, it, expect, afterEach } from 'vitest';
+import request from 'supertest';
+import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
+import type { Project, Ticket } from '@office/shared';
+import { createOffice, type Office } from '../src/app';
+import { boot } from '../src/boot';
+import { SimulatedOrchestrator } from '../src/orchestrator/simulated';
+import { RoutingOrchestrator } from '../src/orchestrator/routing';
+import type { Orchestrator } from '../src/orchestrator/types';
+import { ClaudeSystem, parseAuthStatus, type Exec } from '../src/claude/system';
+import { TicketLog } from '../src/ticketLog';
+import type { RunOptions, RunResult } from '../src/claude/runner';
+import { tmp, projectDir, ManualScheduler } from './helpers';
+
+const TEAM = ['pm', 'techlead', 'frontend', 'backend', 'qa'];
+let office: Office | undefined;
+afterEach(() => { office?.close(); office = undefined; });
+
+/** A runner that never finishes (keeps a claude ticket running) — no real CLI. */
+const hangingRunner = { calls: [] as RunOptions[], run(o: RunOptions): Promise<RunResult> { this.calls.push(o); return new Promise(() => undefined); } };
+
+function bootFake(extra: Partial<Parameters<typeof boot>[0]> = {}) {
+  const dataDir = tmp();
+  const sched = new ManualScheduler();
+  const b = boot({ dataDir, scheduler: sched, stageMs: [100, 200], random: () => 0.99, runner: hangingRunner, ...extra });
+  office = b.office;
+  return { ...b, sched, dataDir };
+}
+const add = (o: Office, body: Record<string, unknown> = {}) =>
+  request(o.server).post('/api/projects').send({ name: 'Shop', folder: projectDir(), accent: 'cyan', team: TEAM, ...body });
+
+describe('agents mode + routing', () => {
+  it('new projects default to claude; agentsMode validated', async () => {
+    const { office: o } = bootFake();
+    expect((await add(o)).body.agentsMode).toBe('claude');
+    expect((await add(o, { agentsMode: 'simulated' })).body.agentsMode).toBe('simulated');
+    expect((await add(o, { agentsMode: 'robots' })).status).toBe(400);
+  });
+
+  it('a simulated project runs on the simulated orchestrator; a claude project on claude', async () => {
+    const b = bootFake();
+    const sim = (await add(b.office, { agentsMode: 'simulated' })).body as Project;
+    const cl = (await add(b.office)).body as Project;
+    const st = (await request(b.office.server).post(`/api/projects/${sim.id}/tickets`).send({ text: 'Sim ticket' })).body as Ticket;
+    const ct = (await request(b.office.server).post(`/api/projects/${cl.id}/tickets`).send({ text: 'Real ticket' })).body as Ticket;
+    expect(st.agentsMode).toBe('simulated');
+    expect(ct.agentsMode).toBe('claude');
+    expect(b.simulated.find(st.id)).toBeTruthy();
+    expect(b.claude.find(ct.id)).toBeTruthy();
+    b.sched.flush();
+    expect(b.orchestrator.find(st.id)!.openGate).toBe('plan'); // simulated still works end-to-end to its gate
+  });
+
+  it('PATCH agentsMode → 409 while a ticket is running; ok when idle', async () => {
+    const b = bootFake();
+    const p = (await add(b.office, { agentsMode: 'simulated' })).body as Project;
+    expect((await request(b.office.server).patch(`/api/projects/${p.id}`).send({ agentsMode: 'claude' })).body.agentsMode).toBe('claude');
+    await request(b.office.server).patch(`/api/projects/${p.id}`).send({ agentsMode: 'simulated' });
+    const t = (await request(b.office.server).post(`/api/projects/${p.id}/tickets`).send({ text: 'x' })).body as Ticket;
+    const r = await request(b.office.server).patch(`/api/projects/${p.id}`).send({ agentsMode: 'claude' });
+    expect(r.status).toBe(409);
+    await request(b.office.server).post(`/api/tickets/${t.id}/cancel`).send({});
+    expect((await request(b.office.server).patch(`/api/projects/${p.id}`).send({ agentsMode: 'claude' })).status).toBe(200);
+  });
+
+  it('projects saved before agentsMode existed are treated as claude', async () => {
+    const dataDir = tmp();
+    const { ProjectStore } = await import('../src/store');
+    const s = new ProjectStore(join(dataDir, 'projects.json'));
+    const p = s.add({ name: 'Old', folder: projectDir(), accent: 'cyan', team: ['pm'] });
+    const fs = await import('node:fs');
+    const raw = JSON.parse(fs.readFileSync(join(dataDir, 'projects.json'), 'utf8'));
+    delete raw.projects[0].agentsMode;
+    fs.writeFileSync(join(dataDir, 'projects.json'), JSON.stringify(raw));
+    expect(new ProjectStore(join(dataDir, 'projects.json')).get(p.id)!.agentsMode).toBe('claude');
+  });
+
+  it('RoutingOrchestrator sends ticket calls to the owner', () => {
+    const calls: string[] = [];
+    const stub = (name: string, owns: string): Orchestrator => ({
+      startTicket: () => { calls.push(`${name}.start`); return {} as Ticket; }, resume: () => { calls.push(`${name}.resume`); return {} as Ticket; },
+      adopt: () => calls.push(`${name}.adopt`), decide: () => calls.push(`${name}.decide`), sendMessage: () => calls.push(`${name}.msg`),
+      cancel: () => calls.push(`${name}.cancel`), current: () => undefined, queue: () => [],
+      find: id => id === owns ? ({ id } as Ticket) : undefined, onEvent: () => undefined, busyRoles: () => [],
+    });
+    const r = new RoutingOrchestrator({ claude: stub('c', 'tc'), simulated: stub('s', 'ts') });
+    r.startTicket({ agentsMode: 'simulated' } as Project, 'x');
+    r.startTicket({} as Project, 'x');
+    r.sendMessage('ts', 'hi'); r.cancel('tc'); r.resume('tc');
+    expect(calls).toEqual(['s.start', 'c.start', 's.msg', 'c.cancel', 'c.resume']);
+    expect(() => r.decide('nope', 'plan', 'approved')).toThrow(/Unknown ticket/);
+  });
+});
+
+describe('follow-ups + resume REST', () => {
+  it('POST tickets with parentTicketId → follow-up; unknown parent → 404', async () => {
+    const b = bootFake();
+    const p = (await add(b.office, { agentsMode: 'simulated' })).body as Project;
+    const t1 = (await request(b.office.server).post(`/api/projects/${p.id}/tickets`).send({ text: 'first' })).body as Ticket;
+    const t2 = await request(b.office.server).post(`/api/projects/${p.id}/tickets`).send({ text: 'again', parentTicketId: t1.id });
+    expect(t2.status).toBe(201);
+    expect(t2.body.parentTicketId).toBe(t1.id);
+    expect((await request(b.office.server).post(`/api/projects/${p.id}/tickets`).send({ text: 'x', parentTicketId: 'nope' })).status).toBe(404);
+  });
+
+  it('POST /api/tickets/:id/resume → 409 for simulated or non-failed, 404 unknown', async () => {
+    const b = bootFake();
+    const p = (await add(b.office, { agentsMode: 'simulated' })).body as Project;
+    const t = (await request(b.office.server).post(`/api/projects/${p.id}/tickets`).send({ text: 'x' })).body as Ticket;
+    expect((await request(b.office.server).post(`/api/tickets/${t.id}/resume`).send({})).status).toBe(409);
+    expect((await request(b.office.server).post('/api/tickets/nope/resume').send({})).status).toBe(404);
+  });
+});
+
+describe('git-init + system', () => {
+  const mk = (git: { isRepo: (d: string) => Promise<boolean>; gitInit: (d: string) => Promise<void> }, exec?: Exec) => {
+    const dataDir = tmp();
+    const log = new TicketLog(join(dataDir, 'projects'));
+    const orchestrator = new SimulatedOrchestrator({ log, scheduler: new ManualScheduler() });
+    office = createOffice({ dataDir, orchestrator, log, git, claudeSystem: exec ? new ClaudeSystem(exec) : undefined });
+    return office;
+  };
+
+  it('git-init runs gitInit only on request; 409 when already a repo', async () => {
+    const inits: string[] = [];
+    let repo = false;
+    const o = mk({ isRepo: async () => repo, gitInit: async d => { inits.push(d); } });
+    const p = (await add(o)).body as Project;
+    expect(inits).toEqual([]);
+    const r = await request(o.server).post(`/api/projects/${p.id}/git-init`).send({});
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ ok: true });
+    expect(typeof r.body.message).toBe('string');
+    expect(inits).toEqual([p.folder]);
+    repo = true;
+    expect((await request(o.server).post(`/api/projects/${p.id}/git-init`).send({})).status).toBe(409);
+    expect(inits).toHaveLength(1);
+  });
+
+  it('origin/JSON guards apply to the new routes', async () => {
+    const inits: string[] = [];
+    const o = mk({ isRepo: async () => false, gitInit: async d => { inits.push(d); } }, async () => ({ code: 0, stdout: '' }));
+    const p = (await add(o)).body as Project;
+    expect((await request(o.server).post(`/api/projects/${p.id}/git-init`).set('Origin', 'http://evil.example').send({})).status).toBe(403);
+    expect((await request(o.server).post(`/api/projects/${p.id}/git-init`).set('Content-Type', 'text/plain').send('x')).status).toBe(415);
+    expect((await request(o.server).post('/api/tickets/x/resume').set('Content-Type', 'text/plain').send('x')).status).toBe(415);
+    expect((await request(o.server).get('/api/system/claude').set('Origin', 'http://evil.example')).status).toBe(403);
+    expect(inits).toEqual([]);
+  });
+
+  /** Real `claude auth status --text` output from the owner's machine (organization/email redacted). */
+  const AUTH = readFileSync(new URL('./fixtures/auth-status.txt', import.meta.url), 'utf8');
+
+  it('GET /api/system/claude → shape without email/organization; cached 60 s', async () => {
+    const calls: string[][] = [];
+    const exec: Exec = async args => { calls.push(args); return args[0] === '--version' ? { code: 0, stdout: '2.1.332 (Claude Code)\n' } : { code: 0, stdout: AUTH }; };
+    const o = mk({ isRepo: async () => true, gitInit: async () => undefined }, exec);
+    const r = await request(o.server).get('/api/system/claude');
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ found: true, version: '2.1.332', loggedIn: true, accountType: 'Claude Ultra account', signInEndsAt: '2026-12-20T08:54:14.645Z' });
+    expect(JSON.stringify(r.body)).not.toMatch(/example\.com|Example Org|redacted|email|organization/i);
+    await request(o.server).get('/api/system/claude');
+    expect(calls).toEqual([['--version'], ['auth', 'status', '--text']]);
+  });
+
+  it('ClaudeSystem: not found, logged out, cache expiry', async () => {
+    expect(await new ClaudeSystem(async () => ({ code: -1, stdout: '' })).status())
+      .toEqual({ found: false, version: null, loggedIn: false, accountType: null, signInEndsAt: null });
+    const out = await new ClaudeSystem(async a => a[0] === '--version' ? { code: 0, stdout: '2.0.0' } : { code: 1, stdout: 'Not logged in. Run claude and /login' }).status();
+    expect(out).toMatchObject({ found: true, version: '2.0.0', loggedIn: false, accountType: null });
+    let t = 0, n = 0;
+    const s = new ClaudeSystem(async () => { n++; return { code: 0, stdout: '1.0.0' }; }, 60_000, () => t);
+    await s.status(); t = 59_999; await s.status();
+    expect(n).toBe(2);
+    t = 60_000; await s.status();
+    expect(n).toBe(4);
+    expect(parseAuthStatus('Not logged in').loggedIn).toBe(false);
+    expect(parseAuthStatus('Login method: user@example.com').accountType).toBeNull();
+    expect(parseAuthStatus(AUTH)).toEqual({ loggedIn: true, accountType: 'Claude Ultra account', signInEndsAt: '2026-12-20T08:54:14.645Z' });
+    expect(parseAuthStatus('Organization: X\nEmail: a@b.c').loggedIn).toBe(false);
+  });
+});

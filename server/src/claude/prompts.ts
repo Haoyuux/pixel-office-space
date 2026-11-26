@@ -71,6 +71,39 @@ ${block('issues', issues.map(i => `- ${i.file ? i.file + ': ' : ''}${i.note}`).j
 Reply with a short summary of the fixes.`;
 }
 
+/** Owner messages sent mid-ticket, prepended to the role's next prompt. */
+export function withOwnerNotes(prompt: string, notes: string[]): string {
+  if (!notes.length) return prompt;
+  return `The owner sent you these notes; take them into account. ${DATA_RULE}\n${block('owner-notes', notes.map(n => `- ${n}`).join('\n'))}\n\n${prompt}`;
+}
+
+/** Owner notes delivered on their own (no further step was pending for the role): resume its session with them. */
+export function deliverNotesPrompt(notes: string[]): string {
+  return withOwnerNotes(`Act on the notes if they concern your work (${GIT_RULE}), then reply with a short summary.`, notes);
+}
+
+export const CONTINUE = 'Continue where you left off.';
+
+/** The PM's resumed session gets the follow-up; it already knows the previous ticket. */
+export function followUpPrompt(ticket: { title: string; text: string }, project: Pick<Project, 'name' | 'team'>): string {
+  const team = project.team.map(r => `${r} (${roleDef(r).label})`).join(', ');
+  return `As the project manager, plan this follow-up to the previous ticket in this conversation. ${GIT_RULE} ${DATA_RULE}
+
+${block('ticket', `Title: ${ticket.title}\n${ticket.text}`)}
+
+Team (assign tasks ONLY to these roles): ${team}
+${OUTPUT_RULE}
+${fence({ summary: 'One-sentence outcome', acceptance: ['Checkable criterion'], areas: ['src'], tasks: [] })}`;
+}
+
+/** Context for a fresh session when the previous one can't be resumed (expired): the earlier plan and diff. */
+export function previousContext(prev: { title: string; plan?: Plan; files?: string[] }): string {
+  const body = [`Previous ticket: ${prev.title}`,
+    prev.plan ? `Previous plan: ${prev.plan.summary}\n${prev.plan.tasks.map(t => `- [${t.role}] ${t.text}`).join('\n')}` : '',
+    prev.files?.length ? `Files changed so far:\n${prev.files.map(f => `- ${f}`).join('\n')}` : ''].filter(Boolean).join('\n');
+  return `This continues earlier work whose conversation is no longer available. ${DATA_RULE}\n${block('previous-work', body)}\n\n`;
+}
+
 export function fixJsonPrompt(): string {
   return 'Your last reply did not contain valid JSON in the required shape. Reply again with only the corrected fenced ```json block.';
 }
