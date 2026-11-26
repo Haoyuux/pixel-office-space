@@ -17,9 +17,23 @@ export class Camera {
     this.world.position.set(Math.round(t.x), Math.round(t.y));
   }
 
-  /** Frame a metre box (walls included) with a margin. */
-  fit(bounds: Box): void {
-    this.set(fitTransform(screenBox(bounds), this.app.screen.width, this.app.screen.height, 48));
+  /** Frame a metre box (walls included) with a margin; `insetRight` px on the right are covered (the drawer). */
+  fit(bounds: Box, insetRight = 0): void {
+    this.set(fitTransform(screenBox(bounds), Math.max(200, this.app.screen.width - insetRight), this.app.screen.height, 48));
+  }
+
+  /** Pans (no zoom change) the least needed so a metre box is on screen, left of `insetRight` px covered on the right. */
+  reveal(bounds: Box, insetRight = 0, margin = 24): void {
+    const sb = screenBox(bounds);
+    const vw = Math.max(200, this.app.screen.width - insetRight), vh = this.app.screen.height;
+    // too big at this zoom: zoom out until it fits (never zoom in)
+    const fit = fitTransform(sb, vw, vh, margin);
+    if (fit.scale < this.scale) { this.set(fit); return; }
+    const k = this.scale;
+    const x0 = sb.x0 * k + this.world.x, x1 = sb.x1 * k + this.world.x, y0 = sb.y0 * k + this.world.y, y1 = sb.y1 * k + this.world.y;
+    const shift = (a: number, b: number, size: number) => b - a > size - 2 * margin ? (size - a - b) / 2 : a < margin ? margin - a : b > size - margin ? size - margin - b : 0;
+    const dx = shift(x0, x1, vw), dy = shift(y0, y1, vh);
+    if (dx || dy) this.set({ scale: k, x: this.world.x + dx, y: this.world.y + dy });
   }
 
   /** Zoom by `factor` keeping the canvas point (cx, cy) fixed. */

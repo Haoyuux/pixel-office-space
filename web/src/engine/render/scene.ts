@@ -46,6 +46,9 @@ export class OfficeScene {
   private trophyCount = new Map<string, number>();
   private trophies = new Map<string, Sprite[]>();
   private trophyTex: Texture | null = null;
+  private badgeText = new Map<string, string>();
+  private badgeViews = new Map<string, Container>();
+  private cork: Sprite | null = null;
   private overlay = new Graphics();
   private eye = new Text({ text: '👁', style: { fontSize: 64 }, anchor: 0.5 });
   private selected: string | null = null;
@@ -82,7 +85,8 @@ export class OfficeScene {
     this.layout = layout;
     this.projects = new Map(projects.map(p => [p.id, p]));
     this.monitors.clear(); this.plates.clear(); this.boards.clear(); this.shelves.clear();
-    this.boardText.clear(); this.trophies.clear();
+    this.boardText.clear(); this.trophies.clear(); this.badgeViews.clear();
+    this.cork = null;
 
     layout.pieces.forEach((p, i) => {
       const { still, frames } = textures[i];
@@ -93,7 +97,7 @@ export class OfficeScene {
         return;
       }
       if (frames) { const a = this.put(p, new AnimatedSprite(frames)); a.animationSpeed = 0.2; a.play(); }
-      else this.put(p, new Sprite(still!));
+      else { const spr = this.put(p, new Sprite(still!)); if (p.tag === 'corkboard') this.cork = spr; }
       if (p.tag?.startsWith('whiteboard:')) this.boards.set(p.tag.slice(11), p);
       if (p.tag?.startsWith('shelf:')) this.shelves.set(p.tag.slice(6), p);
     });
@@ -109,6 +113,7 @@ export class OfficeScene {
 
     for (const id of this.boardTitles.keys()) this.drawBoard(id);
     for (const id of this.trophyCount.keys()) this.drawTrophies(id);
+    for (const id of this.badgeText.keys()) this.drawBadge(id);
     for (const tag of this.monitors.keys()) this.applyWorking(tag);
     if (this.selected && !this.projects.has(this.selected) && !this.plates.has(this.selected)) this.selected = null;
     this.drawOverlay();
@@ -274,6 +279,53 @@ export class OfficeScene {
     this.trophies.set(id, made);
   }
 
+  /**
+   * Room status badge above the nameplate (`… working`, `⏸ 1 waiting`, `✓ done`; null clears it). Drawn screen-aligned
+   * and untinted so it stays readable at night, like the nameplates and the bot HUD.
+   */
+  setBadge(projectId: string, text: string | null): void {
+    if (text) this.badgeText.set(projectId, text); else this.badgeText.delete(projectId);
+    this.drawBadge(projectId);
+  }
+
+  /** Current badge text of a room (null when none), for screenshot checks. */
+  badge(projectId: string): string | null { return this.badgeText.get(projectId) ?? null; }
+
+  private drawBadge(id: string): void {
+    this.badgeViews.get(id)?.destroy({ children: true });
+    this.badgeViews.delete(id);
+    const text = this.badgeText.get(id), plate = this.plates.get(id);
+    if (!text || !plate) return;
+    const color = text.startsWith('⏸') ? 0xffb35c : text.startsWith('✓') ? 0x9dff5c : plate.accent;
+    const root = new Container({ zIndex: 1e6 });
+    const t = new Text({
+      // the low-res pixel font draws '…' as an underscore-like smudge; three dots read better
+      text: text.replace('…', '...'), resolution: 1, anchor: 0.5,
+      style: { fontFamily: PIXEL_FONT, fontSize: 11, fontWeight: 'bold', fill: lerpColor(color, 0xffffff, 0.35), letterSpacing: 1 },
+    });
+    t.scale.set(3);
+    const w = t.width + 28, h = t.height + 12;
+    const bg = new Graphics().roundRect(-w / 2, -h / 2, w, h, h / 2).fill({ color: 0x0f1320, alpha: 0.92 }).stroke({ color, width: 3 });
+    root.addChild(bg, t);
+    // the sign is skewed along the glass (slope 1/2): its top edge under the badge's right end is w/4 higher
+    const plateTop = (plate.plate.height / 2) * 1.08 + (w / 4) * 1.08;
+    root.position.set(plate.x, plate.y - plateTop - h / 2 - 6);
+    this.world.addChild(root);
+    this.lighting.untinted.add(root);
+    this.badgeViews.set(id, root);
+  }
+
+  /** True when a canvas point is over the breakroom cork board (tooltip with the latest tickets). */
+  corkboardAt(sx: number, sy: number): boolean {
+    return !!this.cork && !this.cork.destroyed && this.cork.getBounds().containsPoint(sx, sy);
+  }
+
+  /** Metre box of a room, or null. */
+  roomBounds(id: string): Box | null {
+    const r = this.layout?.rooms.find(x => x.id === id);
+    return r ? { x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1 } : null;
+  }
+
   /** Room id under a canvas point (project rooms, 'breakroom' or 'hall'), or null outside the building. */
   roomAt(sx: number, sy: number): string | null {
     if (!this.layout) return null;
@@ -288,6 +340,8 @@ export class OfficeScene {
   private update(t: Ticker): void {
     this.time += t.deltaMS / 1000;
     const s = this.selected ? this.plates.get(this.selected) : null;
-    if (s && !this.eye.destroyed) this.eye.position.set(s.x, s.y - 70 - Math.sin(this.time * 3) * 8);
+    const b = this.selected ? this.badgeViews.get(this.selected) : undefined;
+    const top = b && !b.destroyed ? Math.min(s ? s.y - 70 : 0, b.y - b.height / 2 - 40) : null;
+    if (s && !this.eye.destroyed) this.eye.position.set(s.x, (top ?? s.y - 70) - Math.sin(this.time * 3) * 8);
   }
 }
