@@ -3,7 +3,7 @@ import {
   applyTicketEvent, type AgentState, type GateDecision, type GateKind, type Plan, type Project, type RoleId,
   type ServerEvent, type Stage, type Ticket,
 } from '@office/shared';
-import { ConflictError, ValidationError, type Orchestrator, type Scheduler } from './types';
+import { ConflictError, ValidationError, type Orchestrator, type Scheduler, type StartOptions } from './types';
 import { makeDiff, makePlan, makeWork, titleOf } from './fakeContent';
 import type { TicketLog } from '../ticketLog';
 
@@ -48,10 +48,11 @@ export class SimulatedOrchestrator implements Orchestrator {
 
   onEvent(cb: (e: ServerEvent) => void) { this.listeners.push(cb); }
 
-  startTicket(project: Project, text: string): Ticket {
+  startTicket(project: Project, text: string, opts: StartOptions = {}): Ticket {
     const ticket: Ticket = {
       id: randomUUID(), projectId: project.id, title: titleOf(text), text, status: 'queued', stage: null,
-      agentStates: {}, createdAt: new Date().toISOString(),
+      agentStates: {}, createdAt: new Date().toISOString(), agentsMode: 'simulated',
+      ...(opts.parentTicketId ? { parentTicketId: opts.parentTicketId } : {}),
     };
     const run: Run = { ticket, project, seq: 0, cancels: [], bounces: { review: 0, test: 0 } };
     this.runs.set(ticket.id, run);
@@ -59,6 +60,8 @@ export class SimulatedOrchestrator implements Orchestrator {
     this.enqueue(run);
     return run.ticket;
   }
+
+  resume(_ticketId: string): Ticket { throw new ConflictError('Simulated tickets cannot be resumed'); }
 
   adopt(project: Project, ticket: Ticket): void {
     const run: Run = { ticket, project, seq: 1_000_000, cancels: [], bounces: { review: 0, test: 0 } };

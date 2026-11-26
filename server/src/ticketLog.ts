@@ -36,6 +36,18 @@ export class TicketLog {
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
+  /** One ticket rebuilt from its log (any project), with its events. */
+  find(ticketId: string): { ticket: Ticket; events: ServerEvent[] } | undefined {
+    if (!existsSync(this.dir) || !/^[\w-]+$/.test(ticketId)) return undefined;
+    for (const pid of readdirSync(this.dir)) {
+      if (!existsSync(join(this.dir, pid, `${ticketId}.jsonl`))) continue;
+      const events = this.read(pid, ticketId);
+      const ticket = this.rebuild(events);
+      if (ticket) return { ticket, events };
+    }
+    return undefined;
+  }
+
   /** Rebuild every ticket; tickets that had started but never ended are marked failed/interrupted. */
   recover(): Ticket[] {
     if (!existsSync(this.dir)) return [];

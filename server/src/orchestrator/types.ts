@@ -8,8 +8,12 @@ export const realScheduler: Scheduler = {
   after(ms, fn) { const h = setTimeout(fn, ms); return () => clearTimeout(h); },
 };
 
+export interface StartOptions { parentTicketId?: string }
+
 export interface Orchestrator {
-  startTicket(project: Project, text: string): Ticket;
+  startTicket(project: Project, text: string, opts?: StartOptions): Ticket;
+  /** Re-run a failed/interrupted ticket from its interrupted stage (claude only; else ConflictError). */
+  resume(ticketId: string): Ticket;
   /** Re-queue a ticket recovered from the log after a restart. */
   adopt(project: Project, ticket: Ticket): void;
   decide(ticketId: string, gate: GateKind, decision: GateDecision, note?: string): void;

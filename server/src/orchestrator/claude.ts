@@ -3,16 +3,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   applyTicketEvent, type AgentState, type GateDecision, type GateKind, type Plan, type PlanTask, type Project, type RoleId,
-  type ServerEvent, type Stage, type Ticket,
+  type ServerEvent, type Stage, type Ticket, type Workspace,
 } from '@office/shared';
-import { ConflictError, ValidationError, type Orchestrator } from './types';
+import { ConflictError, ValidationError, type Orchestrator, type StartOptions } from './types';
 import { titleOf } from './fakeContent';
 import type { TicketLog } from '../ticketLog';
 import type { RunOptions, RunResult, RunnerEvent } from '../claude/runner';
 import * as realGit from '../claude/git';
 import { newTranslateContext, translate } from '../claude/translate';
 import { MAX_TURNS, ROLE_TOOLS } from '../claude/roles';
-import { bouncePrompt, fixJsonPrompt, planPrompt, reviewPrompt, stagePrompt, testPrompt } from '../claude/prompts';
+import {
+  bouncePrompt, CONTINUE, deliverNotesPrompt, fixJsonPrompt, followUpPrompt, planPrompt, previousContext, reviewPrompt,
+  stagePrompt, testPrompt, withOwnerNotes,
+} from '../claude/prompts';
 import { extractJson, planValidator, reviewValidator, testValidator, type PlanWithMap } from '../claude/parse';
 
 export { ConflictError };
@@ -20,7 +23,8 @@ export { ConflictError };
 /** The subset of ClaudeRunner the orchestrator needs (tests inject a fake). */
 export interface Runner { run(o: RunOptions): Promise<RunResult> }
 export type GitApi = Pick<typeof realGit,
-  'isRepo' | 'hasCommit' | 'baseInfo' | 'createWorktree' | 'commitAll' | 'diff' | 'mergeIntoBase' | 'removeWorktree' | 'slug'>;
+  'isRepo' | 'hasCommit' | 'baseInfo' | 'createWorktree' | 'commitAll' | 'diff' | 'mergeIntoBase' | 'removeWorktree' | 'slug'
+  | 'attachWorktree' | 'branchExists'>;
 
 export interface ClaudeOrchestratorOptions {
   log: TicketLog;
@@ -29,6 +33,8 @@ export interface ClaudeOrchestratorOptions {
   /** Worktrees live in <dataDir>/worktrees/<projectId>/<ticketId>. */
   dataDir: string;
   now?: () => Date;
+  /** Current project record (Resume after a restart rebuilds the run from the log). */
+  getProject?: (id: string) => Project | undefined;
 }
 
 type WorkStage = 'design' | 'build' | 'review' | 'test' | 'docs';
@@ -66,6 +72,14 @@ interface Run {
   usage: { turns: number; costUsd: number; durationMs: number };
   /** Set once the ticket ended (done/failed/cancelled): late async results are dropped. */
   ended: boolean;
+  /** Follow-up: the parent ticket (loaded when this ticket starts, after the parent ended). */
+  parent?: Ticket;
+  /** Roles whose session came from the parent: if resuming it fails, fall back to a fresh session + context. */
+  inherited: Set<RoleId>;
+  fallback?: string;
+  /** Resume (interrupted): roles whose next prompt starts with "Continue where you left off." */
+  continuing: Set<RoleId>;
+  resumeFrom?: { stage: Stage | null };
 }
 
 class Ended extends Error { constructor() { super('ticket ended'); this.name = 'Ended'; } }
@@ -92,10 +106,11 @@ export class ClaudeOrchestrator implements Orchestrator {
     while (this.pending.size) await Promise.allSettled([...this.pending]);
   }
 
-  startTicket(project: Project, text: string): Ticket {
+  startTicket(project: Project, text: string, opts: StartOptions = {}): Ticket {
     const ticket: Ticket = {
       id: randomUUID(), projectId: project.id, title: titleOf(text), text, status: 'queued', stage: null,
-      agentStates: {}, createdAt: this.now().toISOString(),
+      agentStates: {}, createdAt: this.now().toISOString(), agentsMode: 'claude',
+      ...(opts.parentTicketId ? { parentTicketId: opts.parentTicketId } : {}),
     };
     const run = this.newRun(project, ticket, 0);
     this.emit(run, { type: 'ticket.created', ticket });
@@ -107,6 +122,35 @@ export class ClaudeOrchestrator implements Orchestrator {
     const run = this.newRun(project, ticket, 1_000_000);
     run.sessions = { ...(ticket.sessions ?? {}) };
     this.enqueue(run);
+  }
+
+  /** Re-run a failed/interrupted ticket from its interrupted stage, resuming the stored sessions. */
+  resume(ticketId: string): Ticket {
+    const live = this.runs.get(ticketId);
+    if (live && !live.ended) throw new ConflictError('Ticket is still active');
+    const found = this.opts.log.find(ticketId);
+    const ticket = found?.ticket ?? live?.ticket;
+    if (!ticket) throw new ConflictError('Unknown ticket');
+    if (ticket.status !== 'failed') throw new ConflictError('Only failed or interrupted tickets can be resumed');
+    if (ticket.agentsMode === 'simulated') throw new ConflictError('Simulated tickets cannot be resumed');
+    const project = this.opts.getProject?.(ticket.projectId) ?? live?.project;
+    if (!project) throw new ConflictError('Project not found');
+    const seq = Math.max(0, ...(found?.events ?? []).map(e => (e as { seq?: number }).seq ?? 0), live?.seq ?? 0);
+    const run = this.newRun(project, ticket, seq);
+    run.sessions = { ...(ticket.sessions ?? {}) };
+    run.plan = ticket.plan;
+    if (ticket.usage) run.usage = { ...ticket.usage };
+    if (ticket.workspace) {
+      run.wt = { path: ticket.workspace.worktree, branch: ticket.workspace.branch };
+      run.base = { ...ticket.workspace.base };
+    }
+    run.continuing = new Set(Object.keys(run.sessions) as RoleId[]);
+    run.resumeFrom = { stage: ticket.stage };
+    if (ticket.parentTicketId) run.parent = this.parentOf(ticket);
+    this.emit(run, { type: 'ticket.resumed', stage: ticket.stage });
+    this.message(run, 'pm', `Resuming from the ${ticket.stage ?? 'plan'} stage.`);
+    this.enqueue(run);
+    return run.ticket;
   }
 
   decide(ticketId: string, gate: GateKind, decision: GateDecision, note?: string): void {
@@ -144,6 +188,8 @@ export class ClaudeOrchestrator implements Orchestrator {
     const active = (Object.keys(states) as RoleId[]).find(r => WORKING.includes(states[r]!)) ?? 'pm';
     (run.notes[active] ??= []).push(text);
     this.message(run, active, `Got it — "${titleOf(text)}". I'll take that into account on my next step.`);
+    // the PM between stages has no further step pending: resume its session with the note (after any current run)
+    if (active === 'pm' && states.pm !== 'planning' && run.sessions.pm) this.bg(run, () => this.deliverNotes(run, 'pm'));
   }
 
   cancel(ticketId: string): void {
@@ -175,6 +221,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     const run: Run = {
       ticket, project, seq, bounces: { review: 0, test: 0 }, lastIssues: [], sessions: {}, locks: new Map(),
       aborts: new Set(), inflight: new Set(), notes: {}, usage: { turns: 0, costUsd: 0, durationMs: 0 }, ended: false,
+      inherited: new Set(), continuing: new Set(),
     };
     this.runs.set(ticket.id, run);
     return run;
@@ -205,7 +252,49 @@ export class ClaudeOrchestrator implements Orchestrator {
       this.finish(run, 'failed', NOT_A_GIT_REPO);
       return;
     }
+    if (run.resumeFrom) return this.resumeStage(run);
+    if (run.ticket.parentTicketId && !run.parent) this.inherit(run);
     await this.runPlan(run);
+  }
+
+  private parentOf(t: Ticket): Ticket | undefined {
+    const id = t.parentTicketId!;
+    const live = this.runs.get(id);
+    return live?.ended || !live ? (this.opts.log.find(id)?.ticket ?? live?.ticket) : live.ticket;
+  }
+
+  /** Follow-up: take over the parent's sessions (each role resumes its own) and keep context for a fallback. */
+  private inherit(run: Run) {
+    const parent = this.parentOf(run.ticket);
+    if (!parent) return;
+    run.parent = parent;
+    for (const [role, sid] of Object.entries(parent.sessions ?? {}) as [RoleId, string][]) {
+      run.inherited.add(role);
+      this.session(run, role, sid);
+    }
+    const files = (this.opts.log.find(parent.id)?.events ?? []).filter(e => e.type === 'ticket.diff')
+      .flatMap(e => (e as { files: { path: string }[] }).files.map(f => f.path));
+    run.fallback = previousContext({ title: parent.title, plan: parent.plan, files: [...new Set(files)] });
+    this.log(run, 'pm', `Follow-up of "${parent.title}"`);
+  }
+
+  private async resumeStage(run: Run) {
+    const stage = run.resumeFrom!.stage;
+    run.resumeFrom = undefined;
+    if (!run.plan || stage === null || stage === 'plan') {
+      if (run.plan) {
+        this.state(run, 'pm', 'waiting');
+        this.emit(run, { type: 'gate.open', gate: 'plan', payload: run.plan });
+        return;
+      }
+      return this.runPlan(run);
+    }
+    this.summonTeam(run);
+    await this.prepareWorktree(run);
+    if (stage === 'done') return this.next(run, 'docs');
+    const work = stage as WorkStage;
+    if (this.rolesFor(run, work).length) return this.runStage(run, work);
+    return this.next(run, work);
   }
 
   private async runPlan(run: Run, note?: string) {
@@ -216,19 +305,28 @@ export class ClaudeOrchestrator implements Orchestrator {
     const folder = run.project.folder;
     let prompt: string;
     let resume: string | undefined;
-    if (note && run.sessions.pm) {
+    let fresh: string | undefined;
+    const mapFile = path.join(folder, MAP_FILE);
+    const readMap = () => fs.existsSync(mapFile) ? fs.readFileSync(mapFile, 'utf8') : undefined;
+    if (!note && run.continuing.has('pm') && run.sessions.pm) {
+      resume = run.sessions.pm;
+      prompt = 'As the project manager, reply with the full plan as one fenced ```json block in the required shape.';
+      fresh = planPrompt(run.ticket, run.project, readMap());
+    } else if (!note && run.parent && !run.plan) {
+      fresh = (run.fallback ?? '') + planPrompt(run.ticket, run.project, readMap());
+      if (run.inherited.has('pm') && run.sessions.pm) { resume = run.sessions.pm; prompt = followUpPrompt(run.ticket, run.project); }
+      else prompt = fresh;
+    } else if (note && run.sessions.pm) {
       this.message(run, 'pm', `Re-planning with your note: "${titleOf(note)}"`);
       resume = run.sessions.pm;
       prompt = `The owner asked for changes to your plan:\n<owner-note>\n${note}\n</owner-note>\n` +
         `Revise the plan and reply with the full corrected plan as one fenced \`\`\`json block in the same shape as before.`;
     } else {
       if (note) this.message(run, 'pm', `Re-planning with your note: "${titleOf(note)}"`);
-      const mapFile = path.join(folder, MAP_FILE);
-      const map = fs.existsSync(mapFile) ? fs.readFileSync(mapFile, 'utf8') : undefined;
-      prompt = planPrompt(run.ticket, run.project, map);
+      prompt = planPrompt(run.ticket, run.project, readMap());
       if (note) prompt += `\n\nOwner note on the previous plan:\n<owner-note>\n${note}\n</owner-note>`;
     }
-    const plan = await this.structured(run, 'pm', 'plan', folder, prompt, resume, planValidator(run.project.team), 'plan');
+    const plan = await this.structured(run, 'pm', 'plan', folder, this.withNotes(run, 'pm', prompt), resume, planValidator(run.project.team), 'plan', fresh);
     const { projectMap, ...clean } = plan;
     run.plan = clean;
     if (projectMap) run.projectMap = projectMap;
@@ -236,11 +334,27 @@ export class ClaudeOrchestrator implements Orchestrator {
     this.message(run, 'pm', `Plan ready: ${clean.tasks.length} tasks. Waiting for your approval.`);
     this.state(run, 'pm', 'waiting');
     this.emit(run, { type: 'gate.open', gate: 'plan', payload: clean });
+    if (run.notes.pm?.length) this.bg(run, () => this.deliverNotes(run, 'pm'));
   }
 
   private async prepareWorktree(run: Run) {
-    if (run.wt) return;
     const folder = run.project.folder;
+    if (run.wt) {
+      // Resume: the worktree may have been removed since; re-attach the branch
+      if (!fs.existsSync(path.join(run.wt.path, '.git'))) run.wt = await this.git.attachWorktree(folder, run.wt.path, run.wt.branch);
+      this.alive(run);
+      return;
+    }
+    const pws = run.parent?.workspace;
+    if (pws && !pws.merged && await this.git.branchExists(folder, pws.branch)) {
+      // follow-up of an unmerged ticket: continue on the same branch (worktree recreated if removed)
+      run.base = { ...pws.base };
+      run.wt = await this.git.attachWorktree(folder, pws.worktree, pws.branch);
+      this.alive(run);
+      this.workspace(run);
+      this.log(run, 'pm', `Continuing on branch ${run.wt.branch}`);
+      return;
+    }
     const info = await this.git.baseInfo(folder);
     this.alive(run);
     run.base = { branch: info.branch, head: info.head };
@@ -248,6 +362,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     const branch = `office/${this.git.slug(run.ticket.title)}-${run.ticket.id.slice(0, 6)}`;
     run.wt = await this.git.createWorktree(folder, wtPath, branch, info.head);
     if (run.ended) { await this.git.removeWorktree(folder, run.wt.path); throw new Ended(); }
+    this.workspace(run);
     if (run.projectMap) {
       const f = path.join(run.wt.path, MAP_FILE);
       fs.mkdirSync(path.dirname(f), { recursive: true });
@@ -319,7 +434,10 @@ export class ClaudeOrchestrator implements Orchestrator {
         const note = unassigned.length ? unassigned.map(i => i.note).join('\n') : `The ${stage === 'review' ? 'review' : 'tests'} did not pass.`;
         for (const b of builders) issues.push({ role: b, note });
       }
-      if (approved || !issues.length) return this.next(run, stage);
+      if (approved || !issues.length) {
+        for (const r of roles) await this.deliverNotes(run, r);
+        return this.next(run, stage);
+      }
       run.lastIssues = issues;
       run.bounces[stage]++;
       const who = stage === 'review' ? roles[0] : 'qa';
@@ -344,6 +462,8 @@ export class ClaudeOrchestrator implements Orchestrator {
       return this.exec(run, role, stage, cwd, prompt, run.sessions[role]);
     }));
     this.alive(run);
+    // messages that arrived during this stage: no further step is pending for these roles, deliver now
+    await Promise.all(roles.map(r => this.deliverNotes(run, r)));
     await this.commit(run, `office: ${stage} (${roles.join(', ')})`);
     for (const r of roles) this.state(run, r, 'waiting');
     return this.next(run, stage);
@@ -382,6 +502,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     const res = await this.git.mergeIntoBase(folder, branch, run.base!.branch);
     this.alive(run);
     if (res.merged) {
+      this.workspace(run, true);
       this.message(run, 'pm', `Merged ${branch} into ${run.base!.branch}.`);
     } else {
       this.message(run, 'pm', `Merge pending: ${res.reason}\nYour work is safe on branch ${branch}. To merge it yourself, run:\n${res.instructions}`);
@@ -395,9 +516,9 @@ export class ClaudeOrchestrator implements Orchestrator {
   /** A run whose final text must parse; one fixJson resume, then fail showing the role's text. */
   private async structured<T>(
     run: Run, role: RoleId, stage: Exclude<Stage, 'done'>, cwd: string, prompt: string, resume: string | undefined,
-    validate: (v: unknown) => T | null, what: string,
+    validate: (v: unknown) => T | null, what: string, fresh?: string,
   ): Promise<T> {
-    const r1 = await this.exec(run, role, stage, cwd, prompt, resume);
+    const r1 = await this.exec(run, role, stage, cwd, prompt, resume, fresh);
     const v1 = extractJson(r1.result, validate);
     if (v1) return v1;
     this.log(run, role, `[${role}] reply had no valid JSON ${what}; asking again`);
@@ -409,9 +530,29 @@ export class ClaudeOrchestrator implements Orchestrator {
     throw new StageFailed(`${roleName(role)} did not return a valid ${what}. Its reply is shown in the feed.`);
   }
 
-  private exec(run: Run, role: RoleId, stage: Exclude<Stage, 'done'>, cwd: string, prompt: string, resume?: string): Promise<RunResult> {
+  /**
+   * Queue a run on the role's session (never two at once). A resumed session that came from a parent ticket and
+   * fails (expired) falls back to a fresh session given the parent's plan + diff; Resume prefixes "Continue...".
+   */
+  private exec(run: Run, role: RoleId, stage: Exclude<Stage, 'done'>, cwd: string, prompt: string, resume?: string, fresh?: string): Promise<RunResult> {
     const prev = run.locks.get(role) ?? Promise.resolve();
-    const p = prev.catch(() => undefined).then(() => this.execNow(run, role, stage, cwd, prompt, resume ?? run.sessions[role]));
+    const p = prev.catch(() => undefined).then(async () => {
+      const sid = resume ?? run.sessions[role];
+      let text = prompt;
+      if (sid && run.continuing.delete(role)) text = `${CONTINUE}\n\n${prompt}`;
+      if (!sid || !run.inherited.has(role)) return this.execNow(run, role, stage, cwd, text, sid);
+      try {
+        const r = await this.execNow(run, role, stage, cwd, text, sid);
+        run.inherited.delete(role);
+        return r;
+      } catch (err) {
+        if (!(err instanceof StageFailed)) throw err;
+        run.inherited.delete(role);
+        delete run.sessions[role];
+        this.log(run, role, `[${role}] previous conversation could not be resumed; starting fresh with its summary`);
+        return this.execNow(run, role, stage, cwd, fresh ?? (run.fallback ?? '') + prompt, undefined);
+      }
+    });
     run.locks.set(role, p);
     run.inflight.add(p);
     void p.catch(() => undefined).finally(() => run.inflight.delete(p));
@@ -465,8 +606,26 @@ export class ClaudeOrchestrator implements Orchestrator {
   }
 
   private withNotes(run: Run, role: RoleId, prompt: string): string {
-    const n = this.takeNotes(run, role);
-    return n.length ? `${prompt}\n\n<owner-notes>\n${n.map(x => `- ${x}`).join('\n')}\n</owner-notes>` : prompt;
+    return withOwnerNotes(prompt, this.takeNotes(run, role));
+  }
+
+  /** Resume the role's session with its pending owner notes (queued behind its current run). Never fails the ticket. */
+  private async deliverNotes(run: Run, role: RoleId): Promise<void> {
+    if (!run.notes[role]?.length || !run.sessions[role] || run.ended) return;
+    const notes = this.takeNotes(run, role);
+    const stage = role === 'pm' ? 'plan' : (PIPELINE.find(s => STAGE_ROLES[s].includes(role)) ?? 'build');
+    const cwd = role === 'pm' || !run.wt ? run.project.folder : run.wt.path;
+    try { await this.exec(run, role, stage, cwd, deliverNotesPrompt(notes), run.sessions[role]); }
+    catch (err) {
+      if (err instanceof Ended || run.ended) return;
+      this.log(run, role, `[${role}] could not deliver your note: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  private workspace(run: Run, merged = false) {
+    if (!run.wt || !run.base) return;
+    const ws: Workspace = { branch: run.wt.branch, worktree: run.wt.path, base: { ...run.base }, ...(merged ? { merged } : {}) };
+    this.emit(run, { type: 'ticket.workspace', workspace: ws });
   }
 
   private async commit(run: Run, msg: string) {

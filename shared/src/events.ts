@@ -1,4 +1,4 @@
-import type { Project, Ticket, Stage, RoleId, AgentState, GateKind, GateDecision, Plan, DiffFile } from './types';
+import type { Project, Ticket, Stage, RoleId, AgentState, GateKind, GateDecision, Plan, DiffFile, Workspace } from './types';
 
 export interface Snapshot { projects: Project[]; tickets: Ticket[] }
 
@@ -25,7 +25,10 @@ export type ServerEvent =
   | ({ type: 'user.message'; text: string } & TBase)
   | ({ type: 'agent.session'; role: RoleId; sessionId: string } & TBase)
   /** Per-ticket totals across all runs (cost is an estimate). */
-  | ({ type: 'ticket.usage'; turns: number; costUsd: number; durationMs: number } & TBase);
+  | ({ type: 'ticket.usage'; turns: number; costUsd: number; durationMs: number } & TBase)
+  | ({ type: 'ticket.workspace'; workspace: Workspace } & TBase)
+  /** A failed/interrupted ticket was resumed (Resume button). */
+  | ({ type: 'ticket.resumed'; stage: Stage | null } & TBase);
 
 export type TicketEvent = Extract<ServerEvent, { seq: number }>;
 export type EventOf<T extends ServerEvent['type']> = Extract<ServerEvent, { type: T }>;
