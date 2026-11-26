@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { Project, RoleId } from '@office/shared';
+import type { AgentsMode, Project, RoleId } from '@office/shared';
 import { api, paths } from './api';
 import { accentCss } from './format';
 import { Modal, RolePicker } from './Modal';
@@ -9,6 +9,16 @@ export function TeamDialog({ project, onClose }: { project: Project; onClose: ()
   const [team, setTeam] = useState<RoleId[]>(project.team);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [mode, setMode] = useState<AgentsMode>(project.agentsMode ?? 'claude');
+  const [modeBusy, setModeBusy] = useState(false);
+  const [modeError, setModeError] = useState<string | null>(null);
+  const switchMode = async (m: AgentsMode) => {
+    if (m === mode || modeBusy) return;
+    setModeBusy(true); setModeError(null);
+    const r = await api<Project>('PATCH', paths.project(project.id), { agentsMode: m });
+    setModeBusy(false);
+    if (r.ok) setMode(m); else setModeError(r.error);
+  };
   const changed = team.length !== project.team.length || team.some(r => !project.team.includes(r));
 
   const save = async () => {
@@ -22,6 +32,16 @@ export function TeamDialog({ project, onClose }: { project: Project; onClose: ()
     <Modal title={`team · ${project.name}`} accent={accentCss(project.accent)} onClose={onClose}>
       <div className="po-form">
         <p className="po-dim po-hint">New members walk in from the hallway; removed ones head out. Every room keeps a desk for every role.</p>
+        <fieldset className="po-mode" disabled={modeBusy}>
+          <legend className="po-dim">Agents</legend>
+          {(['claude', 'simulated'] as const).map(m => (
+            <label key={m} className={`po-mode-opt${mode === m ? ' on' : ''}`}>
+              <input type="radio" name="agentsMode" value={m} checked={mode === m} onChange={() => void switchMode(m)} />
+              <span>{m === 'claude' ? 'Claude Code' : 'Simulated'}</span>
+            </label>
+          ))}
+        </fieldset>
+        {modeError && <div className="po-error" role="alert">{modeError}</div>}
         <RolePicker team={team} onChange={setTeam} />
         {error && <div className="po-error" role="alert">{error}</div>}
         <div className="po-actions">
