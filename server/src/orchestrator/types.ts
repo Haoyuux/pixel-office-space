@@ -24,4 +24,6 @@ export interface Orchestrator {
   find(ticketId: string): Ticket | undefined;
   onEvent(cb: (e: ServerEvent) => void): void;
   busyRoles(projectId: string): RoleId[];
+  /** Server stop: abort live runs and wait briefly for their processes to end. */
+  shutdown?(): Promise<void>;
 }

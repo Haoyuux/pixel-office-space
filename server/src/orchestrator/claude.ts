@@ -8,7 +8,7 @@ import {
 import { ConflictError, ValidationError, type Orchestrator, type StartOptions } from './types';
 import { titleOf } from './fakeContent';
 import type { TicketLog } from '../ticketLog';
-import type { RunOptions, RunResult, RunnerEvent } from '../claude/runner';
+import { killLiveSync, type RunOptions, type RunResult, type RunnerEvent } from '../claude/runner';
 import * as realGit from '../claude/git';
 import { newTranslateContext, translate } from '../claude/translate';
 import { MAX_TURNS, ROLE_TOOLS } from '../claude/roles';
@@ -98,6 +98,8 @@ export class ClaudeOrchestrator implements Orchestrator {
   private pending = new Set<Promise<unknown>>();
   private git: GitApi;
   private now: () => Date;
+  /** Server is stopping: runs are aborted but tickets are left as they are (the next boot marks them interrupted). */
+  private stopping = false;
 
   constructor(private opts: ClaudeOrchestratorOptions) {
     this.git = opts.git ?? realGit;
@@ -109,6 +111,27 @@ export class ClaudeOrchestrator implements Orchestrator {
   /** Resolves once no background work is pending (tests). */
   async idle(): Promise<void> {
     while (this.pending.size) await Promise.allSettled([...this.pending]);
+  }
+
+  /**
+   * Server stop: abort every live run, wait up to `waitMs` for the runs to end (the runner kills each process tree),
+   * then force-kill any claude process still alive. Tickets are not failed: the next boot recovers them as interrupted.
+   */
+  async shutdown(waitMs = 7000): Promise<void> {
+    this.stopping = true;
+    const inflight: Promise<unknown>[] = [];
+    for (const run of this.runs.values()) {
+      for (const ac of run.aborts) ac.abort();
+      run.aborts.clear();
+      inflight.push(...run.inflight);
+    }
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      Promise.allSettled(inflight),
+      new Promise<void>(r => { timer = setTimeout(r, waitMs); timer.unref?.(); }),
+    ]);
+    clearTimeout(timer);
+    killLiveSync();
   }
 
   startTicket(project: Project, text: string, opts: StartOptions = {}): Ticket {
@@ -251,7 +274,7 @@ export class ClaudeOrchestrator implements Orchestrator {
   /** Run an async pipeline step in the background; errors fail the ticket (unless it already ended). */
   private bg(run: Run, fn: () => Promise<void>): void {
     const p = fn().catch((err: unknown) => {
-      if (run.ended || err instanceof Ended) return;
+      if (run.ended || this.stopping || err instanceof Ended) return;
       this.finish(run, 'failed', err instanceof Error ? err.message : String(err));
     });
     this.pending.add(p);
@@ -660,7 +683,7 @@ export class ClaudeOrchestrator implements Orchestrator {
         },
       });
     } catch (err) {
-      if (run.ended) throw new Ended();
+      if (run.ended || this.stopping) throw new Ended();
       throw new StageFailed(`${roleName(role)} run failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       run.aborts.delete(ac);
@@ -718,7 +741,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     this.alive(run);
   }
 
-  private alive(run: Run) { if (run.ended) throw new Ended(); }
+  private alive(run: Run) { if (run.ended || this.stopping) throw new Ended(); }
 
   private finish(run: Run, how: 'done' | 'cancelled' | 'failed', reason = '') {
     if (run.ended) return;

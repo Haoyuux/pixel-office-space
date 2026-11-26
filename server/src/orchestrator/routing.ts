@@ -24,6 +24,7 @@ export class RoutingOrchestrator implements Orchestrator {
   find(ticketId: string) { return this.owner(ticketId)?.find(ticketId); }
   onEvent(cb: (e: ServerEvent) => void) { for (const o of this.all()) o.onEvent(cb); }
   busyRoles(projectId: string): RoleId[] { return [...new Set(this.all().flatMap(o => o.busyRoles(projectId)))]; }
+  async shutdown(): Promise<void> { await Promise.all(this.all().map(o => o.shutdown?.())); }
 
   private must(ticketId: string): Orchestrator {
     const o = this.owner(ticketId);

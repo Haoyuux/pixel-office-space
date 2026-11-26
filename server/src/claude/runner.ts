@@ -1,4 +1,4 @@
-import { spawn, execFile, type ChildProcess } from 'node:child_process';
+import { spawn, execFile, execFileSync, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -137,6 +137,24 @@ export interface RunnerConfig {
   killGraceMs?: number;
 }
 
+/** PIDs of every claude process this server started that has not exited yet (all runners). */
+const live = new Set<number>();
+export function livePids(): number[] { return [...live]; }
+
+/**
+ * Last-resort, synchronous kill of every still-running claude process tree (for process 'exit', where async work
+ * can't run). Windows: `taskkill /T /F`; POSIX: SIGKILL to the child's process group.
+ */
+export function killLiveSync(): void {
+  for (const pid of live) {
+    try {
+      if (process.platform === 'win32') execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+      else { try { process.kill(-pid, 'SIGKILL'); } catch { process.kill(pid, 'SIGKILL'); } }
+    } catch { /* already gone */ }
+  }
+  live.clear();
+}
+
 export class ClaudeRunner {
   private readonly bin: string;
   private readonly binArgs: string[];
@@ -160,6 +178,13 @@ export class ClaudeRunner {
       } catch (e) {
         reject(new Error(`could not start claude (${this.bin}): ${(e as Error).message}`));
         return;
+      }
+
+      const pid = child.pid;
+      if (pid != null) {
+        live.add(pid);
+        child.once('exit', () => live.delete(pid));
+        child.once('error', () => live.delete(pid));
       }
 
       // The prompt goes via stdin. If the child dies early, writing fails with EPIPE; the exit is handled by 'close'.
