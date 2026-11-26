@@ -359,3 +359,14 @@ Idle office life is **client-side only** (purely cosmetic) and never goes over t
   cooldowns, caps), simulated orchestrator state machine (stages, gates, bounces, queue), event schema.
 - Visual checks with the headless screenshot script used in the spike (waits for `document.title === 'READY'`):
   1, 3 and 7 projects, day and night, and a ticket mid-flight. Check every anti-goal in §1.
+
+## 17. M2 notes
+- **Adopted-ticket seq offset.** After a restart, a queued ticket is re-adopted with `seq` starting at
+  1 000 000 (`SimulatedOrchestrator.adopt`). That only avoids duplicate seqs because a queued ticket has exactly
+  one logged event (`ticket.created`, seq 1) before it starts. If M2 logs more events for queued tickets (edits,
+  re-ordering, messages), resume from the last logged seq + 1 instead.
+- **Keep the origin checks.** The server refuses WebSocket upgrades and REST calls whose `Origin` is not
+  http(s)://127.0.0.1 or localhost (any port), and requires `Content-Type: application/json` on every
+  POST/PATCH/DELETE (`server/src/origin.ts`, `Hub` `verifyClient`). Browsers apply no CORS to WebSockets, so
+  without this any web page could read the event stream. Keep these checks when real agents, file contents and
+  diffs flow over the same channels.
