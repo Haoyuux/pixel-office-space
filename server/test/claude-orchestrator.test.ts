@@ -336,6 +336,23 @@ describe('ClaudeOrchestrator', () => {
     expect(fs.existsSync(path.join(repo, 'ui.txt'))).toBe(true);
   });
 
+  it('final approve with no changes on the branch → no merge, PM says so, done', async () => {
+    const o = make();
+    const { projectMap: _, ...noMap } = PLAN;
+    runner.script = c => c.kind === 'plan' ? { result: fence(noMap) } : c.kind === 'stage' ? { result: 'nothing to do' } : undefined;
+    const t = await toFinal(o, repo);
+    expect(of('ticket.diff')[0].files).toEqual([]);
+    const before = git(repo, 'rev-parse', 'HEAD');
+    o.decide(t.id, 'final', 'approved');
+    await o.idle();
+    expect(o.find(t.id)!.status).toBe('done');
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(before);
+    expect(pmText()).toContain('No changes were made — nothing to merge');
+    expect(pmText()).not.toMatch(/Merged /);
+    expect(o.find(t.id)!.workspace?.merged).toBeUndefined();
+    expect(fs.existsSync(path.join(dataDir, 'worktrees', 'p1', t.id))).toBe(false);
+  });
+
   it('final approve with a dirty tree → done anyway with merge-pending instructions', async () => {
     const o = make();
     const t = await toFinal(o, repo);

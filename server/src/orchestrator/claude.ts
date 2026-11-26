@@ -605,6 +605,14 @@ export class ClaudeOrchestrator implements Orchestrator {
   private async approveFinal(run: Run) {
     const folder = run.project.folder;
     const { branch } = run.wt!;
+    const changes = await this.git.diff(folder, run.base!.head, branch);
+    this.alive(run);
+    if (!changes.length) {
+      this.message(run, 'pm', 'No changes were made — nothing to merge.');
+      await this.git.removeWorktree(folder, run.wt!.path).catch(() => undefined);
+      this.finish(run, 'done');
+      return;
+    }
     const res = await this.git.mergeIntoBase(folder, branch, run.base!.branch);
     this.alive(run);
     if (res.merged) {
