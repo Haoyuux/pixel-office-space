@@ -727,9 +727,11 @@ export class ClaudeOrchestrator implements Orchestrator {
   /** Resume the role's session with its pending owner notes (queued behind its current run). Never fails the ticket. */
   private async deliverNotes(run: Run, role: RoleId): Promise<void> {
     if (!run.notes[role]?.length || !run.sessions[role] || run.ended) return;
+    // a non-PM role only ever works in the worktree: with none yet, keep the notes for its next step
+    if (role !== 'pm' && !run.wt) return;
     const notes = this.takeNotes(run, role);
     const stage = role === 'pm' ? 'plan' : (PIPELINE.find(s => STAGE_ROLES[s].includes(role)) ?? 'build');
-    const cwd = role === 'pm' || !run.wt ? run.project.folder : run.wt.path;
+    const cwd = role === 'pm' ? run.project.folder : run.wt!.path;
     try { await this.exec(run, role, stage, cwd, deliverNotesPrompt(notes), run.sessions[role]); }
     catch (err) {
       if (err instanceof Ended || run.ended) return;

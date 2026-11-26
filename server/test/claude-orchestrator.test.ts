@@ -353,6 +353,20 @@ describe('ClaudeOrchestrator', () => {
     expect(fs.existsSync(path.join(dataDir, 'worktrees', 'p1', t.id))).toBe(false);
   });
 
+  it('notes for a non-PM role are never delivered in the owner folder (kept until there is a worktree)', async () => {
+    const o = make();
+    const t = await toPlanGate(o, repo);
+    const run = (o as any).runs.get(t.id);
+    expect(run.wt).toBeUndefined();
+    run.notes.frontend = ['Use blue'];
+    run.sessions.frontend = 'frontend-old';
+    await (o as any).deliverNotes(run, 'frontend');
+    await o.idle();
+    expect(runner.of('frontend')).toHaveLength(0);
+    expect(run.notes.frontend).toEqual(['Use blue']);
+    expect(runner.calls.every(c => c.o.role === 'pm' || c.o.cwd !== repo)).toBe(true);
+  });
+
   it('final approve with a dirty tree → done anyway with merge-pending instructions', async () => {
     const o = make();
     const t = await toFinal(o, repo);
