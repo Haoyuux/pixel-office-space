@@ -482,7 +482,8 @@ export class ClaudeOrchestrator implements Orchestrator {
     run.ended = true;
     for (const ac of run.aborts) ac.abort();
     run.aborts.clear();
-    if (how !== 'done' && run.wt) {
+    // cancel removes the worktree (branch kept); a failed ticket keeps it so its work can be inspected/resumed
+    if (how === 'cancelled' && run.wt) {
       const wt = run.wt;
       const inflight = [...run.inflight];
       const p = Promise.allSettled(inflight).then(() => this.git.removeWorktree(run.project.folder, wt.path)).catch(() => undefined);
