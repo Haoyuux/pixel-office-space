@@ -414,7 +414,7 @@ describe('M2: real agents UI', () => {
 
   it('usage line at the end of a finished ticket feed', () => {
     openDrawer([ticket({ status: 'done', stage: 'done', usage: { turns: 12, costUsd: 0.84, durationMs: 360000 } })]);
-    expect(screen.getByText('12 turns · ~$0.84 estimated · 6 min')).toBeTruthy();
+    expect(screen.getByText('12 turns · 6 min · uses your Claude plan (≈$0.84 at API rates, not charged)')).toBeTruthy();
   });
 
   it('agents badge in the drawer header', () => {

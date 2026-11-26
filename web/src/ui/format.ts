@@ -57,11 +57,11 @@ export function relativeDate(iso: string, now = Date.now()): string {
 /** "~$0.84" — always an estimate, never a bill. */
 export const estUsd = (usd: number) => `~$${usd.toFixed(2)}`;
 
-/** "12 turns · ~$0.84 estimated · 6 min". */
+/** "12 turns · 6 min · uses your Claude plan (≈$0.84 at API rates, not charged)". The $ is the CLI's API-rate estimate; on a subscription nothing is billed. */
 export function usageLine(u: { turns: number; costUsd: number; durationMs: number }): string {
   const min = u.durationMs / 60000;
   const dur = min < 1 ? `${Math.max(1, Math.round(u.durationMs / 1000))} s` : `${Math.round(min)} min`;
-  return `${u.turns} turn${u.turns === 1 ? '' : 's'} · ${estUsd(u.costUsd)} estimated · ${dur}`;
+  return `${u.turns} turn${u.turns === 1 ? '' : 's'} · ${dur} · uses your Claude plan (≈$${u.costUsd.toFixed(2)} at API rates, not charged)`;
 }
 
 export const isFinished = (t: Ticket) => t.status === 'done' || t.status === 'failed' || t.status === 'cancelled';

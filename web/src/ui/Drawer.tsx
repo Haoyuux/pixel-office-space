@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { roleDef, type RoleId, type Ticket } from '@office/shared';
 import { useOffice } from '../state/store';
 import { api, paths } from './api';
-import { accentCss, canResume, estUsd, isActive, isFinished, relativeDate, roleEmoji, roleShort, STATUS_ICON } from './format';
+import { accentCss, canResume, isActive, isFinished, relativeDate, roleEmoji, roleShort, STATUS_ICON } from './format';
 import { ClaudeBanner } from './claudeStatus';
 import { Feed } from './Feed';
 import { RawLog } from './RawLog';
@@ -137,7 +137,7 @@ export function Drawer({ projectId }: { projectId: string }) {
                       <span className="po-dim">{relativeDate(t.createdAt)}</span>
                       <span className={`po-chip ${t.status}`}>{t.status}</span>
                       {roles.length > 0 && <span title={roles.map(roleShort).join(', ')}>{roles.map(roleEmoji).join('')}</span>}
-                      {t.usage && <span className="po-dim">{estUsd(t.usage.costUsd)} est.</span>}
+                      {t.usage && <span className="po-dim" title="Uses your Claude plan — not charged">{t.usage.turns} turns</span>}
                     </span>
                   </button>
                 </li>
