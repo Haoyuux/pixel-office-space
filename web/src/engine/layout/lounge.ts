@@ -6,6 +6,8 @@ export const LOUNGE = { x0: 0, y0: 0, x1: 14, y1: 8 };
 /** Sofas sit behind the bots on every seat (side seats are up to 0.62 m off the anchor): draw them well back. */
 const SOFA_Z = -40;
 const COFFEE_H = 0.518, PEDESTAL_H = 0.6, NEON_SIDE_H = 0.5;
+/** Hip heights on the lounge seats (metres): soft sofa and armchair cushions sit lower than an office chair. */
+export const SOFA_SEAT = 0.34, ARMCHAIR_SEAT = 0.36, POUF_SEAT = 0.4;
 /** Coffee table distance in front of (camera side of) its sofa. */
 export const TABLE_GAP = 1.15;
 
@@ -22,8 +24,8 @@ export function buildLounge(): { pieces: Placed[]; spots: Spot[]; lights: Light[
     pieces.push({ piece, mx, my, view, room: 'lounge', ...o });
   const neon = (prop: string, variant: string, mx: number, my: number, view: 0 | 6 = 0, o: Partial<Placed> = {}) =>
     put(prop, mx, my, view, { pack: 'neon', variant, ...o });
-  const spot = (id: string, mx: number, my: number, pose: Spot['pose'], facing: Spot['facing'], tags: string[], pair?: string) =>
-    spots.push({ id, mx, my, pose, facing, capacity: 1, tags, room: 'lounge', ...(pair ? { pair } : {}) });
+  const spot = (id: string, mx: number, my: number, pose: Spot['pose'], facing: Spot['facing'], tags: string[], seatHeight?: number) =>
+    spots.push({ id, mx, my, pose, facing, capacity: 1, tags, room: 'lounge', ...(seatHeight ? { seatHeight } : {}) });
   const light = (mx: number, my: number, lift: number, r: number, color: number, a: number, pool = true, halo = true) =>
     lights.push({ mx, my, lift, r, color, a, pool, halo });
   const rug = (id: string, x0: number, y0: number, x1: number, y1: number, color: number, border: number, accent: number, pattern: Rug['pattern']) =>
@@ -64,14 +66,14 @@ export function buildLounge(): { pieces: Placed[]; spots: Spot[]; lights: Light[
     const { id, cx, sy } = g, ty = sy + TABLE_GAP;
     const ids = [0, 1, 2].map(i => `${id}-${i + 1}`);
     put('Sofa_Modular', cx, sy, 0, { z: SOFA_Z });
-    [-0.62, 0, 0.62].forEach((d, i) => spot(ids[i], cx + d, sy + 0.1, 'sit', 'SW', ['lounge']));
+    [-0.62, 0, 0.62].forEach((d, i) => spot(ids[i], cx + d, sy + 0.1, 'sit', 'SW', ['lounge'], SOFA_SEAT));
     link(ids[1], ids[2]);
     put('Coffee_Table', cx, ty, 0);
     dress(cx, ty, COFFEE_H, g.table);
     light(cx, ty - 0.4, 0, 520, 0xffb870, 0.22, true, false);
     // armchairs at the table's sides
     put('Lounge_Chair', cx - 1.45, ty - 0.05, 6, { z: -2 });
-    spot(`${id}-arm`, cx - 1.4, ty - 0.05, 'sit', 'SE', ['lounge']);
+    spot(`${id}-arm`, cx - 1.4, ty - 0.05, 'sit', 'SE', ['lounge'], ARMCHAIR_SEAT);
     link(`${id}-arm`, ids[0]);
     put('Lounge_Chair', cx + 1.45, ty - 0.2, 1, { z: -2 });
     // side table + lamp
@@ -121,7 +123,7 @@ export function buildLounge(): { pieces: Placed[]; spots: Spot[]; lights: Light[
   put('Fiddle_Leaf', 9.0, 0.45, 0);
   // poufs: two spectators behind the players, two round a snack table; their seats face the camera
   const poufs: [number, number, string, Spot['facing']][] = [[6.0, 2.55, 'white_magenta', 'SE'], [7.55, 2.45, 'white_cyan', 'SW'], [5.95, 3.95, 'white_amber', 'SE'], [8.2, 3.75, 'white_magenta', 'SW']];
-  poufs.forEach(([x, y, variant, facing], i) => { neon('pouf', variant, x, y); spot(`pouf-${i + 1}`, x, y - 0.02, 'sit', facing, ['lounge']); });
+  poufs.forEach(([x, y, variant, facing], i) => { neon('pouf', variant, x, y); spot(`pouf-${i + 1}`, x, y - 0.02, 'sit', facing, ['lounge'], POUF_SEAT); });
   link('pouf-1', 'pouf-2');
   link('pouf-3', 'pouf-4');
   neon('side_table', 'graphite_cyan', 7.05, 3.85);
@@ -153,7 +155,7 @@ export function buildLounge(): { pieces: Placed[]; spots: Spot[]; lights: Light[
   put('Trophy', 0.25, 5.45, 6, { lift: 1.8, z: 3 });
   spot('shelf', 1.05, 6.0, 'stand', 'NW', ['wander']);
   put('Lounge_Chair', 1.35, 4.65, 6, { z: -2 });
-  spot('armchair-read', 1.4, 4.65, 'sit', 'SE', ['lounge']);
+  spot('armchair-read', 1.4, 4.65, 'sit', 'SE', ['lounge'], ARMCHAIR_SEAT);
   neon('pouf', 'white_amber', 2.25, 4.75);
   neon('side_table', 'white_amber', 1.3, 3.75);
   dress(1.3, 3.75, NEON_SIDE_H, [['Candle', 0, 0]]);
