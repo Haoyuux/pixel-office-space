@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import { isNightAt } from '../engine/render/geom';
 import { applyTicketEvent, type DiffFile, type Project, type RoleId, type ServerEvent, type Ticket, type TicketEvent } from '@office/shared';
 
 export interface FeedItem {
@@ -86,8 +85,15 @@ function fold(v: TicketView, e: TicketEvent): TicketView {
 const initial = () => ({
   projects: {} as Record<string, Project>, tickets: {} as Record<string, Ticket>, feed: {} as Record<string, FeedItem[]>,
   raw: {} as Record<string, string[]>, lastSeq: {} as Record<string, number>, diffs: {} as Record<string, DiffFile[]>,
-  selectedProjectId: null as string | null, roleFilter: 'all' as RoleId | 'all', night: isNightAt(new Date()), synced: false,
+  selectedProjectId: null as string | null, roleFilter: 'all' as RoleId | 'all', night: initialNight(), synced: false,
 });
+
+const NIGHT_KEY = 'pixel-office.night';
+type NightStorage = Pick<Storage, 'getItem'>;
+/** Day by default; the owner's last ☀/🌙 choice is remembered in this browser. */
+export function initialNight(storage: NightStorage | undefined = typeof localStorage === 'undefined' ? undefined : localStorage): boolean {
+  try { return storage?.getItem(NIGHT_KEY) === '1'; } catch { return false; }
+}
 
 export const useOffice = create<OfficeState>()((set, get) => ({
   ...initial(),
@@ -153,7 +159,10 @@ export const useOffice = create<OfficeState>()((set, get) => ({
 
   select(projectId) { set({ selectedProjectId: projectId }); },
   setRoleFilter(f) { set({ roleFilter: f }); },
-  setNight(on) { set({ night: on }); },
+  setNight(on) {
+    try { localStorage.setItem(NIGHT_KEY, on ? '1' : '0'); } catch { /* storage unavailable: still toggle */ }
+    set({ night: on });
+  },
 }));
 
 /** Back to an empty office (tests). */
