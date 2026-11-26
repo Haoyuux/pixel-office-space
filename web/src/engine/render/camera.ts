@@ -1,7 +1,7 @@
 import type { Application, Container } from 'pixi.js';
-import { fitTransform, screenBox, zoomAround, type Box } from './geom';
+import { fitTransform, screenBox, wheelFactor, zoomAround, ZOOM_MAX, ZOOM_MIN, type Box } from './geom';
 
-/** Drag to pan, wheel to zoom around the cursor (0.2×–2×), fit a metre box into view. */
+/** Drag to pan, wheel to zoom around the cursor (ZOOM_MIN–ZOOM_MAX, by the wheel delta), fit a metre box into view. */
 export class Camera {
   /** True when the last pointer press moved far enough to count as a drag (callers ignore the click then). */
   dragged = false;
@@ -61,7 +61,7 @@ export class Camera {
     const wheel = (e: WheelEvent) => {
       e.preventDefault();
       const p = local(e);
-      this.zoomAt(p.x, p.y, e.deltaY < 0 ? 1.15 : 1 / 1.15);
+      this.zoomAt(p.x, p.y, wheelFactor(e.deltaY, e.deltaMode));
     };
     canvas.addEventListener('pointerdown', down);
     window.addEventListener('pointermove', move);

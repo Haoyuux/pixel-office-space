@@ -9,13 +9,13 @@ const CHOICES: Record<GateKind, { decision: GateDecision; label: string; tone: s
   final: [{ decision: 'approved', label: 'Approve', tone: 'primary' }, { decision: 'changes', label: 'Request changes', tone: 'ghost' }],
   stuck: [
     { decision: 'retry', label: 'One more round', tone: 'primary' },
-    { decision: 'accept', label: 'Accept & test', tone: 'ghost' },
+    { decision: 'accept', label: 'Accept & test', tone: 'ghost' }, // 'Accept & continue' when stuck in test (QA)
     { decision: 'cancel', label: 'Cancel ticket', tone: 'danger' },
   ],
 };
 
 const RESOLVED: Record<GateDecision, string> = {
-  approved: '✓ approved', changes: '↺ changes requested', retry: '↺ one more round', accept: '→ accepted, on to test', cancel: '⊘ ticket cancelled',
+  approved: '✓ approved', changes: '↺ changes requested', retry: '↺ one more round', accept: '→ accepted as is, moving on', cancel: '⊘ ticket cancelled',
 };
 
 const parse = (s?: string): Record<string, unknown> => { try { return s ? JSON.parse(s) : {}; } catch { return {}; } };
@@ -76,7 +76,7 @@ export function GateCard({ ticketId, item, onShow }: { ticketId: string; item: F
       <div className="po-gate-actions">
         {CHOICES[gate]?.map(c => (
           <button key={c.decision} type="button" className={`po-btn ${c.tone}${sent === c.decision ? ' sent' : ''}`} disabled={!!sent} onClick={() => decide(c.decision)}>
-            {c.label}
+            {c.decision === 'accept' && p.from === 'test' ? 'Accept & continue' : c.label}
           </button>
         ))}
         {sent && <span className="po-dim po-spin">sent · waiting for the team…</span>}

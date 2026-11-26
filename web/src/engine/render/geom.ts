@@ -3,7 +3,9 @@ import type { RoomRect, Segment } from '../layout/types';
 
 /** Height of the wall / glass modules (Wall_2m size_z). */
 export const WALL_H = 2.8;
-export const ZOOM_MIN = 0.2, ZOOM_MAX = 2;
+/** Fit Building may go this far out (9+ projects with the drawer open); the wheel can reach the same floor. */
+export const FIT_MIN = 0.08;
+export const ZOOM_MIN = FIT_MIN, ZOOM_MAX = 2;
 
 export interface Box { x0: number; y0: number; x1: number; y1: number }
 
@@ -42,6 +44,14 @@ export function fitTransform(sb: Box, vw: number, vh: number, margin = 40): { sc
   const scale = clampZoom(Math.min((vw - 2 * margin) / w, (vh - 2 * margin) / h));
   return { scale, x: vw / 2 - ((sb.x0 + sb.x1) / 2) * scale, y: vh / 2 - ((sb.y0 + sb.y1) / 2) * scale };
 }
+
+/** Zoom factor for one wheel event, proportional to its delta (trackpads send many small ones), clamped per event. */
+export function wheelFactor(deltaY: number, deltaMode = 0): number {
+  const px = deltaY * (deltaMode === 1 ? 16 : deltaMode === 2 ? 400 : 1);
+  const d = Math.max(-WHEEL_MAX_PX, Math.min(WHEEL_MAX_PX, px));
+  return Math.exp(-d * WHEEL_K);
+}
+const WHEEL_K = 0.0015, WHEEL_MAX_PX = 250;
 
 /** New world transform after zooming by `factor` while keeping the world point under (cx, cy) fixed. */
 export function zoomAround(t: { scale: number; x: number; y: number }, cx: number, cy: number, factor: number) {

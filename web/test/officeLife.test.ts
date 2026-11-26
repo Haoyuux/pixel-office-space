@@ -282,3 +282,23 @@ describe('diffRoster', () => {
     expect(d.remove.sort()).toEqual(['a:qa', 'b:pm']);
   });
 });
+
+describe('SimClock (office life after a hidden tab)', () => {
+  it('a long gap advances the clock by one clamped step, so bots do not all become due at once', async () => {
+    const { SimClock, MAX_DT } = await import('../src/engine/bots/simClock');
+    const clock = new SimClock();
+    const life = new OfficeLife({ spots: L.spots, seats: L.seats, random: seeded(5), now: clock.now, isNight: () => false });
+    for (const id of BOTS) life.register({ id });
+    expect(life.tick()).toHaveLength(BOTS.length); // first desk stint for everyone (5–40 s)
+    for (let i = 0; i < 20; i++) { clock.step(250); life.tick(); } // 5 s of normal frames
+    const before = clock.now();
+    clock.step(10 * 60_000); // the tab was hidden for 10 minutes
+    expect(clock.now() - before).toBe(MAX_DT);
+    expect(life.tick().length).toBeLessThan(BOTS.length / 2);
+  });
+
+  it('ignores negative steps', async () => {
+    const { SimClock } = await import('../src/engine/bots/simClock');
+    const c = new SimClock(); c.step(-50); expect(c.now()).toBe(0);
+  });
+});

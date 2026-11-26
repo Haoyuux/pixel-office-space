@@ -8,10 +8,9 @@ import { WalkGrid } from '../walkgrid';
 import type { OfficeScene } from '../render/scene';
 import { Bot } from './bot';
 import { OfficeLife, diffRoster, type Intent } from './officeLife';
+import { SimClock, MAX_DT } from './simClock';
 
 const LIFE_TICK_MS = 250;
-/** Longest frame step we simulate; a stalled tab should not teleport bots through furniture. */
-const MAX_DT = 250;
 const WAVE_MS = 2400, WAVE_RANGE = 4;
 
 interface Plan { intent: Intent; step: number; holding: boolean; left: number; arrivedAll: boolean }
@@ -29,6 +28,8 @@ export class Population {
   private working = new Set<string>();
   private since = 0;
   private gen = 0;
+  /** Office life runs on this clamped clock, not wall time: after a hidden tab the bots don't all become due at once. */
+  private clock = new SimClock();
   private tick = (t: Ticker) => this.update(Math.min(MAX_DT, t.deltaMS));
 
   constructor(private scene: OfficeScene, private ticker: Ticker, private random: () => number = Math.random) {
@@ -56,7 +57,7 @@ export class Population {
     for (const b of this.bots.values()) b.setGrid(grid);
     if (this.life) this.life.setLayout(layout.spots, layout.seats);
     else {
-      this.life = new OfficeLife({ spots: layout.spots, seats: layout.seats, random: this.random, now: () => performance.now(), isNight: () => this.scene.night });
+      this.life = new OfficeLife({ spots: layout.spots, seats: layout.seats, random: this.random, now: this.clock.now, isNight: () => this.scene.night });
       this.since = LIFE_TICK_MS;
     }
     const adds = roster.filter(r => diff.add.includes(r.id));
@@ -110,6 +111,7 @@ export class Population {
   }
 
   update(dt: number): void {
+    dt = this.clock.step(dt);
     for (const b of this.bots.values()) b.update(dt);
     for (const b of this.leaving) b.update(dt);
     if (!this.life) return;

@@ -11,7 +11,7 @@ import { Feed } from '../src/ui/Feed';
 const P: Project = { id: 'p', name: 'Shop', folder: '.', accent: 'cyan', team: ['pm', 'techlead', 'frontend', 'backend', 'qa'], slot: 0, looks: {} as Project['looks'], createdAt: '' };
 const ticket = (o: Partial<Ticket> = {}): Ticket => ({ id: 't', projectId: 'p', title: 'Add login', text: 'Add login', status: 'running', stage: 'build', agentStates: {}, createdAt: '2026-11-26T10:00:00Z', ...o });
 
-type Call = { url: string; method: string; body: unknown };
+type Call = { url: string; method: string; body: unknown; contentType?: string };
 let calls: Call[];
 let reply: (url: string) => { status: number; body: unknown };
 
@@ -20,7 +20,7 @@ beforeEach(() => {
   calls = [];
   reply = () => ({ status: 200, body: { ok: true } });
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
-    calls.push({ url, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    calls.push({ url, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(String(init.body)) : undefined, contentType: (init?.headers as Record<string, string> | undefined)?.['Content-Type'] });
     const r = reply(url);
     return new Response(JSON.stringify(r.body), { status: r.status, headers: { 'Content-Type': 'application/json' } });
   }));
@@ -121,6 +121,12 @@ describe('GateCard', () => {
     for (const b of buttons) expect((b as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(buttons[0]);
     expect(posts()).toHaveLength(1);
+  });
+
+  it('stuck from QA says "Accept & continue" (not "Accept & test")', () => {
+    render(<GateCard ticketId="t" item={{ ...gate(), detail: '{"from":"test","bounces":3}' }} />);
+    expect(screen.getByRole('button', { name: 'Accept & continue' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Accept & test' })).toBeNull();
   });
 
   it('shows the server error inline and re-enables on 409', async () => {
@@ -265,7 +271,7 @@ describe('fix round 1', () => {
     const yes = screen.getByRole('button', { name: /^delete project$/i });
     fireEvent.click(yes); fireEvent.click(yes);
     await waitFor(() => expect(useOffice.getState().selectedProjectId).toBeNull());
-    expect(calls.filter(c => c.method === 'DELETE')).toEqual([expect.objectContaining({ url: '/api/projects/p' })]);
+    expect(calls.filter(c => c.method === 'DELETE')).toEqual([expect.objectContaining({ url: '/api/projects/p', contentType: 'application/json' })]);
   });
 
   it('cancel ticket asks for an inline confirm and posts once', async () => {
@@ -278,6 +284,7 @@ describe('fix round 1', () => {
     await waitFor(() => expect(posts()).toHaveLength(1));
     await new Promise(r => setTimeout(r, 20));
     expect(posts()).toEqual([expect.objectContaining({ url: '/api/tickets/t/cancel' })]);
+    expect(posts()[0].contentType).toBe('application/json');
   });
 
   it('a role filter outside the team is reset to all roles', () => {

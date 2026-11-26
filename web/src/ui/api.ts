@@ -3,10 +3,12 @@ export type Result<T = unknown> = { ok: true; data: T } | { ok: false; status: n
 
 export async function api<T = unknown>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<Result<T>> {
   try {
+    // every mutation is JSON (even cancel/delete): the server refuses other content types to block cross-site posts
+    const mutation = method !== 'GET';
     const r = await fetch(path, {
       method,
-      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      headers: mutation ? { 'Content-Type': 'application/json' } : undefined,
+      body: mutation ? JSON.stringify(body ?? {}) : undefined,
     });
     let data: unknown = null;
     try { data = await r.json(); } catch { /* empty body */ }
