@@ -301,7 +301,7 @@ export class OfficeLife {
   }
 
   private isOutside(b: State): boolean { return !!b.current?.spots.some(s => s.room !== b.projectId); }
-  private isProjectRoom(room: string): boolean { return room !== 'hall' && room !== 'breakroom'; }
+  private isProjectRoom(room: string): boolean { return room !== 'hall' && room !== 'lounge' && room !== 'cafeteria'; }
 
   private seat(b: State): Spot {
     const s = this.o.seats[b.id]?.seat;

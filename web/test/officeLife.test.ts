@@ -51,7 +51,7 @@ const share = (w: Record<ActivityId, number>) => {
   return Object.fromEntries(ACTS.map(a => [a, w[a] / total])) as Record<ActivityId, number>;
 };
 
-/** Frequencies averaged over SEEDS (layout-coupled: 2 lounge seats, 2 bar spots, 3 table chairs, 2 chat pairs). */
+/** Frequencies averaged over SEEDS (layout-coupled: lounge and cafeteria spot counts). */
 function averaged(night: boolean) {
   const runs = SEEDS.map(seed => frequencies(run(night, 1000, 5000, seed)));
   return Object.fromEntries(ACTS.map(a => [a, runs.reduce((s, r) => s + r[a], 0) / runs.length])) as Record<ActivityId, number>;
@@ -82,7 +82,7 @@ describe('OfficeLife', () => {
 
   it('follows the day weights within ±25% over 1000 ticks with 10 bots', () => {
     // Averaged over several fixed seeds: a single seed is deterministic but only a few % inside the bound.
-    // Layout-coupled: the margins depend on the breakroom's spot counts (2 lounge seats, 2 bar spots, 3 table chairs).
+    // Layout-coupled: the margins depend on the lounge / cafeteria spot counts.
     const f = averaged(false);
     const want = share(DAY_WEIGHTS);
     for (const a of ACTS) {
@@ -186,7 +186,7 @@ describe('OfficeLife', () => {
   it('release frees the bot\'s spots at once and silences it until resume', () => {
     const w = world(10);
     let victim: Intent | undefined;
-    for (let k = 0; k < 500 && !victim; k++) victim = w.step(3000).find(i => i.spots.some(s => s.room === 'breakroom'));
+    for (let k = 0; k < 500 && !victim; k++) victim = w.step(3000).find(i => i.spots.some(s => s.room === 'lounge' || s.room === 'cafeteria'));
     expect(victim).toBeDefined();
     const id = victim!.botId;
     w.life.release(id);

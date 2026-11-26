@@ -62,7 +62,7 @@ export function zoomAround(t: { scale: number; x: number; y: number }, cx: numbe
 /** Night between 19:00 and 06:00 local time. */
 export const isNightAt = (d: Date) => d.getHours() >= 19 || d.getHours() < 6;
 
-/** The room under a floor point; project rooms win over the hallway / breakroom. */
+/** The room under a floor point; project rooms win over the hallway / lounge / cafeteria. */
 export function roomAtPoint(rooms: RoomRect[], mx: number, my: number): string | null {
   const hit = rooms.filter(r => mx >= r.x0 && mx < r.x1 && my >= r.y0 && my < r.y1);
   return (hit.find(r => r.kind === 'project') ?? hit[0])?.id ?? null;

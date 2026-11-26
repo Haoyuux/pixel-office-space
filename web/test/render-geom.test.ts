@@ -21,9 +21,10 @@ describe('render geometry', () => {
 
   it('roomAtPoint prefers project rooms and returns null outside', () => {
     const L = buildLayout([proj('a', 0), proj('b', 1)]);
-    expect(roomAtPoint(L.rooms, 3, 3)).toBe('a');
+    expect(roomAtPoint(L.rooms, 3, 11)).toBe('a');
+    expect(roomAtPoint(L.rooms, 3, 3)).toBe('lounge');
     expect(roomAtPoint(L.rooms, 15, 3)).toBe('hall');
-    expect(roomAtPoint(L.rooms, 20, 3)).toBe('breakroom');
+    expect(roomAtPoint(L.rooms, 20, 3)).toBe('cafeteria');
     expect(roomAtPoint(L.rooms, 20, 10)).toBe('b');
     expect(roomAtPoint(L.rooms, -1, 3)).toBeNull();
   });
@@ -31,7 +32,7 @@ describe('render geometry', () => {
   it('fit frames the whole 7-project building inside the view, centred', () => {
     const L = buildLayout([0, 1, 2, 3, 4, 5, 6].map(i => proj(`p${i}`, i)));
     const b = buildingBox(L.rooms);
-    expect(b).toEqual({ x0: 0, y0: 0, x1: 30, y1: 32 });
+    expect(b).toEqual({ x0: 0, y0: 0, x1: 30, y1: 40 });
     const sb = screenBox(b), t = fitTransform(sb, 1600, 900, 48);
     expect(t.scale).toBeGreaterThanOrEqual(ZOOM_MIN);
     const left = sb.x0 * t.scale + t.x, right = sb.x1 * t.scale + t.x, top = sb.y0 * t.scale + t.y, bottom = sb.y1 * t.scale + t.y;
