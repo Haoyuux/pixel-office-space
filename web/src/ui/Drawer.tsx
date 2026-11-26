@@ -256,7 +256,7 @@ function Composer({ projectId, active, continueFrom, onCreated }: { projectId: s
         <textarea ref={box} aria-label="Message" rows={rows} style={{ overflowY: rows >= 6 ? 'auto' : 'hidden' }} value={text} placeholder={hint}
           spellCheck={false} onChange={e => setText(e.target.value)} onKeyDown={key} />
         <button type="button" className="po-btn primary po-send" disabled={busy || !text.trim()} onClick={() => void send()}>
-          {creating ? (active ? 'Queue' : 'Create') : 'Send'}
+          {continuing && !active ? 'Continue' : creating ? (active ? 'Queue' : 'Create') : 'Send'}
         </button>
       </div>
       <div className="po-composer-foot">
@@ -266,7 +266,7 @@ function Composer({ projectId, active, continueFrom, onCreated }: { projectId: s
             <span>New ticket instead</span>
           </label>
         ) : <span className="po-dim">creates a ticket</span>}
-        {continuing && <span className="po-dim">follow-up of “{continueFrom!.title}”</span>}
+        {continuing && <span className="po-dim po-follow-of">follow-up of “{continueFrom!.title}”</span>}
         <span className="po-grow" />
         <span className="po-dim">⏎ send · ⇧⏎ newline</span>
       </div>

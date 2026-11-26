@@ -383,6 +383,7 @@ describe('M2: real agents UI', () => {
     fireEvent.click(screen.getByRole('button', { name: /past conversations/i }));
     fireEvent.click(within(screen.getByRole('list', { name: /past conversations/i })).getByRole('button', { name: /Add login/ }));
     expect(box().placeholder).toBe('Continue this conversation…');
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeTruthy();
     fireEvent.change(box(), { target: { value: 'Also add logout' } });
     fireEvent.keyDown(box(), { key: 'Enter' });
     await waitFor(() => expect(posts()).toHaveLength(1));
@@ -395,6 +396,12 @@ describe('M2: real agents UI', () => {
     fireEvent.click(screen.getByRole('button', { name: /^resume/i }));
     expect(await screen.findByText('Another ticket is running')).toBeTruthy();
     expect(posts()[0].url).toBe('/api/tickets/t/resume');
+  });
+
+  it('no Resume on a not-a-git-repo failure (the git banner handles it)', () => {
+    openDrawer([ticket({ status: 'failed', reason: 'not-a-git-repo', agentsMode: 'claude' })]);
+    expect(screen.queryByRole('button', { name: /^resume/i })).toBeNull();
+    expect(screen.getByRole('button', { name: /initialize git/i })).toBeTruthy();
   });
 
   it('no Resume button on simulated or done tickets', () => {

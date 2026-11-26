@@ -356,3 +356,4 @@
 }
 .po-mode-opt.on { border-color: var(--accent); color: var(--accent); }
 .po-mode-opt input { accent-color: var(--accent); }
+.po-follow-of { margin-left: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

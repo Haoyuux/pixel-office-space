@@ -66,4 +66,4 @@ export function usageLine(u: { turns: number; costUsd: number; durationMs: numbe
 
 export const isFinished = (t: Ticket) => t.status === 'done' || t.status === 'failed' || t.status === 'cancelled';
 /** A failed claude ticket the server may pick up again (POST resume; the server has the last word). */
-export const canResume = (t: Ticket) => t.status === 'failed' && (t.agentsMode === 'claude' || (!t.agentsMode && !!t.sessions));
+export const canResume = (t: Ticket) => t.status === 'failed' && t.reason !== 'not-a-git-repo' && (t.agentsMode === 'claude' || (!t.agentsMode && !!t.sessions));
