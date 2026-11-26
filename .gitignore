@@ -5,3 +5,4 @@ server/data/
 spike/vendor/
 shots/
 .superpowers/
+.claude/worktrees/
