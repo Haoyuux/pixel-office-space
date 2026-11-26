@@ -8,6 +8,12 @@ import {
 } from '../src/claude/git';
 
 const dirs: string[] = [];
+{
+  const cfg = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'po-gitcfg-')), 'gitconfig');
+  fs.writeFileSync(cfg, '');
+  process.env.GIT_CONFIG_GLOBAL = cfg;
+  process.env.GIT_CONFIG_NOSYSTEM = '1';
+}
 const repos: string[] = [];
 function tmp(): string {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'po-git-'));
@@ -17,8 +23,9 @@ function tmp(): string {
 const git = (cwd: string, ...args: string[]) =>
   execFileSync('git', ['-c', 'user.name=T', '-c', 'user.email=t@t', ...args], { cwd, encoding: 'utf8' }).trim();
 
-async function mkRepo(): Promise<string> {
-  const d = tmp();
+async function mkRepo(sub = ''): Promise<string> {
+  let d = tmp();
+  if (sub) { d = path.join(d, sub); fs.mkdirSync(d); }
   fs.writeFileSync(path.join(d, 'a.txt'), 'a\n');
   await gitInit(d);
   repos.push(d);
@@ -150,5 +157,94 @@ describe('git helper', () => {
     const res = await mergeIntoBase(r, 'office/z-333333', base);
     expect(res.merged).toBe(false);
     expect((await baseInfo(r)).clean).toBe(true);
+  });
+
+  it('conflict leaves HEAD unchanged and no MERGE_HEAD', async () => {
+    const r = await mkRepo();
+    const base = (await baseInfo(r)).branch;
+    const wt = path.join(tmp(), 'wt');
+    await createWorktree(r, wt, 'office/c-444444', base);
+    fs.writeFileSync(path.join(wt, 'a.txt'), 'branch\n');
+    await commitAll(wt, 'm');
+    fs.writeFileSync(path.join(r, 'a.txt'), 'owner\n');
+    git(r, 'add', '-A');
+    git(r, 'commit', '-q', '-m', 'owner');
+    const before = git(r, 'rev-parse', 'HEAD');
+    const res = await mergeIntoBase(r, 'office/c-444444', base);
+    expect(res.merged).toBe(false);
+    if (!res.merged) expect(res.reason).toMatch(/conflict/i);
+    expect(git(r, 'rev-parse', 'HEAD')).toBe(before);
+    expect(fs.existsSync(path.join(r, '.git', 'MERGE_HEAD'))).toBe(false);
+  });
+
+  it('non-conflict merge failure is not called a conflict', async () => {
+    const r = await mkRepo();
+    const base = (await baseInfo(r)).branch;
+    const res = await mergeIntoBase(r, 'office/does-not-exist', base);
+    expect(res.merged).toBe(false);
+    if (!res.merged) expect(res.reason).not.toMatch(/conflict/i);
+  });
+
+  it('works in a repo path with spaces', async () => {
+    const r = await mkRepo('my repo');
+    const base = (await baseInfo(r)).branch;
+    const wt = path.join(tmp(), 'my wt');
+    await createWorktree(r, wt, 'office/s-555555', base);
+    fs.writeFileSync(path.join(wt, 'b.txt'), 'b');
+    expect(await commitAll(wt, 'm')).toBe(true);
+    expect(await mergeIntoBase(r, 'office/s-555555', base)).toEqual({ merged: true });
+    await removeWorktree(r, wt);
+    expect(fs.existsSync(wt)).toBe(false);
+  });
+
+  it('removeWorktree works on a dirty worktree', async () => {
+    const r = await mkRepo();
+    const base = (await baseInfo(r)).branch;
+    const wt = path.join(tmp(), 'wt');
+    await createWorktree(r, wt, 'office/d-666666', base);
+    fs.writeFileSync(path.join(wt, 'junk.txt'), 'x');
+    fs.writeFileSync(path.join(wt, 'a.txt'), 'changed');
+    await removeWorktree(r, wt);
+    expect(fs.existsSync(wt)).toBe(false);
+  });
+
+  it('createWorktree avoids branch and path collisions', async () => {
+    const r = await mkRepo();
+    const base = (await baseInfo(r)).branch;
+    const wt = path.join(tmp(), 'wt');
+    const a = await createWorktree(r, wt, 'office/k-777777', base);
+    expect(a).toEqual({ branch: 'office/k-777777', path: wt });
+    const b = await createWorktree(r, path.join(tmp(), 'wt2'), 'office/k-777777', base);
+    expect(b.branch).not.toBe('office/k-777777');
+    expect(b.branch.startsWith('office/k-777777')).toBe(true);
+    const occupied = tmp();
+    fs.writeFileSync(path.join(occupied, 'f'), 'x');
+    const c = await createWorktree(r, occupied, 'office/k-888888', base);
+    expect(c.path).not.toBe(occupied);
+    expect(fs.existsSync(path.join(c.path, 'a.txt'))).toBe(true);
+    dirs.push(c.path);
+    // stale registration: dir deleted manually, then reuse same path
+    fs.rmSync(wt, { recursive: true, force: true });
+    const d = await createWorktree(r, wt, 'office/k-999999', base);
+    expect(d.path).toBe(wt);
+  });
+
+  it('ignores local gpgsign and failing hooks', async () => {
+    const r = await mkRepo();
+    git(r, 'config', 'commit.gpgsign', 'true');
+    git(r, 'config', 'tag.gpgsign', 'true');
+    git(r, 'config', 'gpg.program', path.join(os.tmpdir(), 'no-such-gpg-binary'));
+    fs.writeFileSync(path.join(r, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const base = (await baseInfo(r)).branch;
+    const wt = path.join(tmp(), 'wt');
+    await createWorktree(r, wt, 'office/g-101010', base);
+    fs.writeFileSync(path.join(wt, 'b.txt'), 'b');
+    expect(await commitAll(wt, 'm')).toBe(true);
+    expect(await mergeIntoBase(r, 'office/g-101010', base)).toEqual({ merged: true });
+    const d = tmp();
+    fs.writeFileSync(path.join(d, 'x.txt'), 'x');
+    await gitInit(d);
+    repos.push(d);
+    expect(await hasCommit(d)).toBe(true);
   });
 });
