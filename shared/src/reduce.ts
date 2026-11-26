@@ -17,7 +17,7 @@ export function applyTicketEvent(t: Ticket | undefined, e: ServerEvent): Ticket 
     case 'agent.session': return { ...t, sessions: { ...t.sessions, [e.role]: e.sessionId } };
     case 'ticket.usage': return { ...t, usage: { turns: e.turns, costUsd: e.costUsd, durationMs: e.durationMs } };
     case 'ticket.workspace': return { ...t, workspace: { ...e.workspace } };
-    case 'ticket.resumed': { const { reason: _r, openGate: _g, ...rest } = t; return { ...rest, status: 'running' }; }
+    case 'ticket.resumed': { const { reason: _r, openGate: _g, ...rest } = t; return { ...rest, status: e.queued ? 'queued' : 'running' }; }
     default: return t;
   }
 }

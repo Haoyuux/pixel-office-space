@@ -12,7 +12,8 @@ export class RoutingOrchestrator implements Orchestrator {
   private owner(ticketId: string): Orchestrator | undefined { return this.all().find(o => o.find(ticketId)); }
 
   startTicket(project: Project, text: string, opts?: StartOptions): Ticket { return this.byMode[modeOf(project)].startTicket(project, text, opts); }
-  adopt(project: Project, ticket: Ticket): void { this.byMode[ticket.agentsMode ?? modeOf(project)].adopt(project, ticket); }
+  /** A recovered ticket stays on the orchestrator that created it; tickets without agentsMode predate M2 (simulated). */
+  adopt(project: Project, ticket: Ticket): void { void project; this.byMode[ticket.agentsMode ?? 'simulated'].adopt(project, ticket); }
   /** Resume is a claude feature: the claude orchestrator rebuilds the ticket from the log. */
   resume(ticketId: string): Ticket { return (this.owner(ticketId) ?? this.byMode.claude).resume(ticketId); }
   decide(ticketId: string, gate: GateKind, decision: GateDecision, note?: string) { this.must(ticketId).decide(ticketId, gate, decision, note); }

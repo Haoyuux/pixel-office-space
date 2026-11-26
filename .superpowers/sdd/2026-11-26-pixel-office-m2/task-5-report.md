@@ -72,3 +72,11 @@ Branch `m2-task5` (from `m2-real-agents` @ 3eed205). Status: DONE.
 - Merged m2-real-agents (Task 4 review fixes). Conflicts in claude.ts resolved keeping route()/tasked() bounce routing plus note delivery; PM notes at the plan gate are now held for a re-plan (Task 4 behaviour) and delivered to the PM session on approval; past the plan they are delivered immediately.
 - Auth status parser matches the real output: `Login method:` gives accountType and loggedIn; the ISO timestamp in parentheses on `Sign-in ends:` gives signInEndsAt; Organization/Email are never read. Redacted fixture: server/test/fixtures/auth-status.txt.
 - server: 147/147 tests pass; tsc (server, web) clean. The Task 4 cancel test failed once under full-suite load (it waits a fixed 300 ms), then passed on 2 reruns; it may be timing-flaky.
+
+## Fix round 1
+- Resume falls back like follow-ups do: if a resumed session fails, the role starts a fresh session with the ticket plan and changed files (refreshed from the branch diff).
+- Tickets without agentsMode (created before M2) are adopted by the simulated orchestrator. Claude Resume requires agentsMode claude plus stored sessions or a workspace.
+- git-init returns 409 only when the folder is a repo with at least one commit.
+- ticket.resumed carries queued: true when another ticket is ahead, so the reducer shows queued.
+- The cancel test now polls instead of waiting a fixed 300 ms.
+- Result: 151/151 server tests pass; tsc for server and web is clean.
