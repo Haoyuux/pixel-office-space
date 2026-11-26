@@ -4,8 +4,24 @@ import { resolve } from 'node:path';
 import type { Project, RoleId } from '@office/shared';
 import { buildLayout } from '../src/engine/layout/building';
 import { parsePieces, footprint } from '../src/engine/pieces';
+import { NEON_SCALE } from '../src/engine/neon';
+import { PX } from '../src/engine/iso';
+import type { Placed } from '../src/engine/layout/types';
 
 const META = parsePieces(readFileSync(resolve(__dirname, '../../assets/office/Isometric_Pixel_Props/pieces.csv'), 'utf8'));
+const NEON = JSON.parse(readFileSync(resolve(__dirname, '../../assets/office/neon-office-free/manifest.json'), 'utf8')) as
+  { props: { file: string; views: { iso: { large: { w: number } } } }[] };
+/**
+ * Floor footprint of a placed piece. Neon props have no metric size in their manifest: take the square whose iso
+ * diamond is as wide as the scaled frame (frame width × 128/48 = (w + d) × PX), which over-covers the opaque prop.
+ */
+const fp = (p: Placed) => {
+  if (p.pack !== 'neon') return footprint(META[p.piece], p.view);
+  const prop = NEON.props.find(q => q.file.startsWith(p.piece + '/'));
+  if (!prop) throw new Error(`no neon prop ${p.piece}`);
+  const side = (prop.views.iso.large.w * NEON_SCALE) / (2 * PX);
+  return { w: side, d: side };
+};
 const proj = (id: string, slot: number, team: RoleId[] = ['pm', 'techlead', 'frontend', 'backend', 'qa']): Project =>
   ({ id, name: id, folder: '.', accent: 'cyan', team, slot, looks: {} as Project['looks'], createdAt: '' });
 
@@ -81,7 +97,7 @@ describe('buildLayout', () => {
     const solids = L.pieces.filter(p => !p.lift && p.tag !== 'floor' && p.tag !== 'wall');
     for (const s of L.spots.filter(q => q.pose !== 'sit')) {
       for (const p of solids) {
-        const f = footprint(META[p.piece], p.view);
+        const f = fp(p);
         const inside = Math.abs(s.mx - p.mx) < f.w / 2 && Math.abs(s.my - p.my) < f.d / 2;
         expect(inside, `${s.id} inside ${p.piece}`).toBe(false);
       }
@@ -103,7 +119,7 @@ describe('buildLayout', () => {
   it('the lounge has many couches and the cafeteria many tables', () => {
     const L = buildLayout([], META);
     const count = (room: string, piece: string) => L.pieces.filter(p => p.room === room && p.piece === piece).length;
-    expect(count('lounge', 'Sofa_Modular')).toBeGreaterThanOrEqual(4);
+    expect(count('lounge', 'Sofa_Modular')).toBeGreaterThanOrEqual(3);
     expect(count('lounge', 'Lounge_Chair')).toBeGreaterThanOrEqual(3);
     expect(count('cafeteria', 'Meeting_Table')).toBeGreaterThanOrEqual(4);
     expect(count('cafeteria', 'Meeting_Chair')).toBeGreaterThanOrEqual(24);
@@ -118,9 +134,71 @@ describe('buildLayout', () => {
       expect(['SW', 'SE'], s.id).toContain(s.facing);
       expect(s.tags).toContain('lounge');
     }
-    for (const p of L.pieces.filter(q => q.piece === 'Sofa_Modular' || q.piece === 'Lounge_Chair')) expect([0, 6]).toContain(p.view);
+    // every sofa faces the camera; an armchair a lounge seat is on faces the camera too (side chairs may turn inward)
+    for (const p of L.pieces.filter(q => q.piece === 'Sofa_Modular')) expect([0, 6]).toContain(p.view);
+    for (const s of sits) {
+      const chair = L.pieces.find(p => p.piece === 'Lounge_Chair' && Math.hypot(p.mx - s.mx, p.my - s.my) < 0.2);
+      if (chair) expect([0, 6], s.id).toContain(chair.view);
+    }
     // chat pairs are mutual
     for (const s of L.spots.filter(q => q.pair)) expect(L.spots.find(q => q.id === s.pair)!.pair, s.id).toBe(s.id);
+  });
+
+  it('lounge: at least three conversation groups, each a sofa with a coffee table right in front of it', () => {
+    const L = buildLayout([], META);
+    const sofas = L.pieces.filter(p => p.room === 'lounge' && p.piece === 'Sofa_Modular');
+    const tables = L.pieces.filter(p => p.room === 'lounge' && p.piece === 'Coffee_Table');
+    expect(sofas.length).toBeGreaterThanOrEqual(3);
+    for (const s of sofas) {
+      // camera side of the sofa: +y for view 0, +x for view 6
+      const t = tables.find(q => s.view === 0
+        ? Math.abs(q.mx - s.mx) < 0.5 && q.my > s.my && q.my - s.my <= 1.2
+        : Math.abs(q.my - s.my) < 0.5 && q.mx > s.mx && q.mx - s.mx <= 1.2);
+      expect(t, `coffee table in front of the sofa at ${s.mx},${s.my}`).toBeDefined();
+    }
+  });
+
+  it('lounge: a rug under every seating group, inside the room', () => {
+    const L = buildLayout([], META);
+    const rugs = L.rugs.filter(r => r.room === 'lounge');
+    expect(rugs.length).toBeGreaterThanOrEqual(3);
+    const tables = L.pieces.filter(p => p.room === 'lounge' && p.piece === 'Coffee_Table');
+    const inRug = (r: typeof rugs[number], x0: number, y0: number, x1: number, y1: number) => x0 >= r.x0 && x1 <= r.x1 && y0 >= r.y0 && y1 <= r.y1;
+    for (const s of L.pieces.filter(p => p.room === 'lounge' && p.piece === 'Sofa_Modular')) {
+      const t = tables.reduce((a, b) => Math.hypot(b.mx - s.mx, b.my - s.my) < Math.hypot(a.mx - s.mx, a.my - s.my) ? b : a);
+      const f = footprint(META.Coffee_Table, t.view), sf = footprint(META.Sofa_Modular, s.view);
+      // the coffee table stands wholly on the rug, the sofa at least with its front legs (its span along the rug)
+      const rug = rugs.find(r => inRug(r, t.mx - f.w / 2, t.my - f.d / 2, t.mx + f.w / 2, t.my + f.d / 2)
+        && inRug(r, s.mx - sf.w / 2, s.my, s.mx + sf.w / 2, s.my + sf.d / 2));
+      expect(rug, `rug under the group at ${s.mx},${s.my}`).toBeDefined();
+    }
+    // rugs never overlap and stay inside the lounge
+    for (const r of rugs) {
+      expect(r.x0 >= 0 && r.y0 >= 0 && r.x1 <= 14 && r.y1 <= 8, r.id).toBe(true);
+      for (const o of rugs) if (o !== r) expect(r.x1 <= o.x0 || o.x1 <= r.x0 || r.y1 <= o.y0 || o.y1 <= r.y0, `${r.id} overlaps ${o.id}`).toBe(true);
+    }
+  });
+
+  it('lounge: a game corner with arcade cabinets, poufs and spots to play at', () => {
+    const L = buildLayout([], META);
+    const neon = (prop: string) => L.pieces.filter(p => p.room === 'lounge' && p.pack === 'neon' && p.piece === prop);
+    expect(neon('arcade_cabinet').length).toBeGreaterThanOrEqual(2);
+    expect(neon('pouf').length).toBeGreaterThanOrEqual(3);
+    for (const p of L.pieces.filter(q => q.pack === 'neon')) {
+      expect(p.variant, p.piece).toMatch(/^(graphite|white)_(cyan|magenta|amber)$/);
+      expect(NEON.props.some(q => q.file === `${p.piece}/${p.piece}_${p.variant}_on.png`), p.piece).toBe(true);
+      expect([0, 6]).toContain(p.view); // the pack's single iso view, or its mirror
+    }
+    const play = L.spots.filter(s => s.room === 'lounge' && s.id.startsWith('arcade'));
+    expect(play.length).toBeGreaterThanOrEqual(1);
+    for (const s of play) {
+      expect(s.pose).toBe('stand');
+      expect(s.tags).toContain('lounge');
+      // in front of a cabinet's screen (+y for view 0), facing it
+      const cab = neon('arcade_cabinet').find(c => Math.abs(c.mx - s.mx) < 0.3 && s.my > c.my && s.my - c.my < 1.2);
+      expect(cab, s.id).toBeDefined();
+      expect(s.facing).toBe('NE');
+    }
   });
 
   it('cafeteria: table seats face the camera; coffee, bar and cork board spots exist', () => {

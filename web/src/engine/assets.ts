@@ -2,6 +2,7 @@ import { Assets, Rectangle, Texture, TextureSource } from 'pixi.js';
 import type { Look } from '@office/shared';
 import { DIRS } from './iso';
 import { parsePieces, type PieceMeta } from './pieces';
+import { NEON_META, neonUrl } from './neon';
 
 TextureSource.defaultOptions.scaleMode = 'nearest';
 
@@ -10,7 +11,8 @@ const CHARS = '/assets/characters/OfficeCharacters_Basic_v1.0/characters';
 
 let pieces: Record<string, PieceMeta> | null = null;
 export async function loadPieceMeta(): Promise<Record<string, PieceMeta>> {
-  if (!pieces) pieces = parsePieces(await (await fetch(`${PROPS}/pieces.csv`)).text());
+  // NEON OFFICE props share the table (frame, pivot, footprint), so the walk grid and the renderer treat them alike.
+  if (!pieces) pieces = { ...parsePieces(await (await fetch(`${PROPS}/pieces.csv`)).text()), ...NEON_META };
   return pieces;
 }
 export const pieceMeta = (name: string): PieceMeta => {
@@ -34,6 +36,9 @@ export async function loadPiece(name: string, view: number, animated = false): P
   }
   return load(`${dir}/sprites/${name}_${view}.png`);
 }
+
+/** A NEON OFFICE prop's lit sprite, or its additive glow layer. */
+export const loadNeon = (prop: string, variant: string, glow = false): Promise<Texture> => load(neonUrl(prop, variant, glow));
 
 export type Clip = 'idle' | 'walk' | 'drinking' | 'waving';
 export const CLIP_FRAMES: Record<Clip, number> = { idle: 4, walk: 8, drinking: 8, waving: 6 };

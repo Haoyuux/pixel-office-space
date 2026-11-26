@@ -5,8 +5,10 @@ import type { Project, RoleId } from '@office/shared';
 import { buildLayout } from '../src/engine/layout/building';
 import { parsePieces, footprint } from '../src/engine/pieces';
 import { WalkGrid } from '../src/engine/walkgrid';
+import { NEON_META } from '../src/engine/neon';
 
-const META = parsePieces(readFileSync(resolve(__dirname, '../../assets/office/Isometric_Pixel_Props/pieces.csv'), 'utf8'));
+// like loadPieceMeta(): the neon props (arcades, poufs, ...) are obstacles too
+const META = { ...parsePieces(readFileSync(resolve(__dirname, '../../assets/office/Isometric_Pixel_Props/pieces.csv'), 'utf8')), ...NEON_META };
 const proj = (id: string, slot: number, team: RoleId[] = ['pm', 'techlead', 'frontend', 'backend', 'qa']): Project =>
   ({ id, name: id, folder: '.', accent: 'cyan', team, slot, looks: {} as Project['looks'], createdAt: '' });
 

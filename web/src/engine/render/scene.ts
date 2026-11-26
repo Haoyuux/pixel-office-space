@@ -1,8 +1,9 @@
 import { AnimatedSprite, Container, Graphics, Point, Sprite, Text, Texture, type Application, type Ticker } from 'pixi.js';
 import { ACCENT_HEX, type Project, type RoleId } from '@office/shared';
 import { iso, PZ, screenToWorld } from '../iso';
-import { loadPiece, loadPieceMeta, pieceMeta } from '../assets';
-import type { BuildingLayout, Placed, RoomRect } from '../layout/types';
+import { loadNeon, loadPiece, loadPieceMeta, pieceMeta } from '../assets';
+import { NEON_SCALE } from '../neon';
+import type { BuildingLayout, Placed, RoomRect, Rug } from '../layout/types';
 import { buildingBox, rectPoly, roomAtPoint, type Box } from './geom';
 import { Lighting } from './lighting';
 import type { Camera } from './camera';
@@ -73,10 +74,14 @@ export class OfficeScene {
     await loadPieceMeta();
     const monitorTag = (p: Placed) => p.tag?.startsWith('monitor:');
     const textures = await Promise.all(layout.pieces.map(async p => {
+      if (p.pack === 'neon') {
+        const [still, glow] = await Promise.all([loadNeon(p.piece, p.variant!), loadNeon(p.piece, p.variant!, true)]);
+        return { still, frames: null, glow };
+      }
       const animated = !!p.anim && pieceMeta(p.piece).anim > 0;
       const still = (animated && !monitorTag(p)) ? null : await loadPiece(p.piece, p.view) as Texture;
       const frames = animated ? await loadPiece(p.piece, p.view, true) as Texture[] : null;
-      return { still, frames };
+      return { still, frames, glow: null as Texture | null };
     }));
     this.trophyTex = await loadPiece('Trophy', 0) as Texture;
     if (gen !== this.gen) return;
@@ -88,8 +93,15 @@ export class OfficeScene {
     this.boardText.clear(); this.trophies.clear(); this.badgeViews.clear();
     this.cork = null;
 
+    const glows: Sprite[] = [];
     layout.pieces.forEach((p, i) => {
-      const { still, frames } = textures[i];
+      const { still, frames, glow } = textures[i];
+      if (glow) {
+        // the pack's neon glow, additive over the prop, untinted and only at night (registered after lighting.build)
+        const g = this.put(p, new Sprite(glow));
+        g.blendMode = 'add'; g.zIndex += 0.01;
+        glows.push(g);
+      }
       if (monitorTag(p)) {
         const m: Monitor = { still: this.put(p, new Sprite(still!)) };
         if (frames) { m.anim = this.put(p, new AnimatedSprite(frames)); m.anim.animationSpeed = 0.2; m.anim.visible = false; }
@@ -103,7 +115,9 @@ export class OfficeScene {
     });
 
     this.world.addChild(this.drawHall(layout.rooms));
+    this.world.addChild(this.drawRugs(layout.rugs ?? []));
     this.lighting.build(layout);
+    for (const g of glows) { this.lighting.untinted.add(g); this.lighting.nightOnly.add(g); }
     for (const [c, o] of this.persistent) { this.world.addChild(c); if (o.untinted) this.lighting.untinted.add(c); }
     for (const n of layout.nameplates) this.addNameplate(n.projectId, n.mx, n.my, n.lift);
 
@@ -129,6 +143,8 @@ export class OfficeScene {
     const s = iso(p.mx, p.my);
     spr.position.set(s.x, s.y - (p.lift ?? 0) * PZ);
     spr.zIndex = p.zi ?? s.y + (p.z ?? 0);
+    // neon props are drawn at 48 ppm; view 6 (facing +x) is the native +y view mirrored about the pivot
+    if (p.pack === 'neon') spr.scale.set(p.view === 6 ? -NEON_SCALE : NEON_SCALE, NEON_SCALE);
     this.world.addChild(spr);
     return spr;
   }
@@ -142,6 +158,62 @@ export class OfficeScene {
       }
     }
     for (const r of rooms) if (r.door) g.poly(rectPoly(r.door.x - 0.12, r.door.y0, r.door.x + 0.12, r.door.y1)).fill(THRESHOLD);
+    return g;
+  }
+
+  /**
+   * Code-drawn rugs just above the floor (under night pools, walls and furniture): a darker edge for thickness, a
+   * border band, a thin inner line, then a pattern (stripes across the short side, a diamond lattice or soft checks).
+   */
+  private drawRugs(rugs: Rug[]): Graphics {
+    const g = new Graphics({ zIndex: -9.5e4 });
+    const quad = (x0: number, y0: number, x1: number, y1: number, color: number, alpha = 1, lift = 0.012) =>
+      g.poly(rectPoly(x0, y0, x1, y1, lift)).fill({ color, alpha });
+    for (const r of rugs) {
+      const w = r.x1 - r.x0, d = r.y1 - r.y0, b = Math.min(0.22, Math.min(w, d) * 0.08);
+      g.poly(rectPoly(r.x0, r.y0, r.x1, r.y1)).fill(lerpColor(r.border, 0x000000, 0.35)); // thickness on the front edges
+      quad(r.x0, r.y0, r.x1, r.y1, r.border);
+      const ix0 = r.x0 + b, iy0 = r.y0 + b, ix1 = r.x1 - b, iy1 = r.y1 - b;
+      quad(ix0, iy0, ix1, iy1, r.color);
+      const iw = ix1 - ix0, id = iy1 - iy0;
+      if (r.pattern === 'stripes') {
+        // bands across the long side, near both ends
+        const alongX = iw >= id, n = 3, t = 0.07;
+        for (const end of [0, 1]) for (let k = 0; k < n; k++) {
+          const o = 0.25 + k * 0.16, len = alongX ? iw : id, a = end ? len - o - t : o;
+          if (alongX) quad(ix0 + a, iy0, ix0 + a + t, iy1, k === 1 ? r.accent : r.border, 0.85);
+          else quad(ix0, iy0 + a, ix1, iy0 + a + t, k === 1 ? r.accent : r.border, 0.85);
+        }
+      } else if (r.pattern === 'diamonds') {
+        // a lattice of small diamonds (iso squares turned 45°) in the field
+        const step = 0.55, s2 = 0.13;
+        for (let x = ix0 + step * 0.75; x < ix1 - step * 0.4; x += step) for (let y = iy0 + step * 0.75; y < iy1 - step * 0.4; y += step) {
+          const pts = [[x, y - s2], [x + s2, y], [x, y + s2], [x - s2, y]].flatMap(([px, py]) => { const p = iso(px, py); return [p.x, p.y - 0.012 * PZ]; });
+          g.poly(pts).fill({ color: r.accent, alpha: 0.55 });
+        }
+      } else if (r.pattern === 'checks') {
+        const c = 0.5;
+        for (let x = ix0; x < ix1 - 1e-6; x += c) for (let y = iy0; y < iy1 - 1e-6; y += c) {
+          if (Math.round((x - ix0 + y - iy0) / c) % 2) quad(x, y, Math.min(ix1, x + c), Math.min(iy1, y + c), lerpColor(r.color, 0xffffff, 0.06));
+        }
+      }
+      // thin inner line just inside the border
+      const e = 0.05;
+      g.poly(rectPoly(ix0 + e, iy0 + e, ix1 - e, iy1 - e, 0.012), true).stroke({ width: 1.5, color: r.accent, alpha: 0.7 });
+      // tassels on the two short ends
+      const shortX = w < d;
+      const n = Math.floor((shortX ? w : d) / 0.12);
+      for (let k = 1; k < n; k++) {
+        const t = k / n;
+        const ends: [number, number, number, number][] = shortX
+          ? [[r.x0 + t * w, r.y0, 0, -0.07], [r.x0 + t * w, r.y1, 0, 0.07]]
+          : [[r.x0, r.y0 + t * d, -0.07, 0], [r.x1, r.y0 + t * d, 0.07, 0]];
+        for (const [x, y, dx, dy] of ends) {
+          const p = iso(x, y), q = iso(x + dx, y + dy);
+          g.moveTo(p.x, p.y).lineTo(q.x, q.y).stroke({ width: 2, color: lerpColor(r.accent, r.border, 0.3), alpha: 0.9 });
+        }
+      }
+    }
     return g;
   }
 
