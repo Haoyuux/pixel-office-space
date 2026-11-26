@@ -28,4 +28,6 @@ export const paths = {
   gate: (ticketId: string, gate: string) => `/api/tickets/${enc(ticketId)}/gates/${enc(gate)}`,
   messages: (ticketId: string) => `/api/tickets/${enc(ticketId)}/messages`,
   cancel: (ticketId: string) => `/api/tickets/${enc(ticketId)}/cancel`,
+  resume: (ticketId: string) => `/api/tickets/${enc(ticketId)}/resume`,
+  gitInit: (projectId: string) => `/api/projects/${enc(projectId)}/git-init`,
 };

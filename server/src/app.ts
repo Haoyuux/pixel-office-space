@@ -9,14 +9,23 @@ import { guardRequests } from './origin';
 import { Hub } from './hub';
 import { ConflictError, type Orchestrator } from './orchestrator/types';
 import type { TicketLog } from './ticketLog';
+import * as realGit from './claude/git';
+import { ClaudeSystem, type ClaudeStatus } from './claude/system';
 
 export interface Office { server: Server; store: ProjectStore; hub: Hub; close(): void }
-export interface OfficeOptions { dataDir: string; orchestrator: Orchestrator; log: TicketLog; assetsDir?: string }
+export interface OfficeOptions {
+  dataDir: string; orchestrator: Orchestrator; log: TicketLog; assetsDir?: string;
+  /** `GET /api/system/claude` source (tests inject a fake; never the real CLI). */
+  claudeSystem?: { status(): Promise<ClaudeStatus> };
+  git?: Pick<typeof realGit, 'isRepo' | 'hasCommit' | 'gitInit'>;
+}
 
 const GATES: GateKind[] = ['plan', 'final', 'stuck'];
 
 export function createOffice(opts: OfficeOptions): Office {
   const { orchestrator: orch, log } = opts;
+  const git = opts.git ?? realGit;
+  let system = opts.claudeSystem;
   const store = new ProjectStore(join(opts.dataDir, 'projects.json'));
   const app = express();
   app.use(guardRequests);
@@ -54,6 +63,10 @@ export function createOffice(opts: OfficeOptions): Office {
       const busy = orch.busyRoles(p.id).filter(r => removed.includes(r));
       if (busy.length) throw new ConflictError(`Busy on a running ticket: ${busy.join(', ')}`);
     }
+    if (body.agentsMode !== undefined && body.agentsMode !== (p.agentsMode ?? 'claude')
+      && (orch.current(p.id) || orch.queue(p.id).length)) {
+      throw new ConflictError('Agents mode can only change when no ticket is running for this project');
+    }
     const u = store.update(p.id, body, n => scaffoldOrExplain(n.folder, n.team));
     hub.broadcast(projectEvent('project.updated', u));
     res.json(u);
@@ -71,6 +84,13 @@ export function createOffice(opts: OfficeOptions): Office {
     const p = mustProject(req.params.id);
     const text = String(req.body.text ?? '').trim();
     if (!text) throw new ValidationError('Ticket text is required');
+    const parentTicketId = req.body.parentTicketId;
+    if (parentTicketId !== undefined && parentTicketId !== null) {
+      if (typeof parentTicketId !== 'string') throw new ValidationError('parentTicketId must be a ticket id');
+      const parent = orch.find(parentTicketId) ?? log.tickets(p.id).find(t => t.id === parentTicketId);
+      if (!parent || parent.projectId !== p.id) throw new NotFoundError('Parent ticket not found');
+      return res.status(201).json(orch.startTicket(p, text, { parentTicketId }));
+    }
     res.status(201).json(orch.startTicket(p, text));
   });
 
@@ -97,6 +117,31 @@ export function createOffice(opts: OfficeOptions): Office {
     if (!text) throw new ValidationError('Message text is required');
     orch.sendMessage(req.params.id, text);
     res.json({ ok: true });
+  });
+
+  app.post('/api/tickets/:id/resume', (req, res) => {
+    const known = orch.find(req.params.id) ?? store.list().flatMap(p => log.tickets(p.id)).find(t => t.id === req.params.id);
+    if (!known) throw new NotFoundError('Ticket not found');
+    res.json(orch.resume(req.params.id));
+  });
+
+  app.post('/api/projects/:id/git-init', async (req, res, next) => {
+    try {
+      const p = mustProject(req.params.id);
+      // a repo with no commits still needs the initial commit (gitInit handles an existing repo)
+      if (await git.isRepo(p.folder) && await git.hasCommit(p.folder)) throw new ConflictError('This folder is already a git repository');
+      await git.gitInit(p.folder);
+      res.json({ ok: true, message: `Initialized git in ${p.folder} with an initial commit.` });
+    } catch (e) { next(e); }
+  });
+
+  app.get('/api/system/claude', async (_req, res, next) => {
+    try {
+      system ??= new ClaudeSystem();
+      const s = await system.status();
+      // explicit allow-list: never leak anything else (email, organization) the source might carry
+      res.json({ found: s.found, version: s.version, loggedIn: s.loggedIn, accountType: s.accountType, signInEndsAt: s.signInEndsAt });
+    } catch (e) { next(e); }
   });
 
   app.post('/api/tickets/:id/cancel', (req, res) => {

@@ -41,3 +41,29 @@ export function teamStages(team: RoleId[]): Exclude<Stage, 'done'>[] {
 }
 
 export const STAGE_LABEL: Record<Stage, string> = { plan: 'Plan', design: 'Design', build: 'Build', review: 'Review', test: 'Test', docs: 'Docs', done: 'Done' };
+
+/** "just now", "5m ago", "3h ago", "2d ago", then a short date. */
+export function relativeDate(iso: string, now = Date.now()): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '';
+  const s = Math.max(0, (now - t) / 1000);
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  if (s < 30 * 86400) return `${Math.floor(s / 86400)}d ago`;
+  return new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+/** "~$0.84" — always an estimate, never a bill. */
+export const estUsd = (usd: number) => `~$${usd.toFixed(2)}`;
+
+/** "12 turns · 6 min · uses your Claude plan (≈$0.84 at API rates, not charged)". The $ is the CLI's API-rate estimate; on a subscription nothing is billed. */
+export function usageLine(u: { turns: number; costUsd: number; durationMs: number }): string {
+  const min = u.durationMs / 60000;
+  const dur = min < 1 ? `${Math.max(1, Math.round(u.durationMs / 1000))} s` : `${Math.round(min)} min`;
+  return `${u.turns} turn${u.turns === 1 ? '' : 's'} · ${dur} · uses your Claude plan (≈$${u.costUsd.toFixed(2)} at API rates, not charged)`;
+}
+
+export const isFinished = (t: Ticket) => t.status === 'done' || t.status === 'failed' || t.status === 'cancelled';
+/** A failed claude ticket the server may pick up again (POST resume; the server has the last word). */
+export const canResume = (t: Ticket) => t.status === 'failed' && t.reason !== 'not-a-git-repo' && (t.agentsMode === 'claude' || (!t.agentsMode && !!t.sessions));

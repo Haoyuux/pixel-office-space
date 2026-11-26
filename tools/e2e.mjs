@@ -62,7 +62,7 @@ const start = (args, env, cwd = root) => {
   children.push(c);
   return c;
 };
-start(['tsx', 'server/src/main.ts'], { OFFICE_DATA: dataDir, OFFICE_PORT: API_PORT, OFFICE_STAGE_MS: '800,1500' });
+start(['tsx', 'server/src/main.ts'], { OFFICE_DATA: dataDir, OFFICE_PORT: API_PORT, OFFICE_STAGE_MS: '800,1500', OFFICE_AGENTS: 'simulated' });
 start(['vite', '--host', '127.0.0.1', '--port', WEB_PORT, '--strictPort'], { OFFICE_PORT: API_PORT }, join(root, 'web'));
 await waitFor(async () => (await quickFetch(API + '/api/projects')).ok, 'server');
 await waitFor(async () => (await quickFetch(WEB + '/')).ok, 'vite');

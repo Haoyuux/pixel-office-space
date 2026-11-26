@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useOffice, type FeedItem } from '../state/store';
-import { clock, roleColor, roleEmoji, roleShort, STAGE_LABEL } from './format';
+import { clock, isFinished, roleColor, roleEmoji, roleShort, STAGE_LABEL, usageLine } from './format';
 import { GateCard } from './GateCard';
 import { useFollow } from './useFollow';
 import type { Stage } from '@office/shared';
@@ -76,6 +76,8 @@ function Row({ item, ticketId, onShow }: { item: FeedItem; ticketId: string; onS
 export function Feed({ ticketId, onShow }: { ticketId: string; onShow?: (tab: 'plan' | 'changes') => void }) {
   const all = useOffice(s => s.feed[ticketId] ?? EMPTY);
   const filter = useOffice(s => s.roleFilter);
+  const ticket = useOffice(s => s.tickets[ticketId]);
+  const usage = ticket && isFinished(ticket) ? ticket.usage : undefined;
   const items = filter === 'all' ? all : all.filter(i => !i.role || i.role === filter);
   const last = all[all.length - 1];
   const { ref, paused, onScroll, follow } = useFollow<HTMLDivElement>(`${all.length}:${last?.text.length ?? 0}:${last?.status ?? ''}`);
@@ -84,6 +86,7 @@ export function Feed({ ticketId, onShow }: { ticketId: string; onShow?: (tab: 'p
       <div className="po-scroll po-feed" ref={ref} onScroll={onScroll}>
         {items.length === 0 && <div className="po-empty">No activity yet.</div>}
         {items.map(i => <Row key={`${i.kind}:${i.id}`} item={i} ticketId={ticketId} onShow={onShow} />)}
+        {usage && <div className="po-usage">{usageLine(usage)}</div>}
       </div>
       {paused && <button type="button" className="po-follow" onClick={follow}>↓ follow</button>}
     </div>

@@ -1,4 +1,5 @@
 import { useOffice } from '../state/store';
+import { ClaudeBanner } from './claudeStatus';
 
 /** Top-left canvas chrome: `+ Add Project`, `Fit Building`, `☀/🌙`. */
 export function Toolbar({ onAdd, onFit }: { onAdd?: () => void; onFit: () => void }) {
@@ -11,6 +12,7 @@ export function Toolbar({ onAdd, onFit }: { onAdd?: () => void; onFit: () => voi
         aria-label={night ? 'Switch to day' : 'Switch to night'} title={night ? 'Night (click for day)' : 'Day (click for night)'}>
         {night ? '🌙' : '☀'}
       </button>
+      <ClaudeBanner compact />
     </div>
   );
 }
