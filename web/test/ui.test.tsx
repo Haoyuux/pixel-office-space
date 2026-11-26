@@ -369,7 +369,8 @@ describe('M2: real agents UI', () => {
     fireEvent.click(screen.getByRole('button', { name: /past conversations/i }));
     const list = screen.getByRole('list', { name: /past conversations/i });
     const item = within(list).getByRole('button', { name: /Add login/ });
-    expect(item.textContent).toMatch(/~\$0\.84 est\./);
+    expect(item.textContent).toMatch(/12 turns/);
+    expect(item.textContent).not.toMatch(/\$/);
     expect(item.textContent).toMatch(/done/);
     expect(item.textContent).toMatch(/2d ago/);
     expect(item.textContent).toContain(roleDef('frontend').emoji);
