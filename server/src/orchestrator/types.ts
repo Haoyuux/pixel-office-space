@@ -1,6 +1,6 @@
 import type { GateDecision, GateKind, Project, RoleId, ServerEvent, Ticket } from '@office/shared';
 
-export class ConflictError extends Error {}
+export { ConflictError, ValidationError } from '../errors';
 
 export interface Scheduler { after(ms: number, fn: () => void): () => void }
 

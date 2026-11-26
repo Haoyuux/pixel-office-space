@@ -3,7 +3,7 @@ import {
   applyTicketEvent, type AgentState, type GateDecision, type GateKind, type Plan, type Project, type RoleId,
   type ServerEvent, type Stage, type Ticket,
 } from '@office/shared';
-import { ConflictError, type Orchestrator, type Scheduler } from './types';
+import { ConflictError, ValidationError, type Orchestrator, type Scheduler } from './types';
 import { makeDiff, makePlan, makeWork, titleOf } from './fakeContent';
 import type { TicketLog } from '../ticketLog';
 
@@ -67,9 +67,9 @@ export class SimulatedOrchestrator implements Orchestrator {
   }
 
   decide(ticketId: string, gate: GateKind, decision: GateDecision, note?: string): void {
+    if (!GATE_DECISIONS[gate]?.includes(decision)) throw new ValidationError(`Decision ${decision} is not valid for ${gate}`);
     const run = this.runs.get(ticketId);
     if (!run || run.ticket.openGate !== gate) throw new ConflictError(`Gate ${gate} is not open`);
-    if (!GATE_DECISIONS[gate].includes(decision)) throw new ConflictError(`Decision ${decision} is not valid for ${gate}`);
     this.emit(run, { type: 'gate.closed', gate, decision, note });
     if (gate === 'plan') {
       if (decision === 'changes') return this.runPlan(run, note);
@@ -142,13 +142,19 @@ export class SimulatedOrchestrator implements Orchestrator {
     });
   }
 
+  /** Roles with a plan task that are still on the team (a role can be removed while the plan gate is open). */
+  private tasked(run: Run): Set<RoleId> {
+    const team = run.project.team;
+    return new Set((run.plan?.tasks ?? []).map(t => t.role).filter(r => team.includes(r)));
+  }
+
   private rolesFor(run: Run, stage: WorkStage): RoleId[] {
-    const tasked = new Set((run.plan?.tasks ?? []).map(t => t.role));
+    const tasked = this.tasked(run);
     return STAGE_ROLES[stage].filter(r => tasked.has(r));
   }
 
   private summonTeam(run: Run) {
-    for (const r of new Set((run.plan?.tasks ?? []).map(t => t.role))) if (r !== 'pm') this.state(run, r, 'summoned');
+    for (const r of this.tasked(run)) if (r !== 'pm') this.state(run, r, 'summoned');
   }
 
   /** Continue with the first pipeline stage after `after` (null = from the start). */

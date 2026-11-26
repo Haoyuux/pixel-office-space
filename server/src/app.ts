@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import type { GateDecision, GateKind, Project, ServerEvent, Snapshot, Ticket } from '@office/shared';
 import { ProjectStore, ValidationError, NotFoundError } from './store';
-import { scaffoldAgents } from './scaffold';
+import { scaffoldOrExplain } from './scaffold';
+import { guardRequests } from './origin';
 import { Hub } from './hub';
 import { ConflictError, type Orchestrator } from './orchestrator/types';
 import type { TicketLog } from './ticketLog';
@@ -18,6 +19,7 @@ export function createOffice(opts: OfficeOptions): Office {
   const { orchestrator: orch, log } = opts;
   const store = new ProjectStore(join(opts.dataDir, 'projects.json'));
   const app = express();
+  app.use(guardRequests);
   app.use(express.json());
   const server = createServer(app);
 
@@ -38,21 +40,21 @@ export function createOffice(opts: OfficeOptions): Office {
   app.get('/api/projects', (_req, res) => res.json(store.list()));
 
   app.post('/api/projects', (req, res) => {
-    const p = store.add(req.body);
-    scaffoldAgents(p.folder, p.team);
+    // agent files first: a folder we can't write to must not leave a saved project behind
+    const p = store.add(req.body, n => scaffoldOrExplain(n.folder, n.team));
     hub.broadcast(projectEvent('project.added', p));
     res.status(201).json(p);
   });
 
   app.patch('/api/projects/:id', (req, res) => {
     const p = mustProject(req.params.id);
-    if (Array.isArray(req.body.team)) {
-      const removed = p.team.filter(r => !req.body.team.includes(r));
+    const body = req.body ?? {};
+    if (Array.isArray(body.team)) {
+      const removed = p.team.filter(r => !body.team.includes(r));
       const busy = orch.busyRoles(p.id).filter(r => removed.includes(r));
       if (busy.length) throw new ConflictError(`Busy on a running ticket: ${busy.join(', ')}`);
     }
-    const u = store.update(p.id, req.body);
-    scaffoldAgents(u.folder, u.team);
+    const u = store.update(p.id, body, n => scaffoldOrExplain(n.folder, n.team));
     hub.broadcast(projectEvent('project.updated', u));
     res.json(u);
   });
@@ -103,10 +105,13 @@ export function createOffice(opts: OfficeOptions): Office {
     res.json({ ok: true });
   });
 
-  app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-    const status = err instanceof ValidationError ? 400 : err instanceof NotFoundError ? 404 : err instanceof ConflictError ? 409 : 500;
+  app.use((err: Error & { status?: unknown; statusCode?: unknown }, _req: Request, res: Response, _next: NextFunction) => {
+    // body-parser / serve-static errors carry their own status (malformed JSON 400, missing asset 404)
+    const own = Number(err.status ?? err.statusCode);
+    const status = err instanceof ValidationError ? 400 : err instanceof NotFoundError ? 404 : err instanceof ConflictError ? 409
+      : own >= 400 && own < 600 ? own : 500;
     if (status === 500) console.error(err);
-    res.status(status).json({ error: err.message });
+    res.status(status).json({ error: status === 404 && own === 404 ? 'Not found' : err.message });
   });
 
   return { server, store, hub, close() { hub.close(); server.close(); } };

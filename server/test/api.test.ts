@@ -89,7 +89,7 @@ describe('REST + WebSocket', () => {
     await boot();
     const p = (await addProject()).body;
     const t = (await request(office.server).post(`/api/projects/${p.id}/tickets`).send({ text: 'x' })).body;
-    await request(office.server).post(`/api/tickets/${t.id}/cancel`);
+    await request(office.server).post(`/api/tickets/${t.id}/cancel`).send({});
     expect((await request(office.server).post(`/api/tickets/${t.id}/messages`).send({ text: 'hi' })).status).toBe(409);
   });
 
@@ -98,7 +98,7 @@ describe('REST + WebSocket', () => {
     const { ws, msgs } = await connect();
     const p = (await addProject()).body;
     await request(office.server).post(`/api/projects/${p.id}/tickets`).send({ text: 'x' });
-    expect((await request(office.server).delete(`/api/projects/${p.id}`)).status).toBe(200);
+    expect((await request(office.server).delete(`/api/projects/${p.id}`).send({})).status).toBe(200);
     await new Promise(res => setTimeout(res, 50));
     const types = msgs.map(m => m.type);
     expect(types.indexOf('ticket.cancelled')).toBeLessThan(types.indexOf('project.removed'));

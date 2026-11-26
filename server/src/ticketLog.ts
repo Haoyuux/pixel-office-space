@@ -17,7 +17,13 @@ export class TicketLog {
   read(projectId: string, ticketId: string): ServerEvent[] {
     const f = join(this.dir, projectId, `${ticketId}.jsonl`);
     if (!existsSync(f)) return [];
-    return readFileSync(f, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
+    // a crash mid-append can leave a torn line: skip anything unparseable rather than fail recovery
+    const out: ServerEvent[] = [];
+    for (const l of readFileSync(f, 'utf8').split('\n')) {
+      if (!l.trim()) continue;
+      try { out.push(JSON.parse(l)); } catch { /* torn line */ }
+    }
+    return out;
   }
 
   /** All tickets of a project, oldest first. */
