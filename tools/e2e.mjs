@@ -1,7 +1,7 @@
 // One-command walkthrough: node tools/e2e.mjs
 // Starts the server (temp data dir, fast stages) and Vite, drives headless Chrome over CDP, prints "e2e ok" or fails non-zero.
 import { spawn, execSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,8 +13,19 @@ const API = 'http://127.0.0.1:5175', WEB = 'http://127.0.0.1:5173';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const children = [];
 const killTree = (c) => { try { if (process.platform === 'win32') execSync(`taskkill /pid ${c.pid} /T /F`, { stdio: 'ignore' }); else c.kill('SIGKILL'); } catch {} };
-const cleanup = () => { for (const c of children) killTree(c); };
+const tempDirs = [];
+const mkTemp = (prefix) => { const d = mkdtempSync(join(tmpdir(), prefix)); tempDirs.push(d); return d; };
+let cleaned = false;
+const cleanup = () => {
+  if (cleaned) return; cleaned = true;
+  for (const c of children) killTree(c);
+  for (const d of tempDirs) { try { rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch {} }
+};
 process.on('exit', cleanup);
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { console.error(`e2e aborted (${sig})`); cleanup(); process.exit(130); });
+const DEADLINE_MS = 5 * 60 * 1000;
+const deadline = setTimeout(() => fail(`overall deadline of ${DEADLINE_MS / 1000}s exceeded`), DEADLINE_MS);
+deadline.unref?.();
 const fail = (msg) => { console.error(`e2e FAILED: ${msg}`); cleanup(); process.exit(1); };
 const assert = (cond, msg) => { if (!cond) fail(msg); };
 const step = (m) => console.log('  -', m);
@@ -28,12 +39,18 @@ async function waitFor(fn, what, ms = 60000, every = 150) {
   }
 }
 const api = async (method, path, body) => {
-  const r = await fetch(API + path, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(API + path, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(10000) });
   if (!r.ok) throw new Error(`${method} ${path} -> ${r.status} ${await r.text()}`);
   return r.json();
 };
 
-const tmp = mkdtempSync(join(tmpdir(), 'office-e2e-'));
+const quickFetch = (url) => fetch(url, { signal: AbortSignal.timeout(3000) });
+async function main() {
+for (const u of [API + '/api/projects', WEB + '/']) {
+  let up = false; try { up = (await quickFetch(u)).status > 0; } catch {}
+  if (up) fail(`${u} already responds: stop whatever is using ports 5173/5175 first`);
+}
+const tmp = mkTemp('office-e2e-');
 const dataDir = join(tmp, 'data');
 const folders = ['alpha', 'beta with space', 'gamma'].map(n => { const d = join(tmp, n); mkdirSync(d, { recursive: true }); return d; });
 
@@ -45,21 +62,26 @@ const start = (args, env, cwd = root) => {
 };
 start(['tsx', 'server/src/main.ts'], { OFFICE_DATA: dataDir, OFFICE_PORT: '5175', OFFICE_STAGE_MS: '800,1500' });
 start(['vite', '--host', '127.0.0.1', '--port', '5173', '--strictPort'], {}, join(root, 'web'));
-await waitFor(async () => (await fetch(API + '/api/projects')).ok, 'server');
-await waitFor(async () => (await fetch(WEB + '/')).ok, 'vite');
+await waitFor(async () => (await quickFetch(API + '/api/projects')).ok, 'server');
+await waitFor(async () => (await quickFetch(WEB + '/')).ok, 'vite');
 
 // ---- Chrome over CDP
 const port = 9333 + Math.floor(Math.random() * 500);
 const chrome = spawn('C:/Program Files/Google/Chrome/Application/chrome.exe', [
-  '--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), 'e2eprof-'))}`,
+  '--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${mkTemp('e2eprof-')}`,
   '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--window-size=1600,900', 'about:blank'], { stdio: 'ignore' });
 children.push(chrome);
-const target = await waitFor(async () => (await (await fetch(`http://127.0.0.1:${port}/json`)).json()).find(t => t.type === 'page'), 'chrome');
+const target = await waitFor(async () => (await (await quickFetch(`http://127.0.0.1:${port}/json`)).json()).find(t => t.type === 'page'), 'chrome');
 const ws = new WebSocket(target.webSocketDebuggerUrl);
-await new Promise(r => { ws.onopen = r; });
+await new Promise((r, j) => { ws.onopen = r; ws.onerror = () => j(new Error('CDP websocket error')); setTimeout(() => j(new Error('CDP websocket open timed out')), 15000); });
 let id = 0; const pending = new Map();
 ws.onmessage = (m) => { const d = JSON.parse(m.data); if (pending.has(d.id)) { pending.get(d.id)(d); pending.delete(d.id); } };
-const send = (method, params = {}) => new Promise(r => { const i = ++id; pending.set(i, r); ws.send(JSON.stringify({ id: i, method, params })); });
+const send = (method, params = {}) => new Promise((r, j) => {
+  const i = ++id;
+  const t = setTimeout(() => { pending.delete(i); j(new Error(`CDP ${method} timed out`)); }, 60000);
+  pending.set(i, (d) => { clearTimeout(t); r(d); });
+  ws.send(JSON.stringify({ id: i, method, params }));
+});
 const evalJs = async (expr) => {
   const r = (await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true })).result;
   if (r?.exceptionDetails) throw new Error(JSON.stringify(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text));
@@ -140,14 +162,14 @@ let shotReview = false, stuckHandled = 0;
 for (;;) {
   const x = await waitFor(async () => {
     const c = await cur();
-    return (['done', 'failed', 'cancelled'].includes(c.status) || c.openGate || c.stage === 'review') && c;
+    if (c.stage === 'review' && !c.openGate && !shotReview) { shotReview = true; await shot('05a-review.png', 100); }
+    return (['done', 'failed', 'cancelled'].includes(c.status) || c.openGate) && c;
   }, 'final gate / stuck', 90000, 100);
   if (x.status === 'failed' || x.status === 'cancelled') fail(`ticket ended ${x.status}: ${x.reason ?? ''}`);
   if (x.openGate === 'stuck') { stuckHandled++; step('stuck gate -> accept'); await api('POST', `/api/tickets/${tid}/gates/stuck`, { decision: 'accept' }); await sleep(300); continue; }
   if (x.openGate === 'final') break;
   if (x.openGate === 'plan') { await api('POST', `/api/tickets/${tid}/gates/plan`, { decision: 'approved' }); continue; }
   if (x.status === 'done') fail('ticket finished without a final gate');
-  if (x.stage === 'review' && !shotReview) { shotReview = true; await shot('05a-review.png', 100); }
   await sleep(150);
 }
 step('final gate open' + (stuckHandled ? ` (after ${stuckHandled} stuck gate(s))` : ''));
@@ -170,3 +192,5 @@ assert(!err, `page error: ${err}`);
 cleanup();
 console.log('e2e ok');
 process.exit(0);
+}
+main().catch(e => fail(e?.stack ?? String(e)));
