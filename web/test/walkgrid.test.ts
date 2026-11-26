@@ -74,4 +74,53 @@ describe('WalkGrid', () => {
     expect(p).not.toBeNull();
     expect(dt).toBeLessThan(20);
   });
+
+  it('every seat of a 3-project layout reaches the espresso spot', () => {
+    const L = buildLayout([proj('a', 0), proj('b', 1), proj('c', 2)], META);
+    const G = new WalkGrid(L, META);
+    const e = L.spots.find(s => s.id === 'espresso')!;
+    for (const [k, v] of Object.entries(L.seats)) expect(G.path(v.seat, e), k).not.toBeNull();
+  });
+
+  it('A* cost equals Dijkstra optimum on random pairs', () => {
+    const L = buildLayout(Array.from({ length: 6 }, (_, i) => proj('p' + i, i)), META);
+    const G = new WalkGrid(L, META);
+    const gg = G as unknown as { cols: number; rows: number; ox: number; oy: number; cell: number; open: Uint8Array;
+      canStep(q: number, r: number, dq: number, dr: number): boolean };
+    const W = gg.cols, n = W * gg.rows;
+    const open: number[] = [];
+    for (let i = 0; i < n; i++) if (gg.open[i]) open.push(i);
+    const pt = (i: number) => ({ mx: gg.ox + ((i % W) + 0.5) * gg.cell, my: gg.oy + (Math.floor(i / W) + 0.5) * gg.cell });
+    const dijkstra = (s: number) => {
+      const d = new Float64Array(n).fill(Infinity); d[s] = 0;
+      const done = new Uint8Array(n);
+      for (;;) {
+        let u = -1;
+        for (let i = 0; i < n; i++) if (!done[i] && d[i] < Infinity && (u < 0 || d[i] < d[u])) u = i;
+        if (u < 0) break;
+        done[u] = 1;
+        const q = u % W, r = Math.floor(u / W);
+        for (const [dq, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+          if (!gg.canStep(q, r, dq, dr)) continue;
+          const j = (r + dr) * W + q + dq, c = d[u] + (dq && dr ? Math.SQRT2 : 1);
+          if (c < d[j]) d[j] = c;
+        }
+      }
+      return d;
+    };
+    let seed = 12345;
+    const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32;
+    const len = (p: { mx: number; my: number }[]) => p.slice(1).reduce((a, b, i) => a + Math.hypot(b.mx - p[i].mx, b.my - p[i].my), 0) / gg.cell;
+    for (let k = 0; k < 40; k++) {
+      const s = open[Math.floor(rnd() * open.length)];
+      const d = dijkstra(s);
+      for (let m = 0; m < 25; m++) {
+        const t = open[Math.floor(rnd() * open.length)];
+        const p = G.path(pt(s), pt(t));
+        if (d[t] === Infinity) { expect(p).toBeNull(); continue; }
+        expect(p).not.toBeNull();
+        expect(Math.abs(len([pt(s), ...p!.slice(s === t ? 1 : 0)]) - d[t])).toBeLessThan(1e-9);
+      }
+    }
+  });
 });

@@ -3,32 +3,34 @@ import { footprint, type PieceMeta } from './pieces';
 
 export interface Pt { mx: number; my: number }
 
+/** Min-heap of (key, node) pairs; keys are snapshotted at push time. */
 class Heap {
-  private a: number[] = [];
-  constructor(private key: Float64Array) {}
-  get size() { return this.a.length; }
-  push(n: number) {
-    const a = this.a, k = this.key;
-    a.push(n);
-    let i = a.length - 1;
+  private keys: number[] = [];
+  private nodes: number[] = [];
+  get size() { return this.nodes.length; }
+  push(node: number, key: number) {
+    const k = this.keys, a = this.nodes;
+    let i = a.length;
+    k.push(key); a.push(node);
     while (i > 0) {
       const p = (i - 1) >> 1;
-      if (k[a[p]] <= k[a[i]]) break;
-      [a[p], a[i]] = [a[i], a[p]]; i = p;
+      if (k[p] <= k[i]) break;
+      [k[p], k[i]] = [k[i], k[p]]; [a[p], a[i]] = [a[i], a[p]]; i = p;
     }
   }
   pop(): number {
-    const a = this.a, k = this.key, top = a[0], last = a.pop()!;
+    const k = this.keys, a = this.nodes, top = a[0];
+    const lk = k.pop()!, ln = a.pop()!;
     if (a.length) {
-      a[0] = last;
+      k[0] = lk; a[0] = ln;
       let i = 0;
       for (;;) {
         const l = 2 * i + 1, r = l + 1;
         let m = i;
-        if (l < a.length && k[a[l]] < k[a[m]]) m = l;
-        if (r < a.length && k[a[r]] < k[a[m]]) m = r;
+        if (l < a.length && k[l] < k[m]) m = l;
+        if (r < a.length && k[r] < k[m]) m = r;
         if (m === i) break;
-        [a[m], a[i]] = [a[i], a[m]]; i = m;
+        [k[m], k[i]] = [k[i], k[m]]; [a[m], a[i]] = [a[i], a[m]]; i = m;
       }
     }
     return top;
@@ -126,15 +128,15 @@ export class WalkGrid {
     const s = this.idx(from.mx, from.my), t = this.idx(to.mx, to.my);
     if (s < 0 || t < 0) return null;
     const W = this.cols, n = W * this.rows;
-    const g = new Float64Array(n).fill(Infinity), f = new Float64Array(n);
+    const g = new Float64Array(n).fill(Infinity);
     const prev = new Int32Array(n).fill(-1), closed = new Uint8Array(n);
     const tq = t % W, tr = (t / W) | 0;
     const h = (q: number, r: number) => {
       const dx = Math.abs(q - tq), dy = Math.abs(r - tr);
       return Math.max(dx, dy) + (Math.SQRT2 - 1) * Math.min(dx, dy);
     };
-    const heap = new Heap(f);
-    g[s] = 0; f[s] = h(s % W, (s / W) | 0); heap.push(s);
+    const heap = new Heap();
+    g[s] = 0; heap.push(s, h(s % W, (s / W) | 0));
     while (heap.size) {
       const i = heap.pop();
       if (closed[i]) continue;
@@ -146,7 +148,7 @@ export class WalkGrid {
         const j = (r + dr) * W + q + dq;
         if (closed[j]) continue;
         const ng = g[i] + (dq && dr ? Math.SQRT2 : 1);
-        if (ng < g[j]) { g[j] = ng; prev[j] = i; f[j] = ng + h(q + dq, r + dr); heap.push(j); }
+        if (ng < g[j]) { g[j] = ng; prev[j] = i; heap.push(j, ng + h(q + dq, r + dr)); }
       }
     }
     if (s !== t && prev[t] < 0) return null;
