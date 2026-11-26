@@ -5,9 +5,10 @@ import { buildLayout } from './layout/building';
 import { loadPieceMeta } from './assets';
 import { OfficeScene } from './render/scene';
 import { Camera } from './render/camera';
+import { Population } from './bots/population';
 
 declare global {
-  interface Window { __office?: OfficeScene }
+  interface Window { __office?: OfficeScene; __bots?: Population }
 }
 
 /** Surface async failures as window errors (shown in #err, read by tools/shot.mjs). */
@@ -24,6 +25,7 @@ interface Props {
 export function OfficeCanvas({ projects, onRoomClick, onReady }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<OfficeScene | null>(null);
+  const botsRef = useRef<Population | null>(null);
   const fitted = useRef(false);
   const clickRef = useRef(onRoomClick);
   clickRef.current = onRoomClick;
@@ -45,6 +47,9 @@ export function OfficeCanvas({ projects, onRoomClick, onReady }: Props) {
       scene.camera = camera;
       sceneRef.current = scene;
       window.__office = scene;
+      const bots = new Population(scene, app.ticker);
+      botsRef.current = bots;
+      window.__bots = bots;
 
       const isProject = (id: string | null) => !!id && projectsRef.current.some(p => p.id === id);
       const local = (e: PointerEvent) => { const r = app.canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top] as const; };
@@ -63,7 +68,7 @@ export function OfficeCanvas({ projects, onRoomClick, onReady }: Props) {
         app.canvas.removeEventListener('pointermove', move);
         app.canvas.removeEventListener('pointerleave', leave);
         app.canvas.removeEventListener('pointerup', click);
-        camera.destroy(); scene.destroy();
+        bots.destroy(); camera.destroy(); scene.destroy();
       };
       draw(projectsRef.current).catch(rethrow);
       onReady?.(scene);
@@ -72,6 +77,7 @@ export function OfficeCanvas({ projects, onRoomClick, onReady }: Props) {
       alive = false;
       if (inited) { cleanup(); app.destroy(true, { children: true }); }
       sceneRef.current = null;
+      botsRef.current = null;
       if (window.__office && !window.__office.world.parent) delete window.__office;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -80,8 +86,10 @@ export function OfficeCanvas({ projects, onRoomClick, onReady }: Props) {
   async function draw(list: Project[]) {
     const scene = sceneRef.current;
     if (!scene) return;
-    const layout = buildLayout(list, await loadPieceMeta());
+    const meta = await loadPieceMeta();
+    const layout = buildLayout(list, meta);
     await scene.setLayout(layout, list);
+    if (scene.layout === layout) await botsRef.current?.build(layout, list, meta);
     if (!fitted.current && scene.layout === layout) { fitted.current = true; scene.camera?.fit(scene.buildingBounds()); }
   }
 
