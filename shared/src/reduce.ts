@@ -14,6 +14,8 @@ export function applyTicketEvent(t: Ticket | undefined, e: ServerEvent): Ticket 
     case 'ticket.done': { const { openGate: _g, ...rest } = t; return { ...rest, status: 'done', stage: 'done' }; }
     case 'ticket.failed': { const { openGate: _g, ...rest } = t; return { ...rest, status: 'failed', reason: e.reason }; }
     case 'ticket.cancelled': { const { openGate: _g, ...rest } = t; return { ...rest, status: 'cancelled' }; }
+    case 'agent.session': return { ...t, sessions: { ...t.sessions, [e.role]: e.sessionId } };
+    case 'ticket.usage': return { ...t, usage: { turns: e.turns, costUsd: e.costUsd, durationMs: e.durationMs } };
     default: return t;
   }
 }

@@ -17,4 +17,8 @@ export type AgentState = 'idle' | 'summoned' | 'planning' | 'designing' | 'codin
 export interface Ticket {
   id: string; projectId: string; title: string; text: string; status: TicketStatus; stage: Stage | null;
   reason?: string; plan?: Plan; openGate?: GateKind; agentStates: Partial<Record<RoleId, AgentState>>; createdAt: string;
+  /** Claude session id per role (claude agents only). */
+  sessions?: Partial<Record<RoleId, string>>;
+  /** Totals across runs; costUsd is an estimate. */
+  usage?: { turns: number; costUsd: number; durationMs: number };
 }
