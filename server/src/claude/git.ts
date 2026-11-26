@@ -3,17 +3,23 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { DiffFile } from '@office/shared';
 
-const AUTHOR = ['-c', 'user.name=Pixel Office', '-c', 'user.email=office@localhost'];
+const AUTHOR = [
+  '-c', 'user.name=Pixel Office', '-c', 'user.email=office@localhost',
+  '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false',
+];
 
 interface GitResult { code: number; stdout: string; stderr: string }
 
 function run(cwd: string, args: string[]): Promise<GitResult> {
   return new Promise((resolve) => {
-    execFile('git', [...AUTHOR, ...args], { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true },
-      (err, stdout, stderr) => {
-        const code = err ? (typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : 1) : 0;
-        resolve({ code, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') });
-      });
+    const child = execFile('git', [...AUTHOR, ...args], {
+      cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    }, (err, stdout, stderr) => {
+      const code = err ? (typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : 1) : 0;
+      resolve({ code, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') || (err && code ? '' : err?.message ?? '') });
+    });
+    child.stdin?.end();
   });
 }
 
@@ -40,11 +46,20 @@ export async function hasCommit(dir: string): Promise<boolean> {
 }
 
 export async function gitInit(dir: string): Promise<void> {
-  if (!(await isRepo(dir))) await must(dir, ['init']);
+  const wasRepo = await isRepo(dir);
   const ignore = path.join(dir, '.gitignore');
-  if (!fs.existsSync(ignore)) fs.writeFileSync(ignore, 'node_modules/\ndist/\n.env\n');
-  await must(dir, ['add', '-A']);
-  await must(dir, ['commit', '--allow-empty', '-m', 'Initial commit (Pixel Office)']);
+  const hadIgnore = fs.existsSync(ignore);
+  try {
+    if (!wasRepo) await must(dir, ['init']);
+    if (!hadIgnore) fs.writeFileSync(ignore, 'node_modules/\ndist/\n.env\n');
+    await must(dir, ['add', '-A']);
+    await must(dir, ['commit', '--no-verify', '--allow-empty', '-m', 'Initial commit (Pixel Office)']);
+  } catch (e) {
+    // do not leave a half-initialised repo behind
+    if (!wasRepo) fs.rmSync(path.join(dir, '.git'), { recursive: true, force: true, maxRetries: 3 });
+    if (!hadIgnore) fs.rmSync(ignore, { force: true });
+    throw new Error(`Could not initialize git in ${dir}: ${(e as Error).message}`);
+  }
 }
 
 export async function baseInfo(dir: string): Promise<{ branch: string; head: string; clean: boolean }> {
@@ -54,16 +69,37 @@ export async function baseInfo(dir: string): Promise<{ branch: string; head: str
   return { branch, head, clean: status === '' };
 }
 
-export async function createWorktree(repo: string, wtPath: string, branch: string, baseRef: string): Promise<void> {
-  fs.mkdirSync(path.dirname(wtPath), { recursive: true });
-  await must(repo, ['worktree', 'add', wtPath, '-b', branch, baseRef]);
+function suffix(): string {
+  return Math.random().toString(36).slice(2, 6).padEnd(4, '0');
+}
+
+export async function createWorktree(
+  repo: string, wtPath: string, branch: string, baseRef: string,
+): Promise<{ branch: string; path: string }> {
+  await run(repo, ['worktree', 'prune']);
+  let lastErr = '';
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const sfx = attempt === 0 ? '' : `-${suffix()}`;
+    let b = branch;
+    let p = wtPath;
+    const branchExists = (await run(repo, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`])).code === 0;
+    const pathBusy = fs.existsSync(wtPath) && fs.readdirSync(wtPath).length > 0;
+    if (attempt > 0 || branchExists) b = `${branch}${sfx || `-${suffix()}`}`;
+    if (attempt > 0 || pathBusy) p = `${wtPath}${sfx || `-${suffix()}`}`;
+    if (fs.existsSync(p) && fs.readdirSync(p).length > 0) continue;
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    const r = await run(repo, ['worktree', 'add', p, '-b', b, baseRef]);
+    if (r.code === 0) return { branch: b, path: p };
+    lastErr = (r.stderr || r.stdout).trim();
+  }
+  throw new Error(`Could not create a git worktree for ${branch}: ${lastErr}`);
 }
 
 export async function commitAll(wt: string, message: string): Promise<boolean> {
   await must(wt, ['add', '-A']);
   const st = await must(wt, ['status', '--porcelain']);
   if (st === '') return false;
-  await must(wt, ['commit', '-m', message]);
+  await must(wt, ['commit', '--no-verify', '-m', message]);
   return true;
 }
 
@@ -99,16 +135,29 @@ export async function mergeIntoBase(repo: string, branch: string, base: string):
       instructions: `cd "${repo}"\n# commit or stash your changes, then:\ngit checkout ${base}\ngit merge --no-ff ${branch}`,
     };
   }
-  const r = await run(repo, ['merge', '--no-ff', '-m', `Merge ${branch} (Pixel Office)`, branch]);
-  if (r.code !== 0) {
-    await run(repo, ['merge', '--abort']);
+  const r = await run(repo, ['merge', '--no-ff', '--no-verify', '-m', `Merge ${branch} (Pixel Office)`, branch]);
+  if (r.code === 0) return { merged: true };
+  const detail = (r.stderr || r.stdout).trim();
+  const inMerge = (await run(repo, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).code === 0;
+  const unmerged = (await run(repo, ['diff', '--name-only', '--diff-filter=U'])).stdout.trim() !== '';
+  const conflict = inMerge || unmerged;
+  if (inMerge || unmerged) await run(repo, ['merge', '--abort']);
+  const after = await run(repo, ['rev-parse', 'HEAD']);
+  const stillMerging = (await run(repo, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).code === 0;
+  if (stillMerging || after.stdout.trim() !== info.head) {
     return {
       merged: false,
-      reason: `Merge conflict: ${(r.stdout + r.stderr).trim().split('\n')[0] ?? 'conflict'}. The merge was aborted.`,
-      instructions: `${manual}\n# resolve the conflicts, then git commit`,
+      reason: `The merge failed and your repository needs attention: ${detail}`,
+      instructions: `cd "${repo}"\ngit merge --abort\ngit reset --hard ${info.head}\n# then retry:\ngit merge --no-ff ${branch}`,
     };
   }
-  return { merged: true };
+  return {
+    merged: false,
+    reason: conflict
+      ? `Merge conflict: ${detail.split('\n')[0] || 'conflict'}. The merge was aborted and nothing changed.`
+      : `The merge failed: ${detail}`,
+    instructions: conflict ? `${manual}\n# resolve the conflicts, then git commit` : manual,
+  };
 }
 
 export async function removeWorktree(repo: string, wtPath: string): Promise<void> {
