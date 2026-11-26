@@ -27,7 +27,7 @@ describe('WalkGrid', () => {
       if ((a.mx - 14) * (b.mx - 14) <= 0 && a.mx !== b.mx) ys.push(a.my + (b.my - a.my) * (14 - a.mx) / (b.mx - a.mx));
     }
     expect(ys.length).toBeGreaterThan(0);
-    expect(ys.every(y => y >= 2 && y <= 4)).toBe(true);
+    expect(ys.every(y => y >= 10 && y <= 12)).toBe(true);
   });
 
   it('cannot cross glass: slot 0 -> slot 2 goes via the hallway', () => {
@@ -62,7 +62,7 @@ describe('WalkGrid', () => {
     expect(G4.path(seatA, { mx: -5, my: -5 })).toBeNull();
   });
 
-  it('farthest seat of 8 projects reaches the breakroom in < 20 ms', () => {
+  it('farthest seat of 8 projects reaches the cafeteria in < 20 ms', () => {
     const L = buildLayout(Array.from({ length: 8 }, (_, i) => proj('p' + i, i)), META);
     const G = new WalkGrid(L, META);
     const e = L.spots.find(s => s.id === 'espresso')!;
@@ -75,11 +75,13 @@ describe('WalkGrid', () => {
     expect(dt).toBeLessThan(20);
   });
 
-  it('every seat of a 3-project layout reaches the espresso spot', () => {
-    const L = buildLayout([proj('a', 0), proj('b', 1), proj('c', 2)], META);
+  it.each([0, 1, 3, 7])('every seat and every shared spot of a %i-project layout reaches the cafeteria coffee', n => {
+    const L = buildLayout(Array.from({ length: n }, (_, i) => proj('p' + i, i)), META);
     const G = new WalkGrid(L, META);
     const e = L.spots.find(s => s.id === 'espresso')!;
+    expect(e.room).toBe('cafeteria');
     for (const [k, v] of Object.entries(L.seats)) expect(G.path(v.seat, e), k).not.toBeNull();
+    for (const s of L.spots.filter(q => q.room === 'lounge' || q.room === 'cafeteria' || q.room === 'hall')) expect(G.path(s, e), s.id).not.toBeNull();
   });
 
   it('A* cost equals Dijkstra optimum on random pairs', () => {

@@ -27,7 +27,7 @@ interface Props {
   onRoomClick?: (projectId: string | null) => void;
   /** Click on a bot (wins over the room under it). */
   onBotClick?: (projectId: string, role: RoleId) => void;
-  /** Pointer over the breakroom cork board (client coords), or null when it leaves. */
+  /** Pointer over the cafeteria cork board (client coords), or null when it leaves. */
   onCorkHover?: (at: { x: number; y: number } | null) => void;
   onReady?: (scene: OfficeScene) => void;
 }

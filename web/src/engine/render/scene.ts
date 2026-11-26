@@ -315,7 +315,7 @@ export class OfficeScene {
     this.badgeViews.set(id, root);
   }
 
-  /** True when a canvas point is over the breakroom cork board (tooltip with the latest tickets). */
+  /** True when a canvas point is over the cafeteria cork board (tooltip with the latest tickets). */
   corkboardAt(sx: number, sy: number): boolean {
     return !!this.cork && !this.cork.destroyed && this.cork.getBounds().containsPoint(sx, sy);
   }
@@ -326,7 +326,7 @@ export class OfficeScene {
     return r ? { x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1 } : null;
   }
 
-  /** Room id under a canvas point (project rooms, 'breakroom' or 'hall'), or null outside the building. */
+  /** Room id under a canvas point (project rooms, 'lounge', 'cafeteria' or 'hall'), or null outside the building. */
   roomAt(sx: number, sy: number): string | null {
     if (!this.layout) return null;
     const l = this.world.toLocal(new Point(sx, sy));

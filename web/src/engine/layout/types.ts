@@ -14,7 +14,7 @@ export interface Spot {
 }
 export interface Segment { x0: number; y0: number; x1: number; y1: number; kind: 'solid' | 'glass' }
 export interface RoomRect {
-  id: string; kind: 'project' | 'breakroom' | 'hall';
+  id: string; kind: 'project' | 'lounge' | 'cafeteria' | 'hall';
   x0: number; y0: number; x1: number; y1: number;
   side?: 'left' | 'right';
   door?: { x: number; y0: number; y1: number };
