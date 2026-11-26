@@ -317,6 +317,25 @@ describe('ClaudeOrchestrator', () => {
     expect(o.find(t.id)!.usage!.turns).toBe(u[0].turns);
   });
 
+  it('pre-existing repo with untracked agent files: worktree gets them, they are never committed, merge succeeds', async () => {
+    const agents = path.join(repo, '.claude', 'agents');
+    fs.mkdirSync(agents, { recursive: true });
+    for (const r of CORE) fs.writeFileSync(path.join(agents, `${r}.md`), `agent ${r}\n`);
+    const o = make();
+    const t = await toFinal(o, repo);
+    const wt = path.join(dataDir, 'worktrees', 'p1', t.id);
+    expect(fs.readFileSync(path.join(wt, '.claude', 'agents', 'frontend.md'), 'utf8')).toBe('agent frontend\n');
+    expect(git(wt, 'ls-files', '.claude/agents')).toBe('');
+    expect(git(wt, 'status', '--porcelain', '--untracked-files=all')).toBe('');
+    const files = of('ticket.diff')[0].files.map(f => f.path);
+    expect(files.some(f => f.startsWith('.claude/agents'))).toBe(false);
+    o.decide(t.id, 'final', 'approved');
+    await o.idle();
+    expect(o.find(t.id)!.status).toBe('done');
+    expect(pmText()).toMatch(/Merged office\//);
+    expect(fs.existsSync(path.join(repo, 'ui.txt'))).toBe(true);
+  });
+
   it('final approve with a dirty tree → done anyway with merge-pending instructions', async () => {
     const o = make();
     const t = await toFinal(o, repo);

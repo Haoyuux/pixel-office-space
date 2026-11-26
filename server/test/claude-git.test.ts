@@ -127,6 +127,25 @@ describe('git helper', () => {
     expect(fs.existsSync(path.join(r, 'b.txt'))).toBe(false);
   });
 
+  it('untracked Pixel Office files (.claude/agents, .claude/office) do not block a merge', async () => {
+    const r = await mkRepo();
+    const base = (await baseInfo(r)).branch;
+    fs.mkdirSync(path.join(r, '.claude', 'agents'), { recursive: true });
+    fs.writeFileSync(path.join(r, '.claude', 'agents', 'pm.md'), 'pm');
+    fs.mkdirSync(path.join(r, '.claude', 'office'), { recursive: true });
+    fs.writeFileSync(path.join(r, '.claude', 'office', 'project-map.md'), 'map');
+    expect((await baseInfo(r)).clean).toBe(true);
+    const wt = path.join(tmp(), 'wt');
+    await createWorktree(r, wt, 'office/ag-121212', base);
+    fs.writeFileSync(path.join(wt, 'b.txt'), 'b');
+    await commitAll(wt, 'm');
+    expect(await mergeIntoBase(r, 'office/ag-121212', base)).toEqual({ merged: true });
+    expect(fs.existsSync(path.join(r, 'b.txt'))).toBe(true);
+    // other untracked files under .claude still count as dirty
+    fs.writeFileSync(path.join(r, '.claude', 'settings.json'), '{}');
+    expect((await baseInfo(r)).clean).toBe(false);
+  });
+
   it('merge refused when base is not checked out', async () => {
     const r = await mkRepo();
     const base = (await baseInfo(r)).branch;

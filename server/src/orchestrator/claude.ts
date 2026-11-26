@@ -24,7 +24,7 @@ export { ConflictError };
 export interface Runner { run(o: RunOptions): Promise<RunResult> }
 export type GitApi = Pick<typeof realGit,
   'isRepo' | 'hasCommit' | 'baseInfo' | 'createWorktree' | 'commitAll' | 'diff' | 'mergeIntoBase' | 'removeWorktree' | 'slug'
-  | 'attachWorktree' | 'branchExists'>;
+  | 'attachWorktree' | 'branchExists' | 'excludePath'>;
 
 export interface ClaudeOrchestratorOptions {
   log: TicketLog;
@@ -56,6 +56,7 @@ export const NOT_A_GIT_REPO = 'not-a-git-repo';
 const EDITORS: RoleId[] = ['frontend', 'backend', 'devops', 'uiux', 'writer'];
 const TEST_FILE = /(^|[\\/])(tests?|__tests__|spec)[\\/]|\.(test|spec)\.[a-z0-9]+$/i;
 const MAP_FILE = path.join('.claude', 'office', 'project-map.md');
+const AGENTS_DIR = path.join('.claude', 'agents');
 
 interface Issue { role: RoleId; file?: string; note: string }
 
@@ -369,6 +370,7 @@ export class ClaudeOrchestrator implements Orchestrator {
       // Resume: the worktree may have been removed since; re-attach the branch
       if (!fs.existsSync(path.join(run.wt.path, '.git'))) run.wt = await this.git.attachWorktree(folder, run.wt.path, run.wt.branch);
       this.alive(run);
+      await this.provisionAgents(run);
       return;
     }
     const pws = run.parent?.workspace;
@@ -377,6 +379,7 @@ export class ClaudeOrchestrator implements Orchestrator {
       run.base = { ...pws.base };
       run.wt = await this.git.attachWorktree(folder, pws.worktree, pws.branch);
       this.alive(run);
+      await this.provisionAgents(run);
       this.workspace(run);
       this.log(run, 'pm', `Continuing on branch ${run.wt.branch}`);
       return;
@@ -388,6 +391,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     const branch = `office/${this.git.slug(run.ticket.title)}-${run.ticket.id.slice(0, 6)}`;
     run.wt = await this.git.createWorktree(folder, wtPath, branch, info.head);
     if (run.ended) { await this.git.removeWorktree(folder, run.wt.path); throw new Ended(); }
+    await this.provisionAgents(run);
     this.workspace(run);
     if (run.projectMap) {
       const f = path.join(run.wt.path, MAP_FILE);
@@ -399,6 +403,25 @@ export class ClaudeOrchestrator implements Orchestrator {
         'but it cannot be merged automatically at the end; you will get the commands to run.');
     }
     this.log(run, 'pm', `Working on branch ${run.wt.branch} (base ${info.branch} @ ${info.head.slice(0, 7)})`);
+  }
+
+  /**
+   * The owner's `.claude/agents/*.md` are often untracked (scaffolded into a pre-existing repo), so a worktree made
+   * from HEAD lacks them and `--agent <role>` would not find its definition: copy the missing ones in, and exclude
+   * the folder so commitAll never commits them.
+   */
+  private async provisionAgents(run: Run) {
+    if (!run.wt) return;
+    const src = path.join(run.project.folder, AGENTS_DIR);
+    const dst = path.join(run.wt.path, AGENTS_DIR);
+    const files = fs.existsSync(src) ? fs.readdirSync(src).filter(f => f.endsWith('.md')) : [];
+    for (const f of files) {
+      if (fs.existsSync(path.join(dst, f))) continue; // tracked in the repo (or already copied): keep the branch's copy
+      fs.mkdirSync(dst, { recursive: true });
+      fs.copyFileSync(path.join(src, f), path.join(dst, f));
+    }
+    await this.git.excludePath(run.wt.path, '/.claude/agents/');
+    this.alive(run);
   }
 
   /**
