@@ -22,6 +22,8 @@ export type Pose = 'sit' | 'stand' | 'drink';
 export interface Spot {
   id: string; mx: number; my: number; pose: Pose; facing: Dir; capacity: 1;
   tags: string[]; room: string; pair?: string;
+  /** Sit spots: hip height on the seat, metres (default SEAT_LIFT, an office/dining chair). */
+  seatHeight?: number;
 }
 export interface Segment { x0: number; y0: number; x1: number; y1: number; kind: 'solid' | 'glass' }
 export interface RoomRect {

@@ -3,6 +3,7 @@ import type { Look } from '@office/shared';
 import { DIRS } from './iso';
 import { parsePieces, type PieceMeta } from './pieces';
 import { NEON_META, neonUrl } from './neon';
+import { ART, SIT_BOX, sitSheet, type Px } from './sitPose';
 
 TextureSource.defaultOptions.scaleMode = 'nearest';
 
@@ -43,24 +44,52 @@ export const loadNeon = (prop: string, variant: string, glow = false): Promise<T
 export type Clip = 'idle' | 'walk' | 'drinking' | 'waving';
 export const CLIP_FRAMES: Record<Clip, number> = { idle: 4, walk: 8, drinking: 8, waving: 6 };
 export const FRAME_W = 168, FRAME_H = 248, FEET_Y = 202, HIP_Y = 172;
+const K = FRAME_W / ART.w;
+/** Seated frames (sitPose.ts): a crop of the pack's frame, centred on x; the hip line at SIT_HIP_Y. */
+export const SIT_W = SIT_BOX.w * K, SIT_H = SIT_BOX.h * K, SIT_HIP_Y = HIP_Y - SIT_BOX.y * K;
 
 export interface CharacterSheets {
   clips: Record<Clip, Texture[][]>;      // [dirIndex][frame]
-  sit: Record<'idle' | 'drinking', Texture[][]>; // cropped at the hip line
+  /** Seated pose synthesized from the standing sheets (sitPose.ts): SIT_W × SIT_H frames, the hip at SIT_HIP_Y. */
+  sit: Record<'idle' | 'drinking', Texture[][]>;
+}
+
+/** The sheet's pixels (the loaded image drawn to a canvas). */
+function pixels(tex: Texture): Px {
+  const src = tex.source, w = src.pixelWidth, h = src.pixelHeight;
+  const ctx = canvas(w, h).getContext('2d', { willReadFrequently: true })!;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(src.resource as CanvasImageSource, 0, 0);
+  return ctx.getImageData(0, 0, w, h);
+}
+function canvas(w: number, h: number): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  return c;
 }
 
 const sheetCache = new Map<string, Promise<CharacterSheets>>();
 export function loadCharacter(look: Look): Promise<CharacterSheets> {
   const key = `${look.character}/${look.palette}`;
   if (!sheetCache.has(key)) sheetCache.set(key, (async () => {
-    const slice = (tex: Texture, n: number, h: number) =>
-      DIRS.map((_, r) => Array.from({ length: n }, (_, i) => new Texture({ source: tex.source, frame: new Rectangle(i * FRAME_W, r * FRAME_H, FRAME_W, h) })));
+    const slice = (tex: Texture, n: number, w = FRAME_W, h = FRAME_H) =>
+      DIRS.map((_, r) => Array.from({ length: n }, (_, i) => new Texture({ source: tex.source, frame: new Rectangle(i * w, r * h, w, h) })));
     const clips = {} as Record<Clip, Texture[][]>;
-    const sit = {} as Record<'idle' | 'drinking', Texture[][]>;
+    const raw = {} as Record<Clip, Texture>;
     for (const clip of Object.keys(CLIP_FRAMES) as Clip[]) {
-      const tex = await load(`${CHARS}/${look.character}/${look.palette}/2x/${clip}.png`);
-      clips[clip] = slice(tex, CLIP_FRAMES[clip], FRAME_H);
-      if (clip === 'idle' || clip === 'drinking') sit[clip] = slice(tex, CLIP_FRAMES[clip], HIP_Y);
+      raw[clip] = await load(`${CHARS}/${look.character}/${look.palette}/2x/${clip}.png`);
+      clips[clip] = slice(raw[clip], CLIP_FRAMES[clip]);
+    }
+    // seated frames: torso of each idle/drinking frame over legs bent from idle frame 0 (legs stay still)
+    const idle = pixels(raw.idle);
+    const sit = {} as Record<'idle' | 'drinking', Texture[][]>;
+    for (const clip of ['idle', 'drinking'] as const) {
+      const img = sitSheet(clip === 'idle' ? idle : pixels(raw[clip]), idle, CLIP_FRAMES[clip], DIRS, K);
+      const c = canvas(img.width, img.height);
+      const ctx = c.getContext('2d')!, data = ctx.createImageData(img.width, img.height);
+      data.data.set(img.data);
+      ctx.putImageData(data, 0, 0);
+      sit[clip] = slice(Texture.from(c), CLIP_FRAMES[clip], SIT_W, SIT_H);
     }
     return { clips, sit };
   })());

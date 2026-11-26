@@ -1,14 +1,14 @@
 import { AnimatedSprite, Container, Graphics, Rectangle, Text, type Texture } from 'pixi.js';
 import { roleDef, type Look, type RoleId } from '@office/shared';
 import { DIRS, dirFrom, iso, PZ, type Dir } from '../iso';
-import { FEET_Y, FRAME_H, type CharacterSheets, type Clip } from '../assets';
+import { FEET_Y, FRAME_H, HIP_Y, SIT_H, SIT_HIP_Y, type CharacterSheets, type Clip } from '../assets';
 import type { Spot } from '../layout/types';
 import type { Pt, WalkGrid } from '../walkgrid';
 import type { OfficeScene } from '../render/scene';
 
 /** Metres per second (spec §6.3). */
 export const WALK_SPEED = 1.2;
-/** Fake-sit lift onto the seat, metres (spec §6.4). */
+/** Default hip height on a seat (office and dining chairs), metres; a spot's `seatHeight` overrides it. */
 export const SEAT_LIFT = 0.42;
 /** Pixi AnimatedSprite speeds from the approved prototype (frames per tick at 60 fps). */
 const SPEED: Record<Clip, number> = { walk: 0.17, idle: 0.1, drinking: 0.1, waving: 0.1 };
@@ -30,7 +30,7 @@ export interface BotOptions {
   at: { mx: number; my: number };
 }
 
-/** One office character: walks the walk grid, sits with the fake-sit crop, plays clips, shows a bubble and a hover label. */
+/** One office character: walks the walk grid, sits (synthesized seated pose), plays clips, shows a bubble and a hover label. */
 export class Bot {
   readonly id: string;
   readonly projectId: string;
@@ -42,6 +42,8 @@ export class Bot {
   mx: number; my: number;
   dir: Dir = 'SW';
   seated = false;
+  /** Hip height above the floor while seated, metres. */
+  private seatLift = SEAT_LIFT;
 
   private sheets: CharacterSheets;
   private grid: WalkGrid;
@@ -112,12 +114,13 @@ export class Bot {
     else { this.place(); this.arrive(); }
   }
 
-  /** Fake-sit at a seat spot: legs cropped at the hip, lifted onto the seat, facing the spot's facing. */
+  /** Sit at a seat spot: the seated pose (sitPose.ts) with the hips on the seat, facing the spot's facing. */
   sit(spot: Spot): void {
     this.path = []; this.then = undefined;
     this.mx = spot.mx; this.my = spot.my;
     this.dir = spot.facing;
     this.seated = true;
+    this.seatLift = spot.seatHeight ?? SEAT_LIFT;
     if (this.clip !== 'drinking') this.clip = 'idle';
     this.refresh(); this.place();
   }
@@ -198,8 +201,8 @@ export class Bot {
     const tex = this.frames();
     s.textures = tex;
     s.animationSpeed = SPEED[this.seated && this.clip !== 'drinking' ? 'idle' : this.clip];
-    s.anchor.set(0.5, this.seated ? 1 : FEET_Y / FRAME_H);
-    s.position.set(0, this.seated ? -SEAT_LIFT * PZ : 0);
+    s.anchor.set(0.5, this.seated ? SIT_HIP_Y / SIT_H : FEET_Y / FRAME_H);
+    s.position.set(0, this.seated ? -Math.round(this.seatLift * PZ) : 0);
     s.loop = true;
     s.gotoAndPlay(tex.length === sameLen ? frame % tex.length : 0);
   }
@@ -208,8 +211,8 @@ export class Bot {
     const p = iso(this.mx, this.my);
     this.view.position.set(p.x, p.y);
     this.view.zIndex = p.y + 1;
-    // seated hips are lifted by SEAT_LIFT but the legs are cut, so the head ends up a little higher
-    const head = HEAD_PX + (this.seated ? SEAT_LIFT * PZ - (FEET_Y - 172) : 0);
+    // seated, the hips are at the seat height instead of the standing hip height
+    const head = HEAD_PX + (this.seated ? Math.round(this.seatLift * PZ) - (FEET_Y - HIP_Y) : 0);
     this.hud.position.set(p.x, p.y - head);
     this.label.position.set(0, -20);
     this.bubbleBox.position.set(0, this.label.visible ? -62 : -28);
