@@ -9,6 +9,7 @@ import { Toolbar } from './ui/Toolbar';
 import { AddProjectDialog } from './ui/AddProjectDialog';
 import { Drawer, DRAWER_WIDTH } from './ui/Drawer';
 import { CorkTooltip } from './ui/CorkTooltip';
+import { useRevealSelected } from './ui/useRevealSelected';
 import './ui/theme.css';
 
 export function App() {
@@ -55,10 +56,7 @@ function LiveOffice() {
   }, []);
 
   // keep the selected room visible beside the drawer
-  useEffect(() => {
-    const s = scene.current, box = selected ? s?.roomBounds(selected) : null;
-    if (s?.camera && box) s.camera.reveal(box, DRAWER_WIDTH);
-  }, [selected]);
+  useRevealSelected(scene, selected, !!selected && !!map[selected], DRAWER_WIDTH);
 
   if (!synced) return null;
   const drawer = !!selected && !!map[selected];

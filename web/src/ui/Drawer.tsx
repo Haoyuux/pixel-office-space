@@ -29,9 +29,18 @@ export function Drawer({ projectId }: { projectId: string }) {
   const shown = tickets.find(t => t.id === chosen) ?? active ?? tickets[0];
   const [tab, setTab] = useState<Tab>('feed');
   const [team, setTeam] = useState(false);
-  const [menu, setMenu] = useState<null | 'open' | 'confirm'>(null);
+  const [menu, setMenu] = useState<null | 'open' | 'delete' | 'cancel'>(null);
   const [menuError, setMenuError] = useState<string | null>(null);
+  /** A menu request (cancel / delete) is in flight: further clicks are ignored. */
+  const [menuBusy, setMenuBusy] = useState(false);
+  const menuBusyRef = useRef(false);
   const close = () => useOffice.getState().select(null);
+
+  // the role filter is global (a bot click sets it): drop it when it names a role this team doesn't have
+  const team0 = project?.team;
+  useEffect(() => {
+    if (team0 && roleFilter !== 'all' && !team0.includes(roleFilter)) useOffice.getState().setRoleFilter('all');
+  }, [team0, roleFilter]);
 
   useEffect(() => {
     // Escape closes the menu, then the drawer; never while a dialog is open (it handles its own Escape) or while typing
@@ -46,17 +55,17 @@ export function Drawer({ projectId }: { projectId: string }) {
   if (!project) return null;
   const accent = accentCss(project.accent);
 
-  const remove = async () => {
-    setMenuError(null);
-    const r = await api('DELETE', paths.project(project.id));
-    if (r.ok) close(); else setMenuError(r.error);
+  /** Runs one menu request at a time; `done` runs on success, the server error shows inline otherwise. */
+  const once = async (req: () => ReturnType<typeof api>, done: () => void) => {
+    if (menuBusyRef.current) return;
+    menuBusyRef.current = true; setMenuBusy(true); setMenuError(null);
+    const r = await req();
+    menuBusyRef.current = false; setMenuBusy(false);
+    if (r.ok) done(); else setMenuError(r.error);
   };
-  const cancelTicket = async () => {
-    if (!active) return;
-    setMenuError(null);
-    const r = await api('POST', paths.cancel(active.id));
-    if (r.ok) setMenu(null); else setMenuError(r.error);
-  };
+  const remove = () => once(() => api('DELETE', paths.project(project.id)), close);
+  const target = active;
+  const cancelTicket = () => { if (target) void once(() => api('POST', paths.cancel(target.id)), () => setMenu(null)); };
 
   return (
     <aside className="po-drawer" style={{ ['--accent' as string]: accent, width: DRAWER_WIDTH }} aria-label={`${project.name} console`}>
@@ -73,13 +82,19 @@ export function Drawer({ projectId }: { projectId: string }) {
         {menu && (
           <div className="po-menu" role="menu">
             {menu === 'open' ? <>
-              <button type="button" role="menuitem" disabled={!active} onClick={cancelTicket}>⊘ Cancel running ticket</button>
-              <button type="button" role="menuitem" className="danger" onClick={() => setMenu('confirm')}>🗑 Delete project…</button>
-            </> : <div className="po-confirm">
+              <button type="button" role="menuitem" disabled={!active} onClick={() => setMenu('cancel')}>⊘ Cancel running ticket…</button>
+              <button type="button" role="menuitem" className="danger" onClick={() => setMenu('delete')}>🗑 Delete project…</button>
+            </> : menu === 'cancel' ? <div className="po-confirm">
+              <span>Cancel <b>{active?.title ?? 'the running ticket'}</b>? The team stops and the ticket ends as cancelled.</span>
+              <div className="po-actions">
+                <button type="button" className="po-btn ghost" onClick={() => setMenu('open')}>Keep running</button>
+                <button type="button" className="po-btn danger" disabled={menuBusy || !active} onClick={cancelTicket}>Cancel ticket</button>
+              </div>
+            </div> : <div className="po-confirm">
               <span>Delete <b>{project.name}</b>? Its tickets are cancelled and the room is emptied. Files in the folder are kept.</span>
               <div className="po-actions">
                 <button type="button" className="po-btn ghost" onClick={() => setMenu('open')}>Keep it</button>
-                <button type="button" className="po-btn danger" onClick={remove}>Delete project</button>
+                <button type="button" className="po-btn danger" disabled={menuBusy} onClick={() => void remove()}>Delete project</button>
               </div>
             </div>}
             {menuError && <div className="po-error" role="alert">{menuError}</div>}

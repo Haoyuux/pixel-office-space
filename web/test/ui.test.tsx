@@ -188,3 +188,114 @@ describe('room badges and pipeline', () => {
     expect(stageMarks(['pm', 'uiux', 'security'], ticket({ status: 'done', stage: 'done' })).map(m => m.stage)).toEqual(['plan', 'design', 'build', 'review']);
   });
 });
+
+describe('fix round 1', () => {
+  const openDrawer = (tickets: Ticket[] = [], extra: Partial<ReturnType<typeof useOffice.getState>> = {}) => {
+    useOffice.setState({ projects: { p: P }, tickets: Object.fromEntries(tickets.map(t => [t.id, t])), selectedProjectId: 'p', synced: true, ...extra });
+    return render(<Drawer projectId="p" />);
+  };
+  const box = () => screen.getByRole('textbox', { name: /message/i }) as HTMLTextAreaElement;
+  const enter = (b: HTMLTextAreaElement) => fireEvent.keyDown(b, { key: 'Enter' });
+
+  it('TeamDialog PATCHes {team} and closes; shows a 409 inline', async () => {
+    const { TeamDialog } = await import('../src/ui/TeamDialog');
+    const onClose = vi.fn();
+    render(<TeamDialog project={P} onClose={onClose} />);
+    fireEvent.click(screen.getByRole('checkbox', { name: /Tech Writer/ }));
+    fireEvent.click(screen.getByRole('button', { name: /save team/i }));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(calls[0]).toMatchObject({ url: '/api/projects/p', method: 'PATCH', body: { team: ['pm', 'techlead', 'frontend', 'backend', 'qa', 'writer'] } });
+    cleanup(); onClose.mockClear();
+    reply = () => ({ status: 409, body: { error: 'Busy on a running ticket: frontend' } });
+    render(<TeamDialog project={P} onClose={onClose} />);
+    fireEvent.click(screen.getByRole('checkbox', { name: /Frontend/ }));
+    fireEvent.click(screen.getByRole('button', { name: /save team/i }));
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Busy on a running ticket: frontend');
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it.each([[409, 'Ticket is not active'], [400, 'Message text is required']])('Composer shows a %s error inline and keeps the text', async (status, error) => {
+    reply = () => ({ status, body: { error } });
+    openDrawer([ticket()]);
+    fireEvent.change(box(), { target: { value: 'hello' } });
+    enter(box());
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', error);
+    expect(box().value).toBe('hello');
+  });
+
+  it('Composer: a double Enter sends once', async () => {
+    openDrawer([]);
+    fireEvent.change(box(), { target: { value: 'Add a footer' } });
+    enter(box()); enter(box());
+    await waitFor(() => expect(box().value).toBe(''));
+    expect(posts()).toHaveLength(1);
+  });
+
+  it('api(): a rejected fetch shows "Server unreachable" inline', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
+    openDrawer([]);
+    fireEvent.change(box(), { target: { value: 'x' } });
+    enter(box());
+    expect((await screen.findByRole('alert')).textContent).toMatch(/^Server unreachable/);
+  });
+
+  it('useFollow: pauses when scrolled up, follows again on click', async () => {
+    const { RawLog } = await import('../src/ui/RawLog');
+    useOffice.setState({ raw: { t: ['[pm] one', '[pm] two'] } });
+    const { container } = render(<RawLog ticketId="t" />);
+    const el = container.querySelector('.po-raw') as HTMLElement;
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => 1000 });
+    Object.defineProperty(el, 'clientHeight', { configurable: true, get: () => 200 });
+    act(() => { useOffice.setState({ raw: { t: ['[pm] one', '[pm] two', '[pm] three'] } }); });
+    expect(el.scrollTop).toBe(1000); // follows the tail
+    el.scrollTop = 100;
+    fireEvent.scroll(el);
+    act(() => { useOffice.setState({ raw: { t: ['[pm] one', '[pm] two', '[pm] three', '[pm] four'] } }); });
+    expect(el.scrollTop).toBe(100); // paused
+    fireEvent.click(screen.getByRole('button', { name: /follow/i }));
+    expect(el.scrollTop).toBe(1000);
+    expect(screen.queryByRole('button', { name: /follow/i })).toBeNull();
+  });
+
+  it('delete sends DELETE only after the inline confirm, once', async () => {
+    openDrawer([]);
+    fireEvent.click(screen.getByRole('button', { name: /project menu/i }));
+    fireEvent.click(screen.getByRole('menuitem', { name: /delete project/i }));
+    expect(calls).toHaveLength(0);
+    const yes = screen.getByRole('button', { name: /^delete project$/i });
+    fireEvent.click(yes); fireEvent.click(yes);
+    await waitFor(() => expect(useOffice.getState().selectedProjectId).toBeNull());
+    expect(calls.filter(c => c.method === 'DELETE')).toEqual([expect.objectContaining({ url: '/api/projects/p' })]);
+  });
+
+  it('cancel ticket asks for an inline confirm and posts once', async () => {
+    openDrawer([ticket()]);
+    fireEvent.click(screen.getByRole('button', { name: /project menu/i }));
+    fireEvent.click(screen.getByRole('menuitem', { name: /cancel running ticket/i }));
+    expect(calls).toHaveLength(0);
+    const yes = screen.getByRole('button', { name: /^cancel ticket$/i });
+    fireEvent.click(yes); fireEvent.click(yes);
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    await new Promise(r => setTimeout(r, 20));
+    expect(posts()).toEqual([expect.objectContaining({ url: '/api/tickets/t/cancel' })]);
+  });
+
+  it('a role filter outside the team is reset to all roles', () => {
+    openDrawer([ticket()], { roleFilter: 'writer', feed: { t: [{ kind: 'message', role: 'pm', text: 'Planning the work.', id: 'm1', ts: '2026-11-26T10:00:00Z' }] } });
+    expect(useOffice.getState().roleFilter).toBe('all');
+    expect(screen.getByText('Planning the work.')).toBeTruthy();
+  });
+
+  it('reveal waits until the selected project reaches the store, then pans once', async () => {
+    const { useRevealSelected } = await import('../src/ui/useRevealSelected');
+    const reveal = vi.fn();
+    const scene = { camera: { reveal }, roomBounds: (id: string) => (id === 'p' ? { x0: 0, y0: 0, x1: 1, y1: 1 } : null) };
+    const { renderHook } = await import('@testing-library/react');
+    const { rerender } = renderHook(({ present }) => useRevealSelected({ current: scene as never }, 'p', present, 560), { initialProps: { present: false } });
+    expect(reveal).not.toHaveBeenCalled();
+    rerender({ present: true });
+    rerender({ present: true });
+    expect(reveal).toHaveBeenCalledTimes(1);
+    expect(reveal).toHaveBeenCalledWith({ x0: 0, y0: 0, x1: 1, y1: 1 }, 560);
+  });
+});
