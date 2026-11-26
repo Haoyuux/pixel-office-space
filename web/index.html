@@ -4,9 +4,14 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Pixel Office</title>
+  <style>
+    html, body, #root { margin: 0; height: 100%; overflow: hidden; background: #0b0e1c; }
+    #err { position: fixed; top: 60px; left: 12px; color: #f88; font: 12px monospace; white-space: pre; z-index: 10; pointer-events: none; }
+  </style>
 </head>
 <body>
   <div id="root"></div>
+  <div id="err"></div>
   <script type="module" src="/src/main.tsx"></script>
 </body>
 </html>
