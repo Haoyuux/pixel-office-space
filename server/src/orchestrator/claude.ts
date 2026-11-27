@@ -566,22 +566,29 @@ export class ClaudeOrchestrator implements Orchestrator {
   /**
    * Is a review/test item's file inside one of the workspace's repos (where the devs can fix it)? Absolute paths are
    * taken relative to the workspace (or the owner's folder). Single repo: anything not climbing out of it, including no
-   * file at all. Multi-repo: the path must start with a repo's folder, so no file / a parent-folder file is outside.
+   * file at all. Multi-repo: a path starting with a repo's folder, or one that exists (or whose folder exists) in some
+   * repo; no file at all, or one found in no repo (e.g. the parent folder's docs), is outside.
    */
   private inRepos(run: Run, file: string): boolean {
     const ws = run.ws;
     if (!ws) return true;
-    let f = file.trim().replace(/\\/g, '/');
+    // backslashes → '/', and drop a ":12" / ":12:5" line suffix
+    let f = file.trim().replace(/\\/g, '/').replace(/(:\d+)+$/, '');
     if (path.isAbsolute(f) || /^[a-z]:\//i.test(f)) {
       const under = [ws.path, run.project.folder].map(b => path.relative(b, f)).find(r => r && !r.startsWith('..') && !path.isAbsolute(r));
       if (under === undefined) return false;
       f = under.replace(/\\/g, '/');
     }
-    f = f ? path.posix.normalize(f) : '';
+    f = f ? path.posix.normalize(f).replace(/^\.\//, '') : '';
     if (f === '..' || f.startsWith('../')) return false;
     if (!ws.multi) return true;
-    const first = f.replace(/^\.\//, '').split('/')[0].toLowerCase();
-    return !!first && first !== '.' && ws.units.some(u => u.name.toLowerCase() === first);
+    if (!f || f === '.') return false;
+    const first = f.split('/')[0].toLowerCase();
+    if (ws.units.some(u => u.name.toLowerCase() === first)) return true;
+    // no repo prefix (reviewers often write "src/app/x.ts"): a real issue when the file, or the folder it would go
+    // in, exists in some repo (several = ambiguous, still the builders' call); outside only when it is in none
+    const dir = path.posix.dirname(f);
+    return ws.units.some(u => fs.existsSync(path.join(u.path, f)) || (dir !== '.' && fs.existsSync(path.join(u.path, dir))));
   }
 
   /** Multi-repo projects: tell the agent which subfolders are repos. */
@@ -644,7 +651,8 @@ export class ClaudeOrchestrator implements Orchestrator {
         copied++;
       } catch { skipped.push(rel); }
     }
-    ws.docs = copied > 0;
+    // a copy from an earlier run (resume) still counts when nothing could be copied this time
+    ws.docs = copied > 0 || fs.existsSync(path.join(ws.path, PROJECT_DOCS_DIR));
     if (skipped.length) this.log(run, 'pm', `Project docs: not copied (over the 2 MB budget or unreadable): ${skipped.join(', ')}`);
   }
 
@@ -714,6 +722,8 @@ export class ClaudeOrchestrator implements Orchestrator {
       const issues: Issue[] = [];
       const unassigned: Issue[] = [];
       let approved = true;
+      /** Some verdict said "not approved" with no items at all: never turned into a pass by the guard below. */
+      let bare = false;
       const summary = stage === 'review' ? diffSummary(await this.diffAll(run)) : '';
       this.alive(run);
       const remarks = (role: RoleId, notes: string[]) => {
@@ -723,11 +733,13 @@ export class ClaudeOrchestrator implements Orchestrator {
         if (stage === 'review') {
           const v = await this.structured(run, role, 'review', cwd, this.withNotes(run, role, this.ctx(run, reviewPrompt(run.plan!, summary), role)), run.sessions[role], reviewValidator(team), 'review');
           if (!v.approved || v.issues.length || v.unassigned.length) approved = false;
+          if (!v.approved && !v.issues.length && !v.unassigned.length) bare = true;
           issues.push(...v.issues); unassigned.push(...v.unassigned);
           remarks(role, v.notes);
         } else {
           const v = await this.structured(run, role, 'test', cwd, this.withNotes(run, role, this.ctx(run, testPrompt(run.plan!), role)), run.sessions[role], testValidator(team), 'test results');
           if (!v.passed || v.failures.length || v.unassigned.length) approved = false;
+          if (!v.passed && !v.failures.length && !v.unassigned.length) bare = true;
           issues.push(...v.failures); unassigned.push(...v.unassigned);
           remarks(role, v.notes);
         }
@@ -748,8 +760,8 @@ export class ClaudeOrchestrator implements Orchestrator {
           unassigned.map(i => `- [${i.role}] ${i.file ? i.file + ': ' : ''}${i.note}`).join('\n'));
       }
       const all: Issue[] = [...issues, ...unassigned];
-      // only outside-the-repo items: nothing the team can fix, so it passes
-      if (!all.length && outside.length) approved = true;
+      // only outside-the-repo items: nothing the team can fix, so it passes (unless a verdict rejected without items)
+      if (!all.length && outside.length && !bare) approved = true;
       // a bare "not approved" with no items still goes to the builders
       if (!approved && !all.length) all.push({ role: 'pm', note: `The ${stage === 'review' ? 'review' : 'tests'} did not pass.` });
       issues.splice(0, issues.length, ...this.route(run, stage, all));
@@ -1126,6 +1138,8 @@ function restoreWs(folder: string, w: Workspace): Ws {
   if (w.repos?.length) {
     return {
       path: w.worktree, multi: true,
+      // the parent-docs copy outlives a restart: keep the prompt hint for it
+      ...(fs.existsSync(path.join(w.worktree, PROJECT_DOCS_DIR)) ? { docs: true } : {}),
       units: w.repos.map(r => ({
         name: r.name, repo: path.join(folder, r.name), path: r.path, branch: r.branch, base: { ...r.base },
         ...(r.merged ? { merged: true } : {}),
