@@ -475,3 +475,7 @@ fieldset.po-mode .po-mode-opt input { accent-color: var(--accent); }
 .po-drawer { transition: width .18s ease; }
 .po-drawer.full { box-shadow: -24px 0 60px rgba(0, 0, 0, 0.55); }
 .po-drawer.full .po-feed { padding-left: max(16px, calc((100% - 960px) / 2)); padding-right: max(16px, calc((100% - 960px) / 2)); }
+
+/* ---------- tool activity groups ---------- */
+.po-toolgroup-items { margin-left: 18px; border-left: 1px solid var(--po-line); }
+.po-toolgroup-items .po-tool { padding-left: 14px; }

@@ -11,6 +11,8 @@ export interface FeedItem {
   ts: string;
   /** The PM's answer to an Ask (rendered as markdown-ish text). */
   answer?: boolean;
+  /** Tool name of a tool item (Read, Grep, Bash…): tool-activity grouping. */
+  tool?: string;
   /** Files attached to an owner message. */
   attachments?: Attachment[];
 }
@@ -67,7 +69,7 @@ function fold(v: TicketView, e: TicketEvent): TicketView {
     }
     case 'agent.tool': {
       const at = v.feed.findIndex(f => f.kind === 'tool' && f.id === e.toolId);
-      const next = item({ kind: 'tool', role: e.role, text: e.summary, detail: e.detail, status: e.status, id: e.toolId });
+      const next = item({ kind: 'tool', role: e.role, text: e.summary, detail: e.detail, status: e.status, id: e.toolId, tool: e.tool });
       if (at < 0) return push(next);
       const feed = [...v.feed];
       feed[at] = { ...next, ts: feed[at].ts, detail: e.detail ?? feed[at].detail };

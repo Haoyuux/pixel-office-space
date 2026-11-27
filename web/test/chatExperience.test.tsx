@@ -4,7 +4,7 @@ import { render, screen, fireEvent, cleanup, waitFor, act, within } from '@testi
 import type { Project, Ticket } from '@office/shared';
 import { useOffice, resetOffice } from '../src/state/store';
 import { Drawer } from '../src/ui/Drawer';
-import { Feed } from '../src/ui/Feed';
+import { Feed, toolSummary } from '../src/ui/Feed';
 import { Markdown } from '../src/ui/Markdown';
 import { highlight } from '../src/ui/highlight';
 import { resetComposerHistory } from '../src/ui/Composer';
@@ -370,6 +370,52 @@ describe('past conversations: rename, pin, delete, search, titles', () => {
     expect(titles()).toEqual(['💬 What does login do?']);
     fireEvent.change(screen.getByRole('textbox', { name: /filter conversations/i }), { target: { value: 'dark' } });
     expect(titles()).toEqual(['🎫 Dark mode']);
+  });
+});
+
+describe('tool activity grouping', () => {
+  const tool = (id: string, tool: string, text: string, status = 'ok') => ({ kind: 'tool' as const, role: 'pm' as const, tool, text, status, id, ts: '' });
+
+  it('toolSummary counts by kind, in order of first use', () => {
+    expect(toolSummary([
+      { tool: 'Read', text: 'Read a' }, { tool: 'Grep', text: 'Grep x' }, { tool: 'Read', text: 'Read b' }, { tool: 'Bash', text: 'npm test' },
+      { tool: 'Glob', text: '**/*.ts' }, { tool: 'Bash', text: 'git status' }, { tool: 'Read', text: 'Read c' }, { tool: 'TodoWrite', text: 'todos' },
+    ])).toBe('Read 3 files · Searched 2 times · Ran 2 commands · TodoWrite ×1');
+    expect(toolSummary([{ text: 'Read src/a.ts' }, { text: 'Edit src/a.ts (+1 −1)' }])).toBe('Read 1 file · Edited 1 file');
+  });
+
+  it('consecutive tool lines collapse into one expandable summary; a single tool line stays as is', () => {
+    useOffice.setState({ feed: { t: [
+      tool('r1', 'Read', 'Read src/a.ts'), tool('r2', 'Read', 'Read src/b.ts'), tool('g1', 'Grep', 'Grep "login"'),
+      { kind: 'message', role: 'pm', text: 'Found it.', id: 'm', ts: '' },
+      tool('b1', 'Bash', 'npm test'),
+    ] } });
+    render(<Feed ticketId="t" />);
+    const group = screen.getByRole('button', { name: /Read 2 files · Searched 1 time/ });
+    expect(screen.queryByText('Read src/a.ts')).toBeNull();
+    expect(screen.getByText('npm test')).toBeTruthy();
+    fireEvent.click(group);
+    expect(group.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByText('Read src/a.ts')).toBeTruthy();
+    expect(screen.getByText('Grep "login"')).toBeTruthy();
+    fireEvent.click(group);
+    expect(screen.queryByText('Read src/a.ts')).toBeNull();
+  });
+
+  it('the group shows running while any tool runs, error if one failed', () => {
+    useOffice.setState({ feed: { t: [tool('a', 'Read', 'Read a'), tool('b', 'Bash', 'npm test', 'running')] } });
+    const { container, unmount } = render(<Feed ticketId="t" />);
+    expect(container.querySelector('.po-toolgroup .po-tool-dot')!.className).toContain('running');
+    unmount();
+    useOffice.setState({ feed: { t: [tool('a', 'Read', 'Read a'), tool('b', 'Bash', 'npm test', 'error')] } });
+    const r = render(<Feed ticketId="t" />);
+    expect(r.container.querySelector('.po-toolgroup .po-tool-dot')!.className).toContain('error');
+  });
+
+  it('agent.tool events keep the tool name on the feed item', () => {
+    useOffice.getState().apply({ type: 'ticket.created', ticket: tk('t'), projectId: 'p', ticketId: 't', ts: '', seq: 1 });
+    useOffice.getState().apply({ type: 'agent.tool', role: 'pm', tool: 'Grep', summary: 'Grep x', status: 'ok', toolId: 'g', projectId: 'p', ticketId: 't', ts: '', seq: 2 });
+    expect(useOffice.getState().feed.t.find(f => f.kind === 'tool')!.tool).toBe('Grep');
   });
 });
 

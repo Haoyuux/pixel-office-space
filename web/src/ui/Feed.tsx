@@ -41,6 +41,60 @@ function ToolLine({ item }: { item: FeedItem }) {
   );
 }
 
+/** Tool name → the verb of the activity summary (by tool name, else the summary's first word). */
+const TOOL_KIND: Record<string, 'read' | 'search' | 'run' | 'edit' | 'web' | 'agent'> = {
+  read: 'read', notebookread: 'read',
+  grep: 'search', glob: 'search', search: 'search', ls: 'search', find: 'search',
+  bash: 'run', powershell: 'run', bashoutput: 'run', shell: 'run',
+  edit: 'edit', write: 'edit', multiedit: 'edit', notebookedit: 'edit',
+  webfetch: 'web', websearch: 'web', task: 'agent', agent: 'agent',
+};
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+const PHRASE: Record<string, (n: number) => string> = {
+  read: n => `Read ${plural(n, 'file')}`, search: n => `Searched ${plural(n, 'time')}`, run: n => `Ran ${plural(n, 'command')}`,
+  edit: n => `Edited ${plural(n, 'file')}`, web: n => `Fetched ${plural(n, 'page')}`, agent: n => `Ran ${plural(n, 'agent')}`,
+};
+/** "Read 6 files · Searched 3 times · Ran 2 commands" (in order of first use; other tools by name). */
+export function toolSummary(items: Pick<FeedItem, 'tool' | 'text'>[]): string {
+  const counts = new Map<string, number>();
+  for (const i of items) {
+    const name = (i.tool || i.text.split(/[\s(:]/)[0] || 'tool').trim();
+    const k = TOOL_KIND[name.toLowerCase()] ?? name;
+    counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  return [...counts].map(([k, n]) => PHRASE[k]?.(n) ?? `${k} ×${n}`).join(' · ');
+}
+
+/** Consecutive tool lines as one summary line (expand to see each). */
+function ToolGroup({ items }: { items: FeedItem[] }) {
+  const [open, setOpen] = useState(false);
+  const status = items.some(i => i.status === 'running') ? 'running' : items.some(i => i.status === 'error') ? 'error' : 'ok';
+  return (
+    <div className={`po-toolgroup${open ? ' open' : ''}`}>
+      <div className={`po-tool ${status}`}>
+        <button type="button" className="po-tool-line" aria-expanded={open} onClick={() => setOpen(o => !o)}>
+          <span className="po-tool-tree" aria-hidden>⎿</span>
+          <span className={`po-tool-dot ${status}`} aria-hidden>●</span>
+          <span className="po-tool-sum">{toolSummary(items)}</span>
+          <span className="po-tool-caret" aria-hidden>{open ? '▾' : '▸'}</span>
+        </button>
+      </div>
+      {open && <div className="po-toolgroup-items">{items.map(i => <ToolLine key={i.id} item={i} />)}</div>}
+    </div>
+  );
+}
+
+type Block = { item: FeedItem } | { tools: FeedItem[] };
+/** Runs of 2+ consecutive tool items become one group. */
+function blocks(items: FeedItem[]): Block[] {
+  const out: Block[] = [];
+  let run: FeedItem[] = [];
+  const flush = () => { if (run.length === 1) out.push({ item: run[0] }); else if (run.length) out.push({ tools: run }); run = []; };
+  for (const i of items) { if (i.kind === 'tool') run.push(i); else { flush(); out.push({ item: i }); } }
+  flush();
+  return out;
+}
+
 /** Markdown answer text. */
 export function Answer({ text }: { text: string }) {
   return <Markdown text={text} className="po-msg-text po-answer" />;
@@ -123,7 +177,9 @@ function TicketItems({ ticketId, onShow, lastYou, onEdit }: {
   const editFor = (k: string) => (onEdit && lastYou === k ? onEdit : undefined);
   return <>
     {own && <YouBubble text={own.text} ts={own.createdAt} attachments={own.attachments} onEdit={editFor(`${ticketId}:own`)} />}
-    {items.map(i => <Row key={`${i.kind}:${i.id}`} item={i} ticketId={ticketId} onShow={onShow} onEdit={i.kind === 'user' ? editFor(`${ticketId}:${i.id}`) : undefined} />)}
+    {blocks(items).map(b => ('tools' in b
+      ? <ToolGroup key={`tools:${b.tools[0].id}`} items={b.tools} />
+      : <Row key={`${b.item.kind}:${b.item.id}`} item={b.item} ticketId={ticketId} onShow={onShow} onEdit={b.item.kind === 'user' ? editFor(`${ticketId}:${b.item.id}`) : undefined} />))}
     {usage && <div className="po-usage">{usageLine(usage)}</div>}
   </>;
 }
