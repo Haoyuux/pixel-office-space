@@ -102,6 +102,7 @@ export function Drawer({ projectId }: { projectId: string }) {
   const escape = (fromComposer: boolean) => {
     if (menu) { setMenu(null); return; }
     if (past) { setPast(false); return; }
+    if (card) { setCard(null); return; }
     if (running) { void stop(); return; }
     if (full) { setFull(false); return; }
     if (!fromComposer) close();
@@ -116,11 +117,16 @@ export function Drawer({ projectId }: { projectId: string }) {
   }), [thread, feeds]);
   const escapeRef = useRef(escape);
   escapeRef.current = escape;
+  const shortcuts = useRef({ fresh: () => {}, slash: () => {} });
 
   useEffect(() => {
     // never while a dialog is open (it handles its own Escape); the composer handles its own keys
     const key = (e: globalThis.KeyboardEvent) => {
-      if (e.key !== 'Escape' || team || document.querySelector('.po-modal') || e.target instanceof HTMLTextAreaElement) return;
+      if (team || document.querySelector('.po-modal')) return;
+      // Ctrl+K new conversation, Ctrl+/ the slash menu (also while typing)
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); shortcuts.current.fresh(); return; }
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key === '/') { e.preventDefault(); shortcuts.current.slash(); return; }
+      if (e.key !== 'Escape' || e.target instanceof HTMLTextAreaElement) return;
       escapeRef.current(false);
     };
     window.addEventListener('keydown', key);
@@ -148,6 +154,7 @@ export function Drawer({ projectId }: { projectId: string }) {
   const cancelTicket = () => { if (target) void once(() => api('POST', paths.cancel(target.id)), () => setMenu(null)); };
   /** Back to the welcome view: the next message starts a new conversation (nothing is lost). */
   const startFresh = () => { refocus.current = true; setChosen(null); setFresh(true); setPast(false); };
+  shortcuts.current = { fresh: startFresh, slash: () => { setPast(false); setMenu(null); composer.current?.openSlash(); } };
 
   /** Drawer-side slash commands; a returned string is shown under the composer as a hint. */
   const command = async (name: CommandName, arg: string): Promise<string | void> => {
@@ -196,7 +203,7 @@ export function Drawer({ projectId }: { projectId: string }) {
             <span className="po-badge po-model" title="Claude model for this project's runs (change it with /model)">{project.model}</span>
           )}
           <span className={`po-badge ${mode}`} title="Who works this project's tickets (change it in Team)">{mode === 'claude' ? 'Claude Code' : 'Simulated'}</span>
-          <button type="button" className="po-hbtn" aria-label="New conversation" title="New conversation (/new)" onClick={startFresh}>＋ New</button>
+          <button type="button" className="po-hbtn" aria-label="New conversation" title="New conversation (/new · Ctrl+K)" onClick={startFresh}>＋ New</button>
           <button type="button" className="po-hbtn" onClick={() => setTeam(true)} title="Edit team">Team · {project.team.length}</button>
           <button type="button" className={`po-hbtn${menu ? ' on' : ''}`} aria-label="Project menu" aria-expanded={!!menu} onClick={() => { setMenu(m => (m ? null : 'open')); setMenuError(null); }}>⋯</button>
           <button type="button" className={`po-hbtn${full ? ' on' : ''}`} aria-label={full ? 'Exit full screen' : 'Full screen'} aria-pressed={full}
@@ -289,6 +296,11 @@ export function Drawer({ projectId }: { projectId: string }) {
   );
 }
 
+const SHORTCUTS: [string, string][] = [
+  ['Ctrl+K', 'New conversation'], ['Ctrl+/', 'Open the commands'], ['Esc', 'Stop the running answer · close popups'],
+  ['↑', 'Recall your previous message (empty box)'], ['@', 'Mention a file'],
+];
+
 const WORK_STAGES: Stage[] = ['design', 'build', 'review', 'test', 'docs'];
 
 /** "12s", "2m 05s". */
@@ -352,6 +364,7 @@ function CommandCard({ kind, project, onClose }: { kind: 'status' | 'help'; proj
       {kind === 'status' ? <StatusRows project={project} /> : (
         <dl className="po-cmdcard-grid">
           {COMMANDS.map(c => <div key={c.name}><dt>/{c.name}{c.args ? ` ${c.args}` : ''}</dt><dd>{c.desc}</dd></div>)}
+          {SHORTCUTS.map(([k, d]) => <div key={k}><dt>{k}</dt><dd>{d}</dd></div>)}
         </dl>
       )}
     </section>

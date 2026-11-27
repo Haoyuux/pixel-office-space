@@ -419,6 +419,44 @@ describe('tool activity grouping', () => {
   });
 });
 
+describe('shortcuts', () => {
+  const A = tk('a', { text: 'What does login do?', mode: 'ask', answered: true });
+
+  it('Ctrl+K starts a new conversation (even while typing)', async () => {
+    open([A]);
+    fireEvent.click(screen.getByRole('button', { name: /past conversations/i }));
+    fireEvent.click(screen.getByRole('button', { name: /What does login do/ }));
+    expect(screen.queryByText(/Shop is ready/)).toBeNull();
+    fireEvent.keyDown(box(), { key: 'k', ctrlKey: true });
+    expect(screen.getByText(/Shop is ready/)).toBeTruthy();
+    fireEvent.change(box(), { target: { value: 'Brand new' } });
+    fireEvent.keyDown(box(), { key: 'Enter' });
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(posts()[0].body).toEqual({ text: 'Brand new', mode: 'auto' });
+  });
+
+  it('Ctrl+/ opens the slash menu in the composer', async () => {
+    open([A]);
+    fireEvent.keyDown(window, { key: '/', ctrlKey: true });
+    expect(box().value).toBe('/');
+    expect(screen.getByRole('listbox', { name: /commands/i })).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(box()));
+  });
+
+  it('Esc closes popups first: the slash menu, then the past list, then the drawer', () => {
+    open([A]);
+    fireEvent.keyDown(window, { key: '/', ctrlKey: true });
+    fireEvent.keyDown(box(), { key: 'Escape' });
+    expect(screen.queryByRole('listbox', { name: /commands/i })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /past conversations/i }));
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByRole('list', { name: /past conversations/i })).toBeNull();
+    expect(useOffice.getState().selectedProjectId).toBe('p');
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(useOffice.getState().selectedProjectId).toBeNull();
+  });
+});
+
 describe('full-screen chat', () => {
   it('⛶ expands the drawer; ⛶ again or Esc restores (Esc then closes the drawer)', () => {
     open([tk('a', { mode: 'ask', answered: true })]);
