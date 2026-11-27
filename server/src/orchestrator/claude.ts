@@ -30,7 +30,7 @@ export interface ClaudeOrchestratorOptions {
   log: TicketLog;
   runner: Runner;
   git?: GitApi;
-  /** Worktrees live in <dataDir>/worktrees/<projectId>/<ticketId>. */
+  /** Worktrees live in workspacePath(dataDir, projectId, ticketId) — short on purpose (Windows 260-char paths). */
   dataDir: string;
   now?: () => Date;
   /** Current project record (Resume after a restart rebuilds the run from the log). */
@@ -434,7 +434,7 @@ export class ClaudeOrchestrator implements Orchestrator {
         return;
       }
     }
-    const wsPath = path.join(this.opts.dataDir, 'worktrees', run.project.id, run.ticket.id);
+    const wsPath = workspacePath(this.opts.dataDir, run.project.id, run.ticket.id);
     const branch = `office/${this.git.slug(run.ticket.title)}-${run.ticket.id.slice(0, 6)}`;
     if (run.repos?.length) {
       // multi-repo: the workspace is a plain folder with one worktree per repo, same branch name in each
@@ -1007,6 +1007,10 @@ function branchesOf(units: Unit[]): string {
   if (names.length === 1) return `branch ${names[0]}`;
   return `branches ${units.map(u => `${u.name}: ${u.branch}`).join(', ')}`;
 }
+
+/** Short per-ticket workspace folder: deep repos (e.g. ASP.NET Zero) exceed Windows' 260-char path limit otherwise. */
+export const workspacePath = (dataDir: string, projectId: string, ticketId: string) =>
+  path.join(dataDir, 'wt', projectId.slice(0, 8), ticketId.slice(0, 8));
 
 /** Rebuild the per-repo worktrees from a persisted workspace (old single-repo shape has no `repos`). */
 function restoreWs(folder: string, w: Workspace): Ws {

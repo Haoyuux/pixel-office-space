@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { Project, RoleId, ServerEvent } from '@office/shared';
-import { ClaudeOrchestrator, NOT_A_GIT_REPO, type GitApi } from '../src/orchestrator/claude';
+import { ClaudeOrchestrator, NOT_A_GIT_REPO, type GitApi, workspacePath } from '../src/orchestrator/claude';
 import * as realGit from '../src/claude/git';
 import type { RunOptions, RunResult } from '../src/claude/runner';
 import { TicketLog } from '../src/ticketLog';
@@ -200,7 +200,7 @@ describe('ClaudeOrchestrator', () => {
     const fe = runner.of('frontend', 'stage')[0], be = runner.of('backend', 'stage')[0];
     // both start before either ends
     expect(Math.max(fe.started, be.started)).toBeLessThan(Math.min(fe.ended!, be.ended!));
-    const wt = path.join(dataDir, 'worktrees', 'p1', t.id);
+    const wt = workspacePath(dataDir, 'p1', t.id);
     expect(fe.o.cwd).toBe(wt);
     expect(fe.o.prompt).toContain('UI link');
     expect(fs.existsSync(path.join(wt, '.claude', 'office', 'project-map.md'))).toBe(true);
@@ -255,7 +255,7 @@ describe('ClaudeOrchestrator', () => {
     expect(runner.of('frontend', 'bounce')).toHaveLength(0);
     expect(runner.of('techlead', 'review')).toHaveLength(3);
     expect(gates()).toEqual(['plan', 'stuck']);
-    expect(git(path.join(dataDir, 'worktrees', 'p1', t.id), 'log', '--format=%s')).toContain('office: fixes (backend)');
+    expect(git(workspacePath(dataDir, 'p1', t.id), 'log', '--format=%s')).toContain('office: fixes (backend)');
     runner.script = () => undefined;
     o.decide(t.id, 'stuck', 'accept');
     await o.idle();
@@ -310,7 +310,7 @@ describe('ClaudeOrchestrator', () => {
     expect(o.find(t.id)!.status).toBe('done');
     expect(git(repo, 'rev-parse', 'HEAD')).not.toBe(before);
     expect(fs.existsSync(path.join(repo, 'ui.txt'))).toBe(true);
-    expect(fs.existsSync(path.join(dataDir, 'worktrees', 'p1', t.id))).toBe(false);
+    expect(fs.existsSync(workspacePath(dataDir, 'p1', t.id))).toBe(false);
     const u = of('ticket.usage');
     expect(u).toHaveLength(1);
     expect(u[0].turns).toBe(2 * runner.calls.length);
@@ -324,7 +324,7 @@ describe('ClaudeOrchestrator', () => {
     for (const r of CORE) fs.writeFileSync(path.join(agents, `${r}.md`), `agent ${r}\n`);
     const o = make();
     const t = await toFinal(o, repo);
-    const wt = path.join(dataDir, 'worktrees', 'p1', t.id);
+    const wt = workspacePath(dataDir, 'p1', t.id);
     expect(fs.readFileSync(path.join(wt, '.claude', 'agents', 'frontend.md'), 'utf8')).toBe('agent frontend\n');
     expect(git(wt, 'ls-files', '.claude/agents')).toBe('');
     expect(git(wt, 'status', '--porcelain', '--untracked-files=all')).toBe('');
@@ -351,7 +351,7 @@ describe('ClaudeOrchestrator', () => {
     expect(pmText()).toContain('No changes were made — nothing to merge');
     expect(pmText()).not.toMatch(/Merged /);
     expect(o.find(t.id)!.workspace?.merged).toBeUndefined();
-    expect(fs.existsSync(path.join(dataDir, 'worktrees', 'p1', t.id))).toBe(false);
+    expect(fs.existsSync(workspacePath(dataDir, 'p1', t.id))).toBe(false);
   });
 
   it('notes for a non-PM role are never delivered in the owner folder (kept until there is a worktree)', async () => {
@@ -400,7 +400,7 @@ describe('ClaudeOrchestrator', () => {
     runner.script = c => c.kind === 'stage' ? { hang: true } : undefined;
     o.decide(t.id, 'plan', 'approved');
     await until(() => runner.of('frontend', 'stage').length === 1);
-    const wt = path.join(dataDir, 'worktrees', 'p1', t.id);
+    const wt = workspacePath(dataDir, 'p1', t.id);
     expect(fs.existsSync(wt)).toBe(true);
     const running = runner.of('frontend', 'stage')[0];
     expect(running.ended).toBeUndefined();
@@ -509,7 +509,7 @@ describe('ClaudeOrchestrator', () => {
     await o.idle();
     expect(rv.o.signal!.aborted).toBe(true);
     expect(o.find(t.id)!.status).toBe('cancelled');
-    expect(fs.existsSync(path.join(dataDir, 'worktrees', 'p1', t.id))).toBe(false);
+    expect(fs.existsSync(workspacePath(dataDir, 'p1', t.id))).toBe(false);
     expect(states('techlead').at(-1)).toBe('idle');
   });
 
@@ -688,7 +688,7 @@ describe('ClaudeOrchestrator: follow-ups, resume, messages', () => {
     const fe = r2.of('frontend', 'stage')[0];
     expect(fe.o.resume).toBe(feSession);
     expect(fe.o.prompt.startsWith('Continue where you left off.')).toBe(true);
-    expect(fe.o.cwd).toBe(path.join(dataDir, 'worktrees', 'p1', t.id));
+    expect(fe.o.cwd).toBe(workspacePath(dataDir, 'p1', t.id));
     expect(r2.of('pm')).toHaveLength(0);
     expect(o2.find(t.id)!.openGate).toBe('final');
     expect(() => o2.resume(t.id)).toThrow(/active/);
@@ -809,7 +809,7 @@ describe('ClaudeOrchestrator: multi-repo projects', { timeout: 30_000 }, () => {
   let parent: string;
   let fe: string, be: string;
   const NAMES = ['angular', 'aspnet-core'];
-  const wsOf = (id: string) => path.join(dataDir, 'worktrees', 'p1', id);
+  const wsOf = (id: string) => workspacePath(dataDir, 'p1', id);
   const writes = () => {
     runner.script = (c): Reply | undefined => c.kind !== 'stage' ? undefined
       : c.o.role === 'frontend' ? { result: 'done', write: { 'angular/ui.txt': 'ui\n' } }
@@ -1096,5 +1096,13 @@ describe('ClaudeOrchestrator: multi-repo projects', { timeout: 30_000 }, () => {
     expect(fs.existsSync(wsOf(t.id))).toBe(false);
     expect(fs.readFileSync(path.join(nm, 'pkg', 'marker.txt'), 'utf8')).toBe('keep\n');
     expect(git(fe, 'status', '--porcelain')).toBe('');
+  });
+});
+
+
+describe('short worktree paths (Windows 260-char limit)', () => {
+  it('keeps the workspace path short: <dataDir>/wt/<8>/<8>', () => {
+    const p = workspacePath('D:/data', '7f3c2a1b-1111-2222-3333-444444444444', '9e8d7c6b-5555-6666-7777-888888888888');
+    expect(p).toBe(path.join('D:/data', 'wt', '7f3c2a1b', '9e8d7c6b'));
   });
 });

@@ -6,6 +6,8 @@ import type { DiffFile, RepoDetection, RepoRef } from '@office/shared';
 const AUTHOR = [
   '-c', 'user.name=Pixel Office', '-c', 'user.email=office@localhost',
   '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false',
+  // deep repos (ASP.NET Zero templates) exceed Windows' 260-char limit inside worktrees
+  '-c', 'core.longpaths=true',
 ];
 
 interface GitResult { code: number; stdout: string; stderr: string }
