@@ -49,6 +49,10 @@ export interface OfficeState {
   setSound(on: boolean): void;
   /** The conversation the open drawer shows (null = no drawer, or the welcome view). */
   openConv: { projectId: string; rootId: string } | null;
+  /** The conversation last shown per project (the drawer reopens on it, even after its ticket finished). */
+  lastConv: Record<string, string>;
+  /** /new: the drawer opens on the welcome view next time. */
+  forgetConv(projectId: string): void;
   setOpenConv(c: { projectId: string; rootId: string } | null): void;
   /** A request to open a conversation from outside the drawer (notification, summary board); `n` makes repeats distinct. */
   openRequest: { projectId: string; rootId: string; n: number } | null;
@@ -133,7 +137,7 @@ const initial = () => ({
   raw: {} as Record<string, string[]>, lastSeq: {} as Record<string, number>, diffs: {} as Record<string, DiffFile[]>,
   conversations: {} as Record<string, ConversationMeta>,
   selectedProjectId: null as string | null, roleFilter: 'all' as RoleId | 'all', night: initialNight(), synced: false,
-  soundOn: initialSound(), openConv: null as OfficeState['openConv'], openRequest: null as OfficeState['openRequest'],
+  soundOn: initialSound(), openConv: null as OfficeState['openConv'], lastConv: {} as Record<string, string>, openRequest: null as OfficeState['openRequest'],
   unseen: [] as OfficeState['unseen'], memoryRev: {} as Record<string, number>,
   devServers: {} as Record<string, DevServerState>, devLogs: {} as Record<string, string[]>,
 });
@@ -241,7 +245,10 @@ export const useOffice = create<OfficeState>()((set, get) => ({
   setOpenConv(c) {
     const cur = get().openConv;
     if (c?.projectId === cur?.projectId && c?.rootId === cur?.rootId) return;
-    set({ openConv: c });
+    set(s => ({ openConv: c, ...(c ? { lastConv: { ...s.lastConv, [c.projectId]: c.rootId } } : {}) }));
+  },
+  forgetConv(projectId) {
+    set(s => { const { [projectId]: _gone, ...lastConv } = s.lastConv; return { lastConv }; });
   },
   openConversation(projectId, rootId) {
     set({ selectedProjectId: projectId, roleFilter: 'all', openRequest: { projectId, rootId, n: ++openN } });

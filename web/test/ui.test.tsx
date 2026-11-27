@@ -80,6 +80,22 @@ describe('Drawer input', () => {
     fireEvent.keyDown(box, { key: 'Enter' });
   };
 
+  it('the running conversation stays open when it finishes, and after the drawer reopens; /new forgets it', async () => {
+    setup([ticket({ status: 'waiting', stage: 'test', openGate: 'final' })]);
+    expect(screen.queryByText(/no conversations yet/)).toBeNull();
+    act(() => useOffice.setState(s => ({ tickets: { ...s.tickets, t: { ...s.tickets.t, status: 'done', stage: 'done', openGate: undefined } } })));
+    expect(screen.queryByText(/no conversations yet/)).toBeNull();
+    expect(screen.getAllByText('Add login').length).toBeGreaterThan(0);
+    cleanup();
+    render(<Drawer projectId="p" />);
+    expect(screen.queryByText(/no conversations yet/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'New conversation' }));
+    expect(screen.getByText(/no conversations yet/)).toBeTruthy();
+    cleanup();
+    render(<Drawer projectId="p" />);
+    expect(screen.getByText(/no conversations yet/)).toBeTruthy();
+  });
+
   it('creates a ticket when none is running', async () => {
     const box = setup([ticket({ status: 'done', stage: 'done' })]);
     send(box, 'Add a footer');
@@ -216,6 +232,21 @@ describe('GateCard', () => {
     render(<GateCard ticketId="t" item={{ ...gate(), text: 'plan' }} />);
     expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
     expect(screen.getByText(/ended before a decision/)).toBeTruthy();
+  });
+
+  it('stuck after a round that changed nothing: shows what is open; One more round needs a note', async () => {
+    const detail = JSON.stringify({ from: 'test', bounces: 3, unchanged: true, issues: [{ role: 'frontend', note: 'Add public/assets/hero-portrait.webp' }] });
+    render(<GateCard ticketId="t" item={{ ...gate(), detail }} />);
+    expect(screen.getByText(/hero-portrait\.webp/)).toBeTruthy();
+    expect(screen.getByRole('note').textContent).toMatch(/changed no files/);
+    const retry = screen.getByRole('button', { name: 'One more round' }) as HTMLButtonElement;
+    expect(retry.disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Accept & continue' }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Note' }), { target: { value: 'use MeV2.webp' } });
+    expect(retry.disabled).toBe(false);
+    fireEvent.click(retry);
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(posts()[0].body).toEqual({ decision: 'retry', note: 'use MeV2.webp' });
   });
 
   it('stuck from QA says "Accept & continue" (not "Accept & test")', () => {

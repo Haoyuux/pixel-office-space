@@ -44,7 +44,8 @@ export function Drawer({ projectId }: { projectId: string }) {
   const queued = tickets.filter(t => t.status === 'queued');
   /** A ticket of the conversation the owner opened (any ticket of the thread: its root is looked up). */
   const request = useOffice(s => s.openRequest);
-  const [chosen, setChosen] = useState<string | null>(() => (request?.projectId === projectId ? request.rootId : null));
+  // a requested conversation, else the one this project's drawer showed last
+  const [chosen, setChosen] = useState<string | null>(() => (request?.projectId === projectId ? request.rootId : useOffice.getState().lastConv[projectId] ?? null));
   /** /new or /clear: nothing is shown and the next message starts a fresh conversation. */
   const [fresh, setFresh] = useState(false);
   // the open conversation: the one picked, else the one running; nothing → welcome + a fresh composer
@@ -90,6 +91,9 @@ export function Drawer({ projectId }: { projectId: string }) {
     if (request.projectId !== projectId) return;
     setChosen(request.rootId); setFresh(false); setPast(false); setTab('feed');
   }, [request, projectId]);
+
+  // the running conversation on screen stays open once it finishes (approve / accept → done): pin it
+  useEffect(() => { if (!chosen && !fresh && openRoot) setChosen(openRoot); }, [chosen, fresh, openRoot]);
 
   // what is on screen (notifications skip it; its unseen items are cleared)
   useEffect(() => {
@@ -174,7 +178,7 @@ export function Drawer({ projectId }: { projectId: string }) {
   const target = active;
   const cancelTicket = () => { if (target) void once(() => api('POST', paths.cancel(target.id)), () => setMenu(null)); };
   /** Back to the welcome view: the next message starts a new conversation (nothing is lost). */
-  const startFresh = () => { refocus.current = true; setChosen(null); setFresh(true); setPast(false); };
+  const startFresh = () => { refocus.current = true; setChosen(null); setFresh(true); setPast(false); useOffice.getState().forgetConv(project.id); };
   shortcuts.current = { fresh: startFresh, slash: () => { setPast(false); setMenu(null); composer.current?.openSlash(); } };
 
   /** Drawer-side slash commands; a returned string is shown under the composer as a hint. */
