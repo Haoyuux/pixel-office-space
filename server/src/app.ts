@@ -15,6 +15,7 @@ import { AttachmentStore } from './attachments';
 import { ConversationStore } from './conversations';
 import { ProjectFiles } from './files';
 import { MemoryStore } from './memory';
+import { buildSummary } from './summary';
 
 export interface Office {
   server: Server; store: ProjectStore; hub: Hub; close(): void;
@@ -112,6 +113,17 @@ export function createOffice(opts: OfficeOptions): Office {
   if (opts.assetsDir && existsSync(opts.assetsDir)) app.use('/assets', express.static(opts.assetsDir, { fallthrough: false }));
 
   app.get('/api/projects', (_req, res) => res.json(store.list()));
+
+  /** Summary board: `?since=<ISO>` (missing = the last 24 hours). */
+  app.get('/api/summary', (req, res) => {
+    const raw = req.query.since;
+    let since = Date.now() - 24 * 3600_000;
+    if (raw !== undefined) {
+      since = typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}/.test(raw) ? Date.parse(raw) : NaN;
+      if (Number.isNaN(since)) throw new ValidationError('since must be an ISO date/time');
+    }
+    res.json(buildSummary(since, store.list(), id => log.entries(id), conversations.all()));
+  });
 
   app.post('/api/projects', async (req, res, next) => {
     try {
