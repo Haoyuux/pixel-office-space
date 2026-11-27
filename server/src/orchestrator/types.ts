@@ -1,4 +1,4 @@
-import type { GateDecision, GateKind, Project, RoleId, ServerEvent, Ticket, TicketMode } from '@office/shared';
+import type { Attachment, GateDecision, GateKind, Project, RoleId, ServerEvent, Ticket, TicketMode } from '@office/shared';
 
 export { ConflictError, ValidationError } from '../errors';
 
@@ -9,7 +9,10 @@ export const realScheduler: Scheduler = {
 };
 
 /** mode: how the PM treats the request (missing = 'ticket', the pre-mode behaviour; the API defaults to 'auto'). */
-export interface StartOptions { parentTicketId?: string; mode?: TicketMode }
+export interface StartOptions { parentTicketId?: string; mode?: TicketMode; attachments?: Attachment[] }
+
+/** Stop: 'stopped' = the running answer/plan run was aborted and the ticket ended done; 'cancelled' = cancelled. */
+export type StopOutcome = 'stopped' | 'cancelled';
 
 export interface Orchestrator {
   startTicket(project: Project, text: string, opts?: StartOptions): Ticket;
@@ -18,8 +21,10 @@ export interface Orchestrator {
   /** Re-queue a ticket recovered from the log after a restart. */
   adopt(project: Project, ticket: Ticket): void;
   decide(ticketId: string, gate: GateKind, decision: GateDecision, note?: string): void;
-  sendMessage(ticketId: string, text: string): void;
+  sendMessage(ticketId: string, text: string, attachments?: Attachment[]): void;
   cancel(ticketId: string): void;
+  /** Stop the running agent run(s): an answer/plan in progress ends done (stopped); later stages cancel. Missing = cancel. */
+  stop?(ticketId: string): StopOutcome;
   current(projectId: string): Ticket | undefined;
   queue(projectId: string): Ticket[];
   find(ticketId: string): Ticket | undefined;

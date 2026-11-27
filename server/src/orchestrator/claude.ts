@@ -2,15 +2,16 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  applyTicketEvent, type AgentState, type GateDecision, type GateKind, type Plan, type PlanTask, type Project, type RoleId,
+  applyTicketEvent, type AgentState, type Attachment, type GateDecision, type GateKind, type Plan, type PlanTask, type Project, type RoleId,
   type RepoDetection, type RepoRef, type ServerEvent, type Stage, type Ticket, type TicketMode, type Workspace,
 } from '@office/shared';
-import { ConflictError, ValidationError, type Orchestrator, type StartOptions } from './types';
+import { ConflictError, ValidationError, type Orchestrator, type StartOptions, type StopOutcome } from './types';
 import { titleOf } from './fakeContent';
 import type { TicketLog } from '../ticketLog';
-import { killLiveSync, type RunOptions, type RunResult, type RunnerEvent } from '../claude/runner';
+import { killLiveSync, type Effort, type RunOptions, type RunResult, type RunnerEvent } from '../claude/runner';
 import * as realGit from '../claude/git';
-import { newTranslateContext, translate } from '../claude/translate';
+import { newTranslateContext, openStreams, translate, type TranslateContext } from '../claude/translate';
+import { attachmentsDir, attachmentsNote } from '../attachments';
 import { MAX_TURNS, ROLE_TOOLS } from '../claude/roles';
 import {
   bouncePrompt, CONTINUE, deliverNotesPrompt, diffSummary, fixJsonPrompt, followUpPrompt, planPrompt, previousContext,
@@ -37,7 +38,11 @@ export interface ClaudeOrchestratorOptions {
   getProject?: (id: string) => Project | undefined;
   /** Repo detection at ticket start (the server stores it on the project). */
   onDetect?: (projectId: string, d: RepoDetection) => void;
+  /** Streaming text deltas are coalesced to at most one event per this many ms per message (tests: 0). */
+  deltaIntervalMs?: number;
 }
+
+export const STOPPED_TEXT = 'Stopped by you.';
 
 type WorkStage = 'design' | 'build' | 'review' | 'test' | 'docs';
 type BounceFrom = 'review' | 'test';
@@ -85,6 +90,8 @@ interface Run {
   locks: Map<RoleId, Promise<unknown>>;
   aborts: Set<AbortController>;
   inflight: Set<Promise<unknown>>;
+  /** Translate contexts of the live runs (their streaming text is kept when the owner stops). */
+  streams: Set<TranslateContext>;
   notes: Partial<Record<RoleId, string[]>>;
   ws?: Ws;
   /** Multi-repo project: the repos detected when the ticket started. */
@@ -157,6 +164,7 @@ export class ClaudeOrchestrator implements Orchestrator {
       agentStates: {}, createdAt: this.now().toISOString(), agentsMode: 'claude',
       ...(opts.parentTicketId ? { parentTicketId: opts.parentTicketId } : {}),
       ...(opts.mode ? { mode: opts.mode } : {}),
+      ...(opts.attachments?.length ? { attachments: opts.attachments.map(a => ({ ...a })) } : {}),
     };
     const run = this.newRun(project, ticket, 0);
     this.emit(run, { type: 'ticket.created', ticket });
@@ -236,13 +244,13 @@ export class ClaudeOrchestrator implements Orchestrator {
     return this.bg(run, () => this.next(run, from));
   }
 
-  sendMessage(ticketId: string, text: string): void {
+  sendMessage(ticketId: string, text: string, attachments: Attachment[] = []): void {
     const run = this.runs.get(ticketId);
     if (!run || (run.ticket.status !== 'running' && run.ticket.status !== 'waiting')) throw new ConflictError('Ticket is not running');
-    this.emit(run, { type: 'user.message', text });
+    this.emit(run, { type: 'user.message', text, ...(attachments.length ? { attachments } : {}) });
     const states = run.ticket.agentStates;
     const active = (Object.keys(states) as RoleId[]).find(r => WORKING.includes(states[r]!)) ?? 'pm';
-    (run.notes[active] ??= []).push(text);
+    (run.notes[active] ??= []).push(attachments.length ? `${text}\n  ${attachmentsNote(attachments).replace(/\n/g, '\n  ')}` : text);
     this.message(run, active, `Got it — "${titleOf(text)}". I'll take that into account on my next step.`);
     // PM notes ride on its next step: the re-plan while planning / at the plan gate (delivered on approval otherwise).
     // Past the plan, the PM has no further step pending: resume its session with the note now (queued on its lock).
@@ -265,6 +273,28 @@ export class ClaudeOrchestrator implements Orchestrator {
     this.finish(run, 'cancelled');
   }
 
+  /**
+   * Stop (■ / Esc). While the PM is still answering or planning (nothing changed yet) its run is aborted and the
+   * ticket ends done: the streamed text so far is kept as the final message, then "Stopped by you.". Queued tickets
+   * and tickets past the plan (a change at a gate or in a work stage) are cancelled, as with Cancel.
+   */
+  stop(ticketId: string): StopOutcome {
+    const run = this.runs.get(ticketId);
+    if (!run) throw new ConflictError('Unknown ticket');
+    const queued = (this.queues.get(run.project.id) ?? []).includes(ticketId);
+    if (!queued && (run.ended || this.currentByProject.get(run.project.id) !== ticketId)) throw new ConflictError('Ticket is not active');
+    const planning = !queued && !run.plan && !run.ticket.openGate && (run.ticket.stage === null || run.ticket.stage === 'plan');
+    if (!planning) { this.cancel(ticketId); return 'cancelled'; }
+    for (const ctx of run.streams) {
+      for (const s of openStreams(ctx)) {
+        if (s.text.trim()) this.emit(run, { type: 'agent.message', role: s.role, text: s.text, streaming: false, messageId: s.messageId });
+      }
+    }
+    this.message(run, 'pm', STOPPED_TEXT);
+    this.finish(run, 'done', '', { stopped: true });
+    return 'stopped';
+  }
+
   current(projectId: string) { const id = this.currentByProject.get(projectId); return id ? this.runs.get(id)!.ticket : undefined; }
   queue(projectId: string) { return (this.queues.get(projectId) ?? []).map(id => this.runs.get(id)!.ticket); }
   find(ticketId: string) { return this.runs.get(ticketId)?.ticket; }
@@ -279,7 +309,7 @@ export class ClaudeOrchestrator implements Orchestrator {
   private newRun(project: Project, ticket: Ticket, seq: number): Run {
     const run: Run = {
       ticket, project, seq, bounces: { review: 0, test: 0 }, lastIssues: [], sessions: {}, locks: new Map(),
-      aborts: new Set(), inflight: new Set(), notes: {}, usage: { turns: 0, costUsd: 0, durationMs: 0 }, ended: false,
+      aborts: new Set(), inflight: new Set(), streams: new Set(), notes: {}, usage: { turns: 0, costUsd: 0, durationMs: 0 }, ended: false,
       inherited: new Set(), continuing: new Set(),
     };
     this.runs.set(ticket.id, run);
@@ -599,6 +629,8 @@ export class ClaudeOrchestrator implements Orchestrator {
     // the PM works in the owner's folder and reads the parent docs there; the others get the workspace copy
     if (role !== 'pm' && run.ws?.docs) parts.push(projectDocsRule(run.project.folder, PROJECT_DOCS_DIR));
     if (run.ws?.units.some(u => u.sharedModules)) parts.push(SHARED_MODULES_RULE);
+    const files = attachmentsNote(run.ticket.attachments);
+    if (files) parts.push(files);
     return parts.join('\n\n');
   }
 
@@ -972,16 +1004,34 @@ export class ClaudeOrchestrator implements Orchestrator {
     return m && m !== 'default' ? { model: m } : {};
   }
 
+  /**
+   * Chat answers run at medium effort: an Ask, or an auto request in a thread whose previous turn was an answer.
+   * Planning a change (and every other role) keeps the CLI's default.
+   */
+  private effortOf(run: Run, role: RoleId, stage: Exclude<Stage, 'done'>): { effort?: Effort } {
+    if (role !== 'pm' || stage !== 'plan' || run.plan) return {};
+    const mode = run.ticket.mode ?? 'ticket';
+    return mode === 'ask' || (mode === 'auto' && run.parent?.answered) ? { effort: 'medium' } : {};
+  }
+
+  /** Uploaded files live outside every repo: once the project has any, every run may read them (--add-dir). */
+  private addDirsOf(run: Run): { addDirs?: string[] } {
+    const dir = attachmentsDir(this.opts.dataDir, run.project.id);
+    return fs.existsSync(dir) ? { addDirs: [dir] } : {};
+  }
+
   private async execNow(run: Run, role: RoleId, stage: Exclude<Stage, 'done'>, cwd: string, prompt: string, resume?: string): Promise<RunResult> {
     this.alive(run);
     const ac = new AbortController();
     run.aborts.add(ac);
-    const ctx = newTranslateContext(cwd);
+    const ctx = newTranslateContext(cwd, { minIntervalMs: this.opts.deltaIntervalMs });
+    run.streams.add(ctx);
     const maxTurns = MAX_TURNS[stage === 'plan' ? 'plan' : stage];
     let res: RunResult;
     try {
       res = await this.opts.runner.run({
         cwd, role, prompt, resume, allowedTools: ROLE_TOOLS[role], maxTurns, signal: ac.signal, ...this.modelOf(run),
+        ...this.effortOf(run, role, stage), ...this.addDirsOf(run),
         onEvent: (e: RunnerEvent) => {
           if (run.ended) return;
           if (e.kind === 'init') this.session(run, role, e.sessionId);
@@ -993,6 +1043,7 @@ export class ClaudeOrchestrator implements Orchestrator {
       throw new StageFailed(`${roleName(role)} run failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       run.aborts.delete(ac);
+      run.streams.delete(ctx);
     }
     if (run.ended) throw new Ended();
     run.usage.turns += res.numTurns || 0;
@@ -1060,7 +1111,7 @@ export class ClaudeOrchestrator implements Orchestrator {
 
   private alive(run: Run) { if (run.ended || this.stopping) throw new Ended(); }
 
-  private finish(run: Run, how: 'done' | 'cancelled' | 'failed', reason = '') {
+  private finish(run: Run, how: 'done' | 'cancelled' | 'failed', reason = '', done: { stopped?: boolean } = {}) {
     if (run.ended) return;
     run.ended = true;
     for (const ac of run.aborts) ac.abort();
@@ -1077,7 +1128,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     if (run.usage.turns || run.usage.costUsd || run.usage.durationMs) this.emit(run, { type: 'ticket.usage', ...run.usage });
     if (how === 'done') {
       for (const r of roles) this.state(run, r, 'done');
-      this.emit(run, { type: 'ticket.done' });
+      this.emit(run, { type: 'ticket.done', ...(done.stopped ? { stopped: true } : {}) });
     } else if (how === 'cancelled') this.emit(run, { type: 'ticket.cancelled' });
     else this.emit(run, { type: 'ticket.failed', reason });
     for (const r of roles) this.state(run, r, 'idle');

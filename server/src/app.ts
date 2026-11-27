@@ -11,6 +11,9 @@ import { ConflictError, type Orchestrator } from './orchestrator/types';
 import type { TicketLog } from './ticketLog';
 import * as realGit from './claude/git';
 import { ClaudeSystem, type ClaudeStatus } from './claude/system';
+import { AttachmentStore } from './attachments';
+import { ConversationStore } from './conversations';
+import { ProjectFiles } from './files';
 
 export interface Office {
   server: Server; store: ProjectStore; hub: Hub; close(): void;
@@ -21,7 +24,7 @@ export interface OfficeOptions {
   dataDir: string; orchestrator: Orchestrator; log: TicketLog; assetsDir?: string;
   /** `GET /api/system/claude` source (tests inject a fake; never the real CLI). */
   claudeSystem?: { status(): Promise<ClaudeStatus> };
-  git?: Pick<typeof realGit, 'isRepo' | 'hasCommit' | 'gitInit'> & Partial<Pick<typeof realGit, 'detectRepos'>>;
+  git?: Pick<typeof realGit, 'isRepo' | 'hasCommit' | 'gitInit'> & Partial<Pick<typeof realGit, 'detectRepos' | 'lsFiles'>>;
 }
 
 const GATES: GateKind[] = ['plan', 'final', 'stuck'];
@@ -44,14 +47,20 @@ export function createOffice(opts: OfficeOptions): Office {
   };
   let system = opts.claudeSystem;
   const store = new ProjectStore(join(opts.dataDir, 'projects.json'));
+  const attachments = new AttachmentStore(opts.dataDir);
+  const conversations = new ConversationStore(join(opts.dataDir, 'conversations.json'));
+  const files = new ProjectFiles(git.lsFiles ?? realGit.lsFiles);
   const app = express();
   app.use(guardRequests);
+  // uploads are JSON base64 (≤ 10 MB decoded): only this route accepts a large body
+  app.use('/api/projects/:id/attachments', express.json({ limit: '15mb' }));
   app.use(express.json());
   const server = createServer(app);
 
   const snapshot = (): Snapshot => ({
     projects: store.list(),
     tickets: store.list().flatMap(p => [orch.current(p.id), ...orch.queue(p.id)].filter((t): t is Ticket => !!t)),
+    conversations: conversations.all(),
   });
   const hub = new Hub(server, snapshot);
   orch.onEvent(e => hub.broadcast(e));
@@ -60,6 +69,40 @@ export function createOffice(opts: OfficeOptions): Office {
 
   const mustProject = (id: string) => { const p = store.get(id); if (!p) throw new NotFoundError('Project not found'); return p; };
   const mustTicket = (id: string) => { const t = orch.find(id); if (!t) throw new NotFoundError('Ticket not found'); return t; };
+  /** Live or logged ticket (any project). */
+  const anyTicket = (id: string) => orch.find(id) ?? log.find(id)?.ticket;
+  /** The conversation's root: follow parentTicketId up (a missing parent ends the walk). */
+  const rootOf = (t: Ticket, lookup: (id: string) => Ticket | undefined = anyTicket): Ticket => {
+    const seen = new Set<string>();
+    let cur = t;
+    while (cur.parentTicketId && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      const p = lookup(cur.parentTicketId);
+      if (!p) break;
+      cur = p;
+    }
+    return cur;
+  };
+  const conversationEvent = (rootId: string, meta: ReturnType<ConversationStore['patch']>) =>
+    hub.broadcast({ type: 'conversation.updated', rootId, meta, projectId: meta.projectId, ts: now() });
+
+  // auto title: the PM's first answer / plan summary names the conversation unless the owner named it
+  const lastPm = new Map<string, string>();
+  orch.onEvent(e => {
+    try {
+      if (e.type === 'agent.message' && e.role === 'pm' && !e.streaming) lastPm.set(e.ticketId, e.text);
+      else if (e.type === 'ticket.answered' || e.type === 'ticket.plan') {
+        const text = e.type === 'ticket.plan' ? e.plan.summary : lastPm.get(e.ticketId);
+        const t = orch.find(e.ticketId);
+        if (text && t) {
+          const root = rootOf(t);
+          const meta = conversations.autoTitle(root.id, root.projectId, text);
+          if (meta) conversationEvent(root.id, meta);
+        }
+      }
+      if (e.type === 'ticket.done' || e.type === 'ticket.failed' || e.type === 'ticket.cancelled') lastPm.delete(e.ticketId);
+    } catch (err) { console.error(err); } // naming is best effort: never break the event flow
+  });
 
   if (opts.assetsDir && existsSync(opts.assetsDir)) app.use('/assets', express.static(opts.assetsDir, { fallthrough: false }));
 
@@ -100,6 +143,7 @@ export function createOffice(opts: OfficeOptions): Office {
     const p = mustProject(req.params.id);
     for (const t of [...orch.queue(p.id), orch.current(p.id)]) if (t) orch.cancel(t.id);
     store.remove(p.id);
+    attachments.removeProject(p.id);
     hub.broadcast({ type: 'project.removed', projectId: p.id, ts: now() });
     res.json({ ok: true });
   });
@@ -111,23 +155,63 @@ export function createOffice(opts: OfficeOptions): Office {
     const rawMode = req.body.mode ?? 'auto';
     if (!TICKET_MODES.includes(rawMode)) throw new ValidationError(`mode must be one of ${TICKET_MODES.join(', ')}`);
     const mode = rawMode as TicketMode;
+    const atts = attachments.resolve(p.id, req.body.attachments);
+    const extra = atts.length ? { attachments: atts } : {};
     const parentTicketId = req.body.parentTicketId;
     if (parentTicketId !== undefined && parentTicketId !== null) {
       if (typeof parentTicketId !== 'string') throw new ValidationError('parentTicketId must be a ticket id');
       const parent = orch.find(parentTicketId) ?? log.tickets(p.id).find(t => t.id === parentTicketId);
       if (!parent || parent.projectId !== p.id) throw new NotFoundError('Parent ticket not found');
-      return res.status(201).json(orch.startTicket(p, text, { parentTicketId, mode }));
+      return res.status(201).json(orch.startTicket(p, text, { parentTicketId, mode, ...extra }));
     }
-    res.status(201).json(orch.startTicket(p, text, { mode }));
+    res.status(201).json(orch.startTicket(p, text, { mode, ...extra }));
   });
 
+  /** History: tickets of soft-deleted conversations are left out; `conversations` = this project's meta. */
   app.get('/api/projects/:id/tickets', (req, res) => {
     const p = mustProject(req.params.id);
     const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 20));
-    const tickets = log.tickets(p.id).slice(-limit);
+    const all = log.tickets(p.id);
+    const meta = conversations.ofProject(p.id);
+    const byId = new Map(all.map(t => [t.id, t]));
+    const visible = all.filter(t => !meta[rootOf(t, id => byId.get(id)).id]?.deleted);
+    const tickets = visible.slice(-limit);
     const events: Record<string, ServerEvent[]> = {};
     for (const t of tickets) events[t.id] = log.read(p.id, t.id);
-    res.json({ tickets, events });
+    res.json({ tickets, events, conversations: meta });
+  });
+
+  app.post('/api/projects/:id/attachments', (req, res) => {
+    const p = mustProject(req.params.id);
+    res.status(201).json(attachments.save(p.id, req.body));
+  });
+
+  app.get('/api/projects/:id/files', async (req, res, next) => {
+    try {
+      const p = mustProject(req.params.id);
+      const q = typeof req.query.q === 'string' ? req.query.q : '';
+      res.json({ files: await files.search(p, q) });
+    } catch (e) { next(e); }
+  });
+
+  const conversationRoot = (id: string) => {
+    const t = anyTicket(id);
+    if (!t || !store.get(t.projectId)) throw new NotFoundError('Conversation not found');
+    return rootOf(t);
+  };
+
+  app.patch('/api/conversations/:rootId', (req, res) => {
+    const root = conversationRoot(req.params.rootId);
+    const meta = conversations.patch(root.id, root.projectId, req.body);
+    conversationEvent(root.id, meta);
+    res.json({ rootId: root.id, ...meta });
+  });
+
+  app.delete('/api/conversations/:rootId', (req, res) => {
+    const root = conversationRoot(req.params.rootId);
+    const meta = conversations.remove(root.id, root.projectId);
+    conversationEvent(root.id, meta);
+    res.json({ rootId: root.id, ...meta });
   });
 
   app.post('/api/tickets/:id/gates/:gate', (req, res) => {
@@ -139,11 +223,22 @@ export function createOffice(opts: OfficeOptions): Office {
   });
 
   app.post('/api/tickets/:id/messages', (req, res) => {
-    mustTicket(req.params.id);
+    const t = mustTicket(req.params.id);
     const text = String(req.body.text ?? '').trim();
     if (!text) throw new ValidationError('Message text is required');
-    orch.sendMessage(req.params.id, text);
+    const atts = attachments.resolve(t.projectId, req.body.attachments);
+    if (atts.length) orch.sendMessage(req.params.id, text, atts);
+    else orch.sendMessage(req.params.id, text);
     res.json({ ok: true });
+  });
+
+  /** ■ Stop: 'stopped' = the running answer/plan ended (done, text so far kept); 'cancelled' = cancelled like Cancel. */
+  app.post('/api/tickets/:id/stop', (req, res) => {
+    mustTicket(req.params.id);
+    let outcome: 'stopped' | 'cancelled' = 'cancelled';
+    if (orch.stop) outcome = orch.stop(req.params.id);
+    else orch.cancel(req.params.id);
+    res.json({ ok: true, outcome });
   });
 
   app.post('/api/tickets/:id/resume', (req, res) => {

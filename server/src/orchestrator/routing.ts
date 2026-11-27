@@ -1,5 +1,5 @@
-import type { GateDecision, GateKind, Project, RoleId, ServerEvent, Ticket } from '@office/shared';
-import { ConflictError, type Orchestrator, type StartOptions } from './types';
+import type { Attachment, GateDecision, GateKind, Project, RoleId, ServerEvent, Ticket } from '@office/shared';
+import { ConflictError, type Orchestrator, type StartOptions, type StopOutcome } from './types';
 
 export type Mode = 'claude' | 'simulated';
 export const modeOf = (p: Project): Mode => p.agentsMode ?? 'claude';
@@ -17,8 +17,15 @@ export class RoutingOrchestrator implements Orchestrator {
   /** Resume is a claude feature: the claude orchestrator rebuilds the ticket from the log. */
   resume(ticketId: string): Ticket { return (this.owner(ticketId) ?? this.byMode.claude).resume(ticketId); }
   decide(ticketId: string, gate: GateKind, decision: GateDecision, note?: string) { this.must(ticketId).decide(ticketId, gate, decision, note); }
-  sendMessage(ticketId: string, text: string) { this.must(ticketId).sendMessage(ticketId, text); }
+  sendMessage(ticketId: string, text: string, attachments?: Attachment[]) { this.must(ticketId).sendMessage(ticketId, text, attachments); }
   cancel(ticketId: string) { this.must(ticketId).cancel(ticketId); }
+  /** Simulated tickets have no agent runs to stop: Stop cancels them. */
+  stop(ticketId: string): StopOutcome {
+    const o = this.must(ticketId);
+    if (o.stop) return o.stop(ticketId);
+    o.cancel(ticketId);
+    return 'cancelled';
+  }
   current(projectId: string) { for (const o of this.all()) { const t = o.current(projectId); if (t) return t; } return undefined; }
   queue(projectId: string) { return this.all().flatMap(o => o.queue(projectId)); }
   find(ticketId: string) { return this.owner(ticketId)?.find(ticketId); }

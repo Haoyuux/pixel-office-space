@@ -57,4 +57,12 @@ export interface Ticket {
   mode?: TicketMode;
   /** The PM answered instead of planning (no gate, no changes). */
   answered?: boolean;
+  /** The owner stopped the run (Stop); the ticket ended done with whatever text had streamed. */
+  stopped?: boolean;
+  /** Files attached to the request (uploaded via POST /api/projects/:id/attachments). */
+  attachments?: Attachment[];
 }
+/** An uploaded file; `path` is absolute (under the server's data folder, outside every repo). */
+export interface Attachment { id: string; name: string; path: string }
+/** Per-conversation (root ticket) metadata: `<dataDir>/conversations.json`. deleted = soft-deleted (hidden; logs kept). */
+export interface ConversationMeta { projectId: string; title?: string; pinned?: boolean; deleted?: boolean }

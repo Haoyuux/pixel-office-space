@@ -47,6 +47,14 @@ export async function hasCommit(dir: string): Promise<boolean> {
   return (await run(dir, ['rev-parse', '--verify', '-q', 'HEAD'])).code === 0;
 }
 
+/** Tracked + untracked-but-not-ignored files, repo-relative with '/' (empty when not a repo). */
+export async function lsFiles(dir: string): Promise<string[]> {
+  if (!fs.existsSync(dir)) return [];
+  const r = await run(dir, ['ls-files', '--cached', '--others', '--exclude-standard', '-z']);
+  if (r.code !== 0) return [];
+  return [...new Set(r.stdout.split('\0').filter(Boolean))];
+}
+
 const SKIP_DIRS = new Set(['node_modules']);
 
 /**

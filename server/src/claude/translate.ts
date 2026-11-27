@@ -33,13 +33,44 @@ export function toolSummary(name: string, input: Record<string, unknown>, cwd?: 
   return cap(arg ? `${name} ${arg}` : name, SUMMARY_MAX);
 }
 
+/** A streaming text block: its feed id, all text so far, and what has not been sent yet (coalescing). */
+interface LiveBlock { role: RoleId; messageId: string; text: string; pending: string; last: number }
+
 export interface TranslateContext {
   cwd?: string;
   /** tool_use id → what was shown, so the matching tool_result can repeat it (the web feed replaces by toolId). */
   tools: Map<string, { tool: string; summary: string; detail?: string }>;
+  /** API message id → the feed ids of its text blocks, in order (the k-th finished text maps to the k-th block). */
+  textBlocks: Map<string, { ids: string[]; done: number }>;
+  /** `${apiMessageId}:${index}` → streaming text block not finished yet. */
+  live: Map<string, LiveBlock>;
+  /** Deltas are sent at most this often per block (the rest is coalesced into the next one). */
+  minIntervalMs: number;
+  now: () => number;
 }
 
-export const newTranslateContext = (cwd?: string): TranslateContext => ({ cwd, tools: new Map() });
+export interface TranslateOptions { minIntervalMs?: number; now?: () => number }
+export const DELTA_INTERVAL_MS = 60;
+
+export const newTranslateContext = (cwd?: string, o: TranslateOptions = {}): TranslateContext => ({
+  cwd, tools: new Map(), textBlocks: new Map(), live: new Map(),
+  minIntervalMs: o.minIntervalMs ?? DELTA_INTERVAL_MS, now: o.now ?? Date.now,
+});
+
+/** Text blocks still streaming (no final text yet), with everything received so far — e.g. to keep it on Stop. */
+export function openStreams(ctx: TranslateContext): { role: RoleId; messageId: string; text: string }[] {
+  return [...ctx.live.values()].map(b => ({ role: b.role, messageId: b.messageId, text: b.text }));
+}
+
+/** Finished text: the feed id of its streamed block (same id as the deltas), or a fresh one if it never streamed. */
+function finalId(ctx: TranslateContext, apiId?: string): string {
+  const blocks = apiId ? ctx.textBlocks.get(apiId) : undefined;
+  const id = blocks?.ids[blocks.done];
+  if (!blocks || !id) return randomUUID();
+  blocks.done++;
+  for (const [k, b] of ctx.live) if (b.messageId === id) ctx.live.delete(k);
+  return id;
+}
 
 function toolDetail(input: Record<string, unknown>): string | undefined {
   if (typeof input?.command === 'string') return cap(input.command, DETAIL_MAX);
@@ -55,7 +86,31 @@ function toolDetail(input: Record<string, unknown>): string | undefined {
 export function translate(role: RoleId, e: RunnerEvent, ctx: TranslateContext): Partial<ServerEvent>[] {
   switch (e.kind) {
     case 'text':
-      return [{ type: 'agent.message', role, text: e.text, streaming: false, messageId: randomUUID() }];
+      return [{ type: 'agent.message', role, text: e.text, streaming: false, messageId: finalId(ctx, e.messageId) }];
+    case 'block_start': {
+      if (e.blockType !== 'text') return [];
+      const key = `${e.messageId}:${e.index}`;
+      if (ctx.live.has(key)) return [];
+      const blocks = ctx.textBlocks.get(e.messageId) ?? { ids: [], done: 0 };
+      ctx.textBlocks.set(e.messageId, blocks);
+      const messageId = randomUUID();
+      blocks.ids.push(messageId);
+      ctx.live.set(key, { role, messageId, text: '', pending: '', last: -Infinity });
+      return [];
+    }
+    case 'text_delta': {
+      const b = ctx.live.get(`${e.messageId}:${e.index}`);
+      if (!b) return [];
+      b.text += e.text;
+      b.pending += e.text;
+      const t = ctx.now();
+      // nothing visible yet, or sent very recently: keep it for the next delta (the final text replaces it anyway)
+      if (!b.text.trim() || t - b.last < ctx.minIntervalMs) return [];
+      const text = b.pending;
+      b.pending = '';
+      b.last = t;
+      return [{ type: 'agent.message', role, text, streaming: true, messageId: b.messageId }];
+    }
     case 'tool_use': {
       const info = { tool: e.name, summary: toolSummary(e.name, e.input, ctx.cwd), detail: toolDetail(e.input) };
       ctx.tools.set(e.id, info);
