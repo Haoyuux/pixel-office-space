@@ -1,4 +1,4 @@
-import { roleDef, type Plan, type PlanTask, type Project, type RoleId } from '@office/shared';
+import { roleDef, type DiffFile, type Plan, type PlanTask, type Project, type RoleId } from '@office/shared';
 
 const fence = (o: unknown) => '```json\n' + JSON.stringify(o, null, 2) + '\n```';
 const GIT_RULE = 'Work only inside this folder; never run git commit, git push, or change git config/branches.';
@@ -39,12 +39,13 @@ ${notes.length ? `\n${block('owner-notes', notes.map(n => `- ${n}`).join('\n'))}
 When done, reply with a short plain summary of what you changed.`;
 }
 
-export function reviewPrompt(plan: Plan): string {
+export function reviewPrompt(plan: Plan, changes = ''): string {
   return `Review the changes in this worktree against the plan (use git diff). Read-only; do not edit. ${GIT_RULE}
 
 Summary: ${plan.summary}
 Acceptance:
 ${plan.acceptance.map(a => `- ${a}`).join('\n')}
+${changes ? `\nChanged files (from the server):\n${changes}\n` : ''}
 
 ${OUTPUT_RULE}
 ${fence({ approved: false, issues: [{ role: 'backend', file: 'src/a.ts', note: 'What must change' }] })}
@@ -102,6 +103,26 @@ export function previousContext(prev: { title: string; plan?: Plan; files?: stri
     prev.plan ? `Previous plan: ${prev.plan.summary}\n${prev.plan.tasks.map(t => `- [${t.role}] ${t.text}`).join('\n')}` : '',
     prev.files?.length ? `Files changed so far:\n${prev.files.map(f => `- ${f}`).join('\n')}` : ''].filter(Boolean).join('\n');
   return `This continues earlier work whose conversation is no longer available. ${DATA_RULE}\n${block('previous-work', body)}\n\n`;
+}
+
+/** File list with per-file +/- line counts (the review prompt's overview of the combined diff). */
+export function diffSummary(files: DiffFile[]): string {
+  return files.map(f => {
+    let add = 0, del = 0;
+    for (const l of f.patch.split('\n')) {
+      if (l.startsWith('+') && !l.startsWith('+++')) add++;
+      else if (l.startsWith('-') && !l.startsWith('---')) del++;
+    }
+    return `- ${f.path} (+${add} -${del})`;
+  }).join('\n');
+}
+
+/** Multi-repo projects: which subfolders are git repos, and how to run commands in them. */
+export function repoContext(names: string[]): string {
+  const n = names[0];
+  return `This is a multi-repo project: the working folder holds ${names.length} git repos, one per subfolder: ` +
+    `${names.map(r => `${r}/`).join(', ')}. File paths are relative to the working folder (e.g. ${n}/src/...). ` +
+    `Run git and build commands inside a repo's subfolder (e.g. git -C ${n} status, git -C ${n} diff, cd ${n} && npm test).`;
 }
 
 export function fixJsonPrompt(): string {

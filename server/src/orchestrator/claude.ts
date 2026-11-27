@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   applyTicketEvent, type AgentState, type GateDecision, type GateKind, type Plan, type PlanTask, type Project, type RoleId,
-  type ServerEvent, type Stage, type Ticket, type Workspace,
+  type RepoRef, type ServerEvent, type Stage, type Ticket, type Workspace,
 } from '@office/shared';
 import { ConflictError, ValidationError, type Orchestrator, type StartOptions } from './types';
 import { titleOf } from './fakeContent';
@@ -13,8 +13,8 @@ import * as realGit from '../claude/git';
 import { newTranslateContext, translate } from '../claude/translate';
 import { MAX_TURNS, ROLE_TOOLS } from '../claude/roles';
 import {
-  bouncePrompt, CONTINUE, deliverNotesPrompt, fixJsonPrompt, followUpPrompt, planPrompt, previousContext, reviewPrompt,
-  stagePrompt, testPrompt, withOwnerNotes,
+  bouncePrompt, CONTINUE, deliverNotesPrompt, diffSummary, fixJsonPrompt, followUpPrompt, planPrompt, previousContext,
+  repoContext, reviewPrompt, stagePrompt, testPrompt, withOwnerNotes,
 } from '../claude/prompts';
 import { extractJson, planValidator, reviewValidator, testValidator, type PlanWithMap } from '../claude/parse';
 
@@ -24,7 +24,7 @@ export { ConflictError };
 export interface Runner { run(o: RunOptions): Promise<RunResult> }
 export type GitApi = Pick<typeof realGit,
   'isRepo' | 'hasCommit' | 'baseInfo' | 'createWorktree' | 'commitAll' | 'diff' | 'mergeIntoBase' | 'removeWorktree' | 'slug'
-  | 'attachWorktree' | 'branchExists' | 'excludePath'>;
+  | 'attachWorktree' | 'branchExists' | 'excludePath' | 'detectRepos'>;
 
 export interface ClaudeOrchestratorOptions {
   log: TicketLog;
@@ -60,6 +60,14 @@ const AGENTS_DIR = path.join('.claude', 'agents');
 
 interface Issue { role: RoleId; file?: string; note: string }
 
+/** One repo's worktree for a ticket. Single-repo projects have one unit named '' whose path is the workspace. */
+interface Unit {
+  name: string; /** the owner's repo */ repo: string; /** its worktree */ path: string; branch: string;
+  base: { branch: string; head: string }; merged?: boolean;
+}
+/** Where the non-PM roles work: the one worktree (single repo) or a plain folder holding one worktree per repo. */
+interface Ws { path: string; multi: boolean; units: Unit[] }
+
 interface Run {
   ticket: Ticket; project: Project; seq: number;
   plan?: Plan; projectMap?: string;
@@ -70,8 +78,9 @@ interface Run {
   aborts: Set<AbortController>;
   inflight: Set<Promise<unknown>>;
   notes: Partial<Record<RoleId, string[]>>;
-  base?: { branch: string; head: string };
-  wt?: { path: string; branch: string };
+  ws?: Ws;
+  /** Multi-repo project: the repos detected when the ticket started. */
+  repos?: RepoRef[];
   usage: { turns: number; costUsd: number; durationMs: number };
   /** The final merge is in progress: cancel is refused. */
   merging?: boolean;
@@ -173,10 +182,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     run.sessions = { ...(ticket.sessions ?? {}) };
     run.plan = ticket.plan;
     if (ticket.usage) run.usage = { ...ticket.usage };
-    if (ticket.workspace) {
-      run.wt = { path: ticket.workspace.worktree, branch: ticket.workspace.branch };
-      run.base = { ...ticket.workspace.base };
-    }
+    if (ticket.workspace) run.ws = restoreWs(project.folder, ticket.workspace);
     run.continuing = new Set(Object.keys(run.sessions) as RoleId[]);
     run.resumeFrom = { stage: ticket.stage };
     if (ticket.parentTicketId) run.parent = this.parentOf(ticket);
@@ -289,7 +295,12 @@ export class ClaudeOrchestrator implements Orchestrator {
 
   private async start(run: Run) {
     const folder = run.project.folder;
-    if (!(await this.git.isRepo(folder)) || !(await this.git.hasCommit(folder))) {
+    // detection runs at every ticket start: repos may have been added to a multi-repo folder since
+    const found = await this.git.detectRepos(folder);
+    this.alive(run);
+    if (found.kind === 'multi') run.repos = found.repos;
+    else run.repos = undefined;
+    if (found.kind === 'none' || (found.kind === 'single' && !(await this.git.hasCommit(folder)))) {
       this.alive(run);
       this.message(run, 'pm', `"${folder}" is not a git repository with at least one commit. ` +
         'Pixel Office works on a git branch so your files stay safe. Use "Initialize git" and try again.');
@@ -335,9 +346,9 @@ export class ClaudeOrchestrator implements Orchestrator {
     }
     this.summonTeam(run);
     await this.prepareWorktree(run);
-    if (run.base && run.wt) {
+    if (run.ws) {
       // refresh the fallback context with what the branch already holds (best effort)
-      const files = await this.git.diff(run.project.folder, run.base.head, run.wt.branch).catch(() => []);
+      const files = await this.diffAll(run).catch(() => []);
       this.alive(run);
       if (files.length) run.fallback = previousContext({ title: run.ticket.title, plan: run.plan, files: files.map(f => f.path) });
     }
@@ -376,7 +387,8 @@ export class ClaudeOrchestrator implements Orchestrator {
       prompt = planPrompt(run.ticket, run.project, readMap());
       if (note) prompt += `\n\nOwner note on the previous plan:\n<owner-note>\n${note}\n</owner-note>`;
     }
-    prompt = this.withNotes(run, 'pm', prompt);
+    prompt = this.withNotes(run, 'pm', this.ctx(run, prompt));
+    if (fresh) fresh = this.ctx(run, fresh);
     const plan = await this.structured(run, 'pm', 'plan', folder, prompt, resume, planValidator(run.project.team), 'plan', fresh);
     const { projectMap, ...clean } = plan;
     run.plan = clean;
@@ -389,43 +401,106 @@ export class ClaudeOrchestrator implements Orchestrator {
 
   private async prepareWorktree(run: Run) {
     const folder = run.project.folder;
-    if (run.wt) {
-      // Resume: the worktree may have been removed since; re-attach the branch
-      if (!fs.existsSync(path.join(run.wt.path, '.git'))) run.wt = await this.git.attachWorktree(folder, run.wt.path, run.wt.branch);
+    if (run.ws) {
+      // Resume: the worktrees may have been removed since; re-attach the branches
+      await this.attachAll(run.ws);
       this.alive(run);
       await this.provisionAgents(run);
       return;
     }
     const pws = run.parent?.workspace;
-    if (pws && !pws.merged && await this.git.branchExists(folder, pws.branch)) {
-      // follow-up of an unmerged ticket: continue on the same branch (worktree recreated if removed)
-      run.base = { ...pws.base };
-      run.wt = await this.git.attachWorktree(folder, pws.worktree, pws.branch);
-      this.alive(run);
-      await this.provisionAgents(run);
-      this.workspace(run);
-      this.log(run, 'pm', `Continuing on branch ${run.wt.branch}`);
-      return;
+    if (pws && !pws.merged) {
+      const ws = restoreWs(folder, pws);
+      for (const u of ws.units) delete u.merged;
+      let all = true;
+      for (const u of ws.units) if (!(await this.git.branchExists(u.repo, u.branch))) { all = false; break; }
+      if (all) {
+        // follow-up of an unmerged ticket: continue on the same branch(es) (worktrees recreated if removed)
+        run.ws = ws;
+        await this.attachAll(ws);
+        this.alive(run);
+        await this.provisionAgents(run);
+        this.workspace(run);
+        this.log(run, 'pm', `Continuing on branch ${ws.units[0].branch}`);
+        return;
+      }
     }
-    const info = await this.git.baseInfo(folder);
-    this.alive(run);
-    run.base = { branch: info.branch, head: info.head };
-    const wtPath = path.join(this.opts.dataDir, 'worktrees', run.project.id, run.ticket.id);
+    const wsPath = path.join(this.opts.dataDir, 'worktrees', run.project.id, run.ticket.id);
     const branch = `office/${this.git.slug(run.ticket.title)}-${run.ticket.id.slice(0, 6)}`;
-    run.wt = await this.git.createWorktree(folder, wtPath, branch, info.head);
-    if (run.ended) { await this.git.removeWorktree(folder, run.wt.path); throw new Ended(); }
+    if (run.repos?.length) {
+      // multi-repo: the workspace is a plain folder with one worktree per repo, same branch name in each
+      fs.mkdirSync(wsPath, { recursive: true });
+      const ws: Ws = { path: wsPath, multi: true, units: [] };
+      try {
+        for (const r of run.repos) {
+          const info = await this.git.baseInfo(r.path);
+          const wt = await this.git.createWorktree(r.path, path.join(wsPath, r.name), branch, info.head);
+          ws.units.push({ name: r.name, repo: r.path, path: wt.path, branch: wt.branch, base: { branch: info.branch, head: info.head } });
+        }
+      } catch (e) {
+        await this.removeWs(ws);
+        throw e;
+      }
+      run.ws = ws;
+    } else {
+      const info = await this.git.baseInfo(folder);
+      this.alive(run);
+      const wt = await this.git.createWorktree(folder, wsPath, branch, info.head);
+      run.ws = { path: wt.path, multi: false, units: [{ name: '', repo: folder, path: wt.path, branch: wt.branch, base: { branch: info.branch, head: info.head } }] };
+    }
+    if (run.ended || this.stopping) { await this.removeWs(run.ws); throw new Ended(); }
     await this.provisionAgents(run);
     this.workspace(run);
-    if (run.projectMap) {
-      const f = path.join(run.wt.path, MAP_FILE);
+    const ws = run.ws;
+    if (run.projectMap && !ws.multi) {
+      const f = path.join(ws.path, MAP_FILE);
       fs.mkdirSync(path.dirname(f), { recursive: true });
       fs.writeFileSync(f, run.projectMap);
     }
-    if (info.branch === 'HEAD') {
-      this.message(run, 'pm', 'Heads-up: your project folder is on a detached HEAD (not on a branch). I will work on a new branch, ' +
+    const detached = ws.units.filter(u => u.base.branch === 'HEAD');
+    if (detached.length) {
+      const where = ws.multi ? `${detached.map(u => u.name).join(', ')} ${detached.length > 1 ? 'are' : 'is'}` : 'your project folder is';
+      this.message(run, 'pm', `Heads-up: ${where} on a detached HEAD (not on a branch). I will work on a new branch, ` +
         'but it cannot be merged automatically at the end; you will get the commands to run.');
     }
-    this.log(run, 'pm', `Working on branch ${run.wt.branch} (base ${info.branch} @ ${info.head.slice(0, 7)})`);
+    if (!ws.multi) {
+      const u = ws.units[0];
+      this.log(run, 'pm', `Working on branch ${u.branch} (base ${u.base.branch} @ ${u.base.head.slice(0, 7)})`);
+    } else {
+      this.log(run, 'pm', `Working on branch ${ws.units[0].branch} in ` +
+        ws.units.map(u => `${u.name} (base ${u.base.branch} @ ${u.base.head.slice(0, 7)}${u.branch !== ws.units[0].branch ? `, branch ${u.branch}` : ''})`).join(', '));
+    }
+  }
+
+  /** Re-attach every unit's branch whose worktree is gone (Resume / follow-up after the worktree was removed). */
+  private async attachAll(ws: Ws) {
+    if (ws.multi) fs.mkdirSync(ws.path, { recursive: true });
+    for (const u of ws.units) {
+      if (!fs.existsSync(path.join(u.path, '.git'))) u.path = (await this.git.attachWorktree(u.repo, u.path, u.branch)).path;
+    }
+  }
+
+  /** Remove every unit's worktree (branches kept) and the workspace folder. */
+  private async removeWs(ws: Ws) {
+    for (const u of ws.units) await this.git.removeWorktree(u.repo, u.path).catch(() => undefined);
+    if (ws.multi) fs.rmSync(ws.path, { recursive: true, force: true, maxRetries: 5 });
+  }
+
+  /** The branch diff of every unit; multi-repo paths are prefixed with `<repo>/`. */
+  private async diffAll(run: Run) {
+    const ws = run.ws!;
+    const out: { path: string; patch: string }[] = [];
+    for (const u of ws.units) {
+      const files = await this.git.diff(u.repo, u.base.head, u.branch);
+      out.push(...(ws.multi ? files.map(f => ({ ...f, path: `${u.name}/${f.path}` })) : files));
+    }
+    return out;
+  }
+
+  /** Multi-repo projects: tell the agent which subfolders are repos. */
+  private ctx(run: Run, prompt: string): string {
+    const names = run.ws?.multi ? run.ws.units.map(u => u.name) : (run.repos ?? []).map(r => r.name);
+    return names.length ? `${prompt}\n\n${repoContext(names)}` : prompt;
   }
 
   /**
@@ -434,16 +509,17 @@ export class ClaudeOrchestrator implements Orchestrator {
    * the folder so commitAll never commits them.
    */
   private async provisionAgents(run: Run) {
-    if (!run.wt) return;
+    if (!run.ws) return;
     const src = path.join(run.project.folder, AGENTS_DIR);
-    const dst = path.join(run.wt.path, AGENTS_DIR);
+    const dst = path.join(run.ws.path, AGENTS_DIR);
     const files = fs.existsSync(src) ? fs.readdirSync(src).filter(f => f.endsWith('.md')) : [];
     for (const f of files) {
       if (fs.existsSync(path.join(dst, f))) continue; // tracked in the repo (or already copied): keep the branch's copy
       fs.mkdirSync(dst, { recursive: true });
       fs.copyFileSync(path.join(src, f), path.join(dst, f));
     }
-    await this.git.excludePath(run.wt.path, '/.claude/agents/');
+    // a multi-repo workspace root is not a repo: nothing to exclude there
+    if (!run.ws.multi) await this.git.excludePath(run.ws.path, '/.claude/agents/');
     this.alive(run);
   }
 
@@ -494,7 +570,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     const stage = PIPELINE.slice(start).find(s => this.rolesFor(run, s).length > 0);
     if (stage) return this.runStage(run, stage);
     await this.commit(run, 'office: final');
-    const files = await this.git.diff(run.project.folder, run.base!.head, run.wt!.branch);
+    const files = await this.diffAll(run);
     this.alive(run);
     this.emit(run, { type: 'ticket.diff', files });
     this.message(run, 'pm', 'All stages done. Please review the final changes.');
@@ -506,20 +582,22 @@ export class ClaudeOrchestrator implements Orchestrator {
     const roles = this.rolesFor(run, stage);
     this.emit(run, { type: 'ticket.stage', stage, roles });
     for (const r of roles) this.state(run, r, STAGE_STATE[stage]);
-    const cwd = run.wt!.path;
+    const cwd = run.ws!.path;
     const team = run.project.team;
 
     if (stage === 'review' || stage === 'test') {
       const issues: Issue[] = [];
       const unassigned: Issue[] = [];
       let approved = true;
+      const summary = stage === 'review' ? diffSummary(await this.diffAll(run)) : '';
+      this.alive(run);
       await Promise.all(roles.map(async role => {
         if (stage === 'review') {
-          const v = await this.structured(run, role, 'review', cwd, this.withNotes(run, role, reviewPrompt(run.plan!)), run.sessions[role], reviewValidator(team), 'review');
+          const v = await this.structured(run, role, 'review', cwd, this.withNotes(run, role, this.ctx(run, reviewPrompt(run.plan!, summary))), run.sessions[role], reviewValidator(team), 'review');
           if (!v.approved || v.issues.length || v.unassigned.length) approved = false;
           issues.push(...v.issues); unassigned.push(...v.unassigned);
         } else {
-          const v = await this.structured(run, role, 'test', cwd, this.withNotes(run, role, testPrompt(run.plan!)), run.sessions[role], testValidator(team), 'test results');
+          const v = await this.structured(run, role, 'test', cwd, this.withNotes(run, role, this.ctx(run, testPrompt(run.plan!))), run.sessions[role], testValidator(team), 'test results');
           if (!v.passed || v.failures.length || v.unassigned.length) approved = false;
           issues.push(...v.failures); unassigned.push(...v.unassigned);
         }
@@ -560,7 +638,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     await Promise.all(roles.map(role => {
       const task = run.plan!.tasks.filter(t => t.role === role);
       const merged: PlanTask = { role, text: task.map(t => t.text).join('\n'), files: task.flatMap(t => t.files) };
-      const prompt = stagePrompt(stage, role, merged, run.plan!, this.takeNotes(run, role));
+      const prompt = this.ctx(run, stagePrompt(stage, role, merged, run.plan!, this.takeNotes(run, role)));
       return this.exec(run, role, stage, cwd, prompt, run.sessions[role]);
     }));
     this.alive(run);
@@ -581,7 +659,7 @@ export class ClaudeOrchestrator implements Orchestrator {
       const mine = issues.filter(i => i.role === role);
       const notes = this.takeNotes(run, role);
       const extra = notes.length ? mine.concat(notes.map(n => ({ role, note: `Owner: ${n}` }))) : mine;
-      return this.exec(run, role, 'build', run.wt!.path, bouncePrompt(extra), run.sessions[role]);
+      return this.exec(run, role, 'build', run.ws!.path, bouncePrompt(extra), run.sessions[role]);
     }));
     this.alive(run);
     await this.commit(run, `office: fixes (${owners.join(', ')})`);
@@ -603,26 +681,87 @@ export class ClaudeOrchestrator implements Orchestrator {
   }
 
   private async approveFinal(run: Run) {
-    const folder = run.project.folder;
-    const { branch } = run.wt!;
-    const changes = await this.git.diff(folder, run.base!.head, branch);
+    const ws = run.ws!;
+    const changed: Unit[] = [];
+    for (const u of ws.units) if ((await this.git.diff(u.repo, u.base.head, u.branch)).length) changed.push(u);
     this.alive(run);
-    if (!changes.length) {
+    if (!changed.length) {
       this.message(run, 'pm', 'No changes were made — nothing to merge.');
-      await this.git.removeWorktree(folder, run.wt!.path).catch(() => undefined);
+      await this.removeWs(ws);
       this.finish(run, 'done');
       return;
     }
-    const res = await this.git.mergeIntoBase(folder, branch, run.base!.branch);
-    this.alive(run);
-    if (res.merged) {
-      this.workspace(run, true);
-      this.message(run, 'pm', `Merged ${branch} into ${run.base!.branch}.`);
+    if (!ws.multi) {
+      const u = ws.units[0];
+      const res = await this.git.mergeIntoBase(u.repo, u.branch, u.base.branch);
+      this.alive(run);
+      if (res.merged) {
+        this.workspace(run, true);
+        this.message(run, 'pm', `Merged ${u.branch} into ${u.base.branch}.`);
+      } else {
+        this.message(run, 'pm', `Merge pending: ${res.reason}\nYour work is safe on branch ${u.branch}. To merge it yourself, run:\n${res.instructions}`);
+      }
     } else {
-      this.message(run, 'pm', `Merge pending: ${res.reason}\nYour work is safe on branch ${branch}. To merge it yourself, run:\n${res.instructions}`);
+      await this.mergeAll(run, changed);
     }
-    await this.git.removeWorktree(folder, run.wt!.path).catch(() => undefined);
+    if (ws.multi && run.projectMap) {
+      // the workspace root is not a repo: after approval the project map goes straight into the owner's folder
+      const f = path.join(run.project.folder, MAP_FILE);
+      if (!fs.existsSync(f)) { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, run.projectMap); }
+    }
+    await this.removeWs(ws);
     this.finish(run, 'done');
+  }
+
+  /**
+   * Multi-repo final merge: preflight every changed repo first (on its base branch, clean); any problem → merge none.
+   * Then merge them one by one; a failure stops there and reports what was merged (with revert lines) and what wasn't.
+   */
+  private async mergeAll(run: Run, changed: Unit[]) {
+    const manual = (u: Unit) => `cd "${u.repo}"\ngit checkout ${u.base.branch}\ngit merge --no-ff ${u.branch}`;
+    const problems: { u: Unit; reason: string; instructions: string }[] = [];
+    for (const u of changed) {
+      const info = await this.git.baseInfo(u.repo);
+      if (u.base.branch === 'HEAD') {
+        problems.push({ u, reason: 'the work started from a detached HEAD, so there is no branch to merge into',
+          instructions: `cd "${u.repo}"\ngit checkout <your-branch>\ngit merge --no-ff ${u.branch}` });
+      } else if (info.branch === 'HEAD') {
+        problems.push({ u, reason: 'the repo is not on a branch (detached HEAD)', instructions: manual(u) });
+      } else if (info.branch !== u.base.branch) {
+        problems.push({ u, reason: `the base branch "${u.base.branch}" is not checked out (currently on "${info.branch}")`, instructions: manual(u) });
+      } else if (!info.clean) {
+        problems.push({ u, reason: 'it has uncommitted changes',
+          instructions: `cd "${u.repo}"\n# commit or stash your changes, then:\ngit checkout ${u.base.branch}\ngit merge --no-ff ${u.branch}` });
+      }
+    }
+    this.alive(run);
+    if (problems.length) {
+      const instr = changed.map(u => `# ${u.name}\n${problems.find(p => p.u === u)?.instructions ?? manual(u)}`).join('\n\n');
+      this.message(run, 'pm', `Nothing was merged: ${problems.map(p => `${p.u.name}: ${p.reason}`).join('; ')}.\n` +
+        `Your work is safe on branch ${changed[0].branch} in ${changed.map(u => u.name).join(', ')}. To merge it yourself, run:\n${instr}`);
+      return;
+    }
+    const merged: { u: Unit; sha: string }[] = [];
+    for (let i = 0; i < changed.length; i++) {
+      const u = changed[i];
+      const res = await this.git.mergeIntoBase(u.repo, u.branch, u.base.branch);
+      if (res.merged) {
+        u.merged = true;
+        merged.push({ u, sha: (await this.git.baseInfo(u.repo)).head });
+        continue;
+      }
+      const rest = changed.slice(i + 1);
+      this.workspace(run);
+      const undo = merged.length
+        ? `Already merged: ${merged.map(m => m.u.name).join(', ')}. To undo, run:\n${merged.map(m => `cd "${m.u.repo}"\ngit revert -m 1 ${m.sha}`).join('\n')}\n`
+        : '';
+      const instr = [`# ${u.name}\n${res.instructions}`, ...rest.map(r => `# ${r.name}\n${manual(r)}`)].join('\n\n');
+      this.message(run, 'pm', `Merge stopped at ${u.name}: ${res.reason}\n${undo}` +
+        `Not merged: ${[u, ...rest].map(r => r.name).join(', ')}. Your work is safe on branch ${u.branch}. To merge it yourself, run:\n${instr}`);
+      return;
+    }
+    this.workspace(run, true);
+    this.message(run, 'pm', merged.map(m => `Merged ${m.u.branch} into ${m.u.base.branch} in ${m.u.name}.`).join('\n'));
   }
 
   // ---- runs ----
@@ -728,10 +867,10 @@ export class ClaudeOrchestrator implements Orchestrator {
   private async deliverNotes(run: Run, role: RoleId): Promise<void> {
     if (!run.notes[role]?.length || !run.sessions[role] || run.ended) return;
     // a non-PM role only ever works in the worktree: with none yet, keep the notes for its next step
-    if (role !== 'pm' && !run.wt) return;
+    if (role !== 'pm' && !run.ws) return;
     const notes = this.takeNotes(run, role);
     const stage = role === 'pm' ? 'plan' : (PIPELINE.find(s => STAGE_ROLES[s].includes(role)) ?? 'build');
-    const cwd = role === 'pm' ? run.project.folder : run.wt!.path;
+    const cwd = role === 'pm' ? run.project.folder : run.ws!.path;
     try { await this.exec(run, role, stage, cwd, deliverNotesPrompt(notes), run.sessions[role]); }
     catch (err) {
       if (err instanceof Ended || run.ended) return;
@@ -740,14 +879,23 @@ export class ClaudeOrchestrator implements Orchestrator {
   }
 
   private workspace(run: Run, merged = false) {
-    if (!run.wt || !run.base) return;
-    const ws: Workspace = { branch: run.wt.branch, worktree: run.wt.path, base: { ...run.base }, ...(merged ? { merged } : {}) };
-    this.emit(run, { type: 'ticket.workspace', workspace: ws });
+    const ws = run.ws;
+    if (!ws) return;
+    const first = ws.units[0];
+    const w: Workspace = { branch: first.branch, worktree: ws.path, base: { ...first.base }, ...(merged ? { merged } : {}) };
+    if (ws.multi) {
+      w.repos = ws.units.map(u => ({
+        name: u.name, path: u.path, branch: u.branch, base: { ...u.base }, detached: u.base.branch === 'HEAD',
+        ...(u.merged ? { merged: true } : {}),
+      }));
+    }
+    this.emit(run, { type: 'ticket.workspace', workspace: w });
   }
 
+  /** Commit every unit's worktree (ones with no changes are skipped). */
   private async commit(run: Run, msg: string) {
-    if (!run.wt) return;
-    await this.git.commitAll(run.wt.path, msg);
+    if (!run.ws) return;
+    for (const u of run.ws.units) await this.git.commitAll(u.path, msg);
     this.alive(run);
   }
 
@@ -759,10 +907,10 @@ export class ClaudeOrchestrator implements Orchestrator {
     for (const ac of run.aborts) ac.abort();
     run.aborts.clear();
     // cancel removes the worktree (branch kept); a failed ticket keeps it so its work can be inspected/resumed
-    if (how === 'cancelled' && run.wt) {
-      const wt = run.wt;
+    if (how === 'cancelled' && run.ws) {
+      const ws = run.ws;
       const inflight = [...run.inflight];
-      const p = Promise.allSettled(inflight).then(() => this.git.removeWorktree(run.project.folder, wt.path)).catch(() => undefined);
+      const p = Promise.allSettled(inflight).then(() => this.removeWs(ws)).catch(() => undefined);
       this.pending.add(p);
       void p.finally(() => this.pending.delete(p));
     }
@@ -799,6 +947,20 @@ export class ClaudeOrchestrator implements Orchestrator {
     this.opts.log.append(e);
     for (const l of this.listeners) l(e);
   }
+}
+
+/** Rebuild the per-repo worktrees from a persisted workspace (old single-repo shape has no `repos`). */
+function restoreWs(folder: string, w: Workspace): Ws {
+  if (w.repos?.length) {
+    return {
+      path: w.worktree, multi: true,
+      units: w.repos.map(r => ({
+        name: r.name, repo: path.join(folder, r.name), path: r.path, branch: r.branch, base: { ...r.base },
+        ...(r.merged ? { merged: true } : {}),
+      })),
+    };
+  }
+  return { path: w.worktree, multi: false, units: [{ name: '', repo: folder, path: w.worktree, branch: w.branch, base: { ...w.base } }] };
 }
 
 const roleName = (r: RoleId) => r === 'pm' ? 'The PM' : `The ${r} agent`;

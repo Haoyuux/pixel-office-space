@@ -802,3 +802,222 @@ describe('ClaudeOrchestrator: follow-ups, resume, messages', () => {
     expect(runner.of('pm').at(-1)!.o.prompt).toContain('Nice work');
   });
 });
+
+describe('ClaudeOrchestrator: multi-repo projects', () => {
+  let parent: string;
+  let fe: string, be: string;
+  const NAMES = ['angular', 'aspnet-core'];
+  const wsOf = (id: string) => path.join(dataDir, 'worktrees', 'p1', id);
+  const writes = () => {
+    runner.script = (c): Reply | undefined => c.kind !== 'stage' ? undefined
+      : c.o.role === 'frontend' ? { result: 'done', write: { 'angular/ui.txt': 'ui\n' } }
+        : c.o.role === 'backend' ? { result: 'done', write: { 'aspnet-core/api.txt': 'api\n' } } : undefined;
+  };
+  beforeEach(() => {
+    parent = tmp('po-multi-');
+    for (const n of NAMES) {
+      const d = path.join(parent, n);
+      fs.mkdirSync(d);
+      fs.writeFileSync(path.join(d, 'a.txt'), `${n}\n`);
+      git(d, 'init', '-q', '-b', 'main'); git(d, 'add', '-A'); git(d, 'commit', '-q', '-m', 'init');
+    }
+    fe = path.join(parent, 'angular'); be = path.join(parent, 'aspnet-core');
+    const agents = path.join(parent, '.claude', 'agents');
+    fs.mkdirSync(agents, { recursive: true });
+    for (const r of CORE) fs.writeFileSync(path.join(agents, `${r}.md`), `agent ${r}\n`);
+  });
+
+  it('a parent of repos is not "not a git repo"; PM plans in the parent with the repos named', async () => {
+    const o = make();
+    const t = await toPlanGate(o, parent);
+    expect(o.find(t.id)!.status).toBe('waiting');
+    const pm = runner.of('pm')[0].o;
+    expect(pm.cwd).toBe(parent);
+    expect(pm.prompt).toContain('angular/');
+    expect(pm.prompt).toContain('aspnet-core/');
+  });
+
+  it('workspace: one worktree per repo on the same branch, agents copied, non-PM cwd = workspace, per-repo commits, prefixed diff', async () => {
+    const o = make();
+    const t = await toPlanGate(o, parent);
+    writes();
+    o.decide(t.id, 'plan', 'approved');
+    await o.idle();
+    const ws = wsOf(t.id);
+    const w = o.find(t.id)!.workspace!;
+    expect(w.worktree).toBe(ws);
+    expect(w.repos!.map(r => r.name)).toEqual(NAMES);
+    for (const r of w.repos!) {
+      expect(r.path).toBe(path.join(ws, r.name));
+      expect(r.branch).toBe(w.branch);
+      expect(r.base.branch).toBe('main');
+      expect(r.detached).toBe(false);
+      expect(git(r.path, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(w.branch);
+    }
+    expect(w.repos![0].base.head).toBe(git(fe, 'rev-parse', 'HEAD'));
+    expect(w.repos![1].base.head).toBe(git(be, 'rev-parse', 'HEAD'));
+    expect(fs.readFileSync(path.join(ws, '.claude', 'agents', 'frontend.md'), 'utf8')).toBe('agent frontend\n');
+    for (const role of ['frontend', 'backend', 'techlead', 'qa'] as RoleId[]) {
+      for (const c of runner.of(role)) expect(c.o.cwd).toBe(ws);
+    }
+    expect(runner.of('frontend', 'stage')[0].o.prompt).toContain('aspnet-core/');
+    expect(git(path.join(ws, 'angular'), 'log', '--format=%s')).toContain('office: build (frontend, backend)');
+    expect(git(path.join(ws, 'aspnet-core'), 'log', '--format=%s')).toContain('office: build (frontend, backend)');
+    const files = of('ticket.diff').at(-1)!.files.map(f => f.path).sort();
+    expect(files).toEqual(['angular/ui.txt', 'aspnet-core/api.txt']);
+    const review = runner.of('techlead', 'review')[0].o.prompt;
+    expect(review).toContain('angular/ui.txt');
+    expect(review).toMatch(/aspnet-core\/api\.txt \(\+1/);
+    expect(o.find(t.id)!.openGate).toBe('final');
+    // owner's repos untouched before approval
+    expect(fs.existsSync(path.join(fe, 'ui.txt'))).toBe(false);
+  });
+
+  it('re-detects repos at ticket start (project record without repos still works as multi-repo)', async () => {
+    const o = make();
+    const t = await toPlanGate(o, parent);
+    writes();
+    o.decide(t.id, 'plan', 'approved');
+    await o.idle();
+    expect(o.find(t.id)!.workspace!.repos).toHaveLength(2);
+  });
+
+  it('final approve merges every changed repo, never an unchanged one; cleans up worktrees + workspace', async () => {
+    const o = make();
+    const t = await toPlanGate(o, parent);
+    runner.script = c => c.kind === 'stage' && c.o.role === 'frontend' ? { result: 'done', write: { 'angular/ui.txt': 'ui\n' } }
+      : c.kind === 'stage' ? { result: 'done' } : undefined;
+    o.decide(t.id, 'plan', 'approved');
+    await o.idle();
+    const beHead = git(be, 'rev-parse', 'HEAD');
+    const feHead = git(fe, 'rev-parse', 'HEAD');
+    o.decide(t.id, 'final', 'approved');
+    await o.idle();
+    expect(o.find(t.id)!.status).toBe('done');
+    expect(git(fe, 'rev-parse', 'HEAD')).not.toBe(feHead);
+    expect(fs.existsSync(path.join(fe, 'ui.txt'))).toBe(true);
+    expect(git(be, 'rev-parse', 'HEAD')).toBe(beHead);
+    expect(fs.existsSync(wsOf(t.id))).toBe(false);
+    expect(git(fe, 'worktree', 'list')).not.toContain(t.id);
+    expect(git(be, 'worktree', 'list')).not.toContain(t.id);
+    expect(pmText()).toMatch(/Merged office\/.* into main in angular/);
+    const w = o.find(t.id)!.workspace!;
+    expect(w.merged).toBe(true);
+    expect(w.repos!.find(r => r.name === 'angular')!.merged).toBe(true);
+    expect(w.repos!.find(r => r.name === 'aspnet-core')!.merged).toBeUndefined();
+  });
+
+  it('preflight: one changed repo dirty → nothing merged, per-repo instructions, done', async () => {
+    const o = make();
+    const t = await toPlanGate(o, parent);
+    writes();
+    o.decide(t.id, 'plan', 'approved');
+    await o.idle();
+    const heads = [git(fe, 'rev-parse', 'HEAD'), git(be, 'rev-parse', 'HEAD')];
+    fs.writeFileSync(path.join(be, 'dirty.txt'), 'x');
+    o.decide(t.id, 'final', 'approved');
+    await o.idle();
+    expect(o.find(t.id)!.status).toBe('done');
+    expect([git(fe, 'rev-parse', 'HEAD'), git(be, 'rev-parse', 'HEAD')]).toEqual(heads);
+    const text = pmText();
+    expect(text).toMatch(/Nothing was merged/);
+    expect(text).toContain('aspnet-core');
+    expect(text).toContain(`cd "${fe}"`);
+    expect(text).toContain(`cd "${be}"`);
+    expect(o.find(t.id)!.workspace!.merged).toBeUndefined();
+  });
+
+  it('a merge failing part-way: earlier repos merged (with revert lines), later ones not (with manual commands)', async () => {
+    const o = make();
+    const t = await toPlanGate(o, parent);
+    writes();
+    o.decide(t.id, 'plan', 'approved');
+    await o.idle();
+    // the owner commits a conflicting file in aspnet-core meanwhile
+    fs.writeFileSync(path.join(be, 'api.txt'), 'mine\n');
+    git(be, 'add', '-A'); git(be, 'commit', '-q', '-m', 'mine');
+    const beHead = git(be, 'rev-parse', 'HEAD');
+    o.decide(t.id, 'final', 'approved');
+    await o.idle();
+    expect(o.find(t.id)!.status).toBe('done');
+    const feMerge = git(fe, 'rev-parse', 'HEAD');
+    expect(git(fe, 'log', '-1', '--format=%s')).toMatch(/^Merge office\//);
+    expect(git(be, 'rev-parse', 'HEAD')).toBe(beHead);
+    const text = pmText();
+    expect(text).toContain(`git revert -m 1 ${feMerge}`);
+    expect(text).toMatch(/aspnet-core.*not merged/is);
+    expect(text).toContain(`cd "${be}"`);
+    const w = o.find(t.id)!.workspace!;
+    expect(w.merged).toBeUndefined();
+    expect(w.repos!.find(r => r.name === 'angular')!.merged).toBe(true);
+  });
+
+  it('cancel removes every repo worktree and the workspace folder; branches kept', async () => {
+    const o = make();
+    const t = await toPlanGate(o, parent);
+    runner.script = c => c.kind === 'stage' ? { hang: true } : undefined;
+    o.decide(t.id, 'plan', 'approved');
+    await until(() => runner.of('frontend', 'stage').length === 1);
+    expect(fs.existsSync(path.join(wsOf(t.id), 'angular', '.git'))).toBe(true);
+    o.cancel(t.id);
+    await o.idle();
+    expect(fs.existsSync(wsOf(t.id))).toBe(false);
+    for (const r of [fe, be]) {
+      expect(git(r, 'branch', '--list', 'office/*')).toContain('office/');
+      expect(git(r, 'worktree', 'list')).not.toContain(t.id);
+    }
+  });
+
+  it('resume after a restart rebuilds the workspace from the log (worktrees recreated)', async () => {
+    const o = make();
+    runner.script = c => c.o.role === 'frontend' && c.kind === 'stage' ? { hang: true }
+      : c.o.role === 'backend' && c.kind === 'stage' ? { result: 'done', write: { 'aspnet-core/api.txt': 'api\n' } } : undefined;
+    const t = await toPlanGate(o, parent);
+    o.decide(t.id, 'plan', 'approved');
+    await until(() => runner.of('frontend', 'stage').length === 1 && runner.of('backend', 'stage')[0]?.ended !== undefined);
+    await o.shutdown(50);
+    const log = new TicketLog(path.join(dataDir, 'tickets'));
+    log.recover();
+    // the workspace was removed meanwhile
+    for (const r of [fe, be]) git(r, 'worktree', 'remove', '--force', path.join(wsOf(t.id), path.basename(r)));
+    fs.rmSync(wsOf(t.id), { recursive: true, force: true });
+    const r2 = new FakeRunner();
+    // (the interrupted stage's uncommitted work went with the removed worktree: both builders redo theirs)
+    r2.script = (c): Reply | undefined => c.kind !== 'stage' ? undefined
+      : c.o.role === 'frontend' ? { result: 'done', write: { 'angular/ui.txt': 'ui\n' } }
+        : c.o.role === 'backend' ? { result: 'done', write: { 'aspnet-core/api.txt': 'api\n' } } : undefined;
+    const ev: ServerEvent[] = [];
+    const o2 = new ClaudeOrchestrator({ log, runner: r2, dataDir, getProject: () => project(parent) });
+    o2.onEvent(e => ev.push(e));
+    o2.resume(t.id);
+    await o2.idle();
+    expect(r2.of('frontend', 'stage')[0].o.cwd).toBe(wsOf(t.id));
+    expect(o2.find(t.id)!.openGate).toBe('final');
+    const diff = ev.filter(e => e.type === 'ticket.diff').at(-1) as Extract<ServerEvent, { type: 'ticket.diff' }>;
+    expect(diff.files.map(f => f.path).sort()).toEqual(['angular/ui.txt', 'aspnet-core/api.txt']);
+  });
+
+  it('follow-up of an unmerged multi-repo parent continues on the same branch in every repo', async () => {
+    const o = make();
+    const t1 = await toPlanGate(o, parent);
+    writes();
+    o.decide(t1.id, 'plan', 'approved');
+    await o.idle();
+    fs.writeFileSync(path.join(fe, 'dirty.txt'), 'x');
+    o.decide(t1.id, 'final', 'approved');
+    await o.idle();
+    fs.rmSync(path.join(fe, 'dirty.txt'));
+    const pw = o.find(t1.id)!.workspace!;
+    expect(fs.existsSync(pw.worktree)).toBe(false);
+    const t2 = o.startTicket(project(parent), 'More', { parentTicketId: t1.id });
+    await o.idle();
+    o.decide(t2.id, 'plan', 'approved');
+    await o.idle();
+    const w = o.find(t2.id)!.workspace!;
+    expect(w.worktree).toBe(pw.worktree);
+    for (const r of w.repos!) {
+      expect(r.branch).toBe(pw.branch);
+      expect(git(r.path, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(pw.branch);
+    }
+  });
+});
