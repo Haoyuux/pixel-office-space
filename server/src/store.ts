@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, renameSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { ROLE_IDS, CHARACTERS, ACCENTS, type Accent, type AgentsMode, type Look, type Project, type RepoDetection, type RoleId } from '@office/shared';
+import { ROLE_IDS, CHARACTERS, ACCENTS, MODEL_CHOICES, type ModelChoice, type Accent, type AgentsMode, type Look, type Project, type RepoDetection, type RoleId } from '@office/shared';
 import { ValidationError, NotFoundError } from './errors';
 
 export { ValidationError, NotFoundError };
@@ -10,11 +10,15 @@ const PALETTES = ['a', 'b', 'c'] as const;
 const ALL_LOOKS: Look[] = PALETTES.flatMap(palette => CHARACTERS.map(character => ({ character, palette })));
 
 export interface ProjectInput { name: string; folder: string; accent: Accent; team: RoleId[]; agentsMode?: AgentsMode }
-export interface ProjectPatch { name?: string; accent?: Accent; team?: RoleId[]; agentsMode?: AgentsMode }
+export interface ProjectPatch { name?: string; accent?: Accent; team?: RoleId[]; agentsMode?: AgentsMode; model?: ModelChoice }
 export const AGENTS_MODES: AgentsMode[] = ['claude', 'simulated'];
 const checkMode = (m: unknown): AgentsMode => {
   if (!AGENTS_MODES.includes(m as AgentsMode)) throw new ValidationError(`Unknown agents mode: ${String(m)}`);
   return m as AgentsMode;
+};
+const checkModel = (m: unknown): ModelChoice => {
+  if (!MODEL_CHOICES.includes(m as ModelChoice)) throw new ValidationError(`model must be one of ${MODEL_CHOICES.join(', ')}`);
+  return m as ModelChoice;
 };
 /** Runs after validation and before anything is persisted; throwing aborts the change. */
 export type BeforeSave = (p: Project) => void;
@@ -81,6 +85,7 @@ export class ProjectStore {
     if (patch.accent !== undefined) next.accent = this.checkAccent(patch.accent);
     if (patch.team !== undefined) next.team = this.checkTeam(patch.team);
     if (patch.agentsMode !== undefined) next.agentsMode = checkMode(patch.agentsMode);
+    if (patch.model !== undefined) next.model = checkModel(patch.model);
     beforeSave?.(next);
     Object.assign(p, next);
     for (const k of Object.keys(p) as (keyof Project)[]) if (!(k in next)) delete p[k];

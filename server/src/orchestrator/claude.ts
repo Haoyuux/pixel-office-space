@@ -966,6 +966,12 @@ export class ClaudeOrchestrator implements Orchestrator {
     return p;
   }
 
+  /** The project's model, read fresh on every run (a change applies to the next run, also on resume); none for default. */
+  private modelOf(run: Run): { model?: string } {
+    const m = (this.opts.getProject?.(run.project.id) ?? run.project).model;
+    return m && m !== 'default' ? { model: m } : {};
+  }
+
   private async execNow(run: Run, role: RoleId, stage: Exclude<Stage, 'done'>, cwd: string, prompt: string, resume?: string): Promise<RunResult> {
     this.alive(run);
     const ac = new AbortController();
@@ -975,7 +981,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     let res: RunResult;
     try {
       res = await this.opts.runner.run({
-        cwd, role, prompt, resume, allowedTools: ROLE_TOOLS[role], maxTurns, signal: ac.signal,
+        cwd, role, prompt, resume, allowedTools: ROLE_TOOLS[role], maxTurns, signal: ac.signal, ...this.modelOf(run),
         onEvent: (e: RunnerEvent) => {
           if (run.ended) return;
           if (e.kind === 'init') this.session(run, role, e.sessionId);

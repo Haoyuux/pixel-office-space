@@ -384,6 +384,24 @@ describe('ClaudeOrchestrator', () => {
     expect(fs.existsSync(workspacePath(dataDir, 'p1', t.id))).toBe(false);
   });
 
+  it('passes project.model to every run; default/missing passes none; a changed model applies to the next run', async () => {
+    runner = new FakeRunner(); events = []; dataDir = tmp('po-data-');
+    const p = { ...project(repo), model: 'sonnet' as const };
+    const o = new ClaudeOrchestrator({ log: new TicketLog(path.join(dataDir, 'tickets')), runner, dataDir, getProject: () => p });
+    const t = o.startTicket(p, 'Add forgot password link');
+    await o.idle();
+    expect(runner.of('pm')[0].o.model).toBe('sonnet');
+    p.model = 'opus' as any;
+    o.decide(t.id, 'plan', 'changes', 'More');
+    await o.idle();
+    const re = runner.of('pm', 'replan')[0].o;
+    expect(re.resume).toBe('pm-s1');
+    expect(re.model).toBe('opus');
+    const o2 = make();
+    await toPlanGate(o2, mkRepo());
+    expect(runner.of('pm')[0].o.model).toBeUndefined();
+  });
+
   it('notes for a non-PM role are never delivered in the owner folder (kept until there is a worktree)', async () => {
     const o = make();
     const t = await toPlanGate(o, repo);
