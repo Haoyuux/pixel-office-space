@@ -4,6 +4,9 @@ import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-libra
 import type { Project, Ticket } from '@office/shared';
 import { useOffice, resetOffice } from '../src/state/store';
 import { Drawer } from '../src/ui/Drawer';
+import { Feed } from '../src/ui/Feed';
+import { Markdown } from '../src/ui/Markdown';
+import { highlight } from '../src/ui/highlight';
 
 const P: Project = { id: 'p', name: 'Shop', folder: '.', accent: 'cyan', team: ['pm', 'frontend'], slot: 0, looks: {} as Project['looks'], createdAt: '' };
 const tk = (id: string, o: Partial<Ticket> = {}): Ticket =>
@@ -91,5 +94,71 @@ describe('streaming, thinking, stop', () => {
     open([RUN]);
     fireEvent.click(screen.getByRole('button', { name: /stop/i }));
     await waitFor(() => expect(screen.getByText('nothing to stop')).toBeTruthy());
+  });
+});
+
+describe('copy, highlight, tables, links', () => {
+  const clip = () => {
+    const writeText = vi.fn(async (_: string) => {});
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    return writeText;
+  };
+
+  it('highlight(): keywords, strings, comments, numbers per language; unknown stays plain', () => {
+    const kinds = (code: string, lang: string) => highlight(code, lang).filter(t => t.cls).map(t => `${t.cls}:${t.text}`);
+    expect(kinds('const x = "a"; // hi', 'ts')).toEqual(['kw:const', 'str:"a"', 'com:// hi']);
+    expect(kinds('public List<int> N = Make(42);', 'csharp')).toEqual(['kw:public', 'type:List', 'kw:int', 'fn:Make', 'num:42']);
+    expect(kinds('SELECT id FROM users -- all', 'sql')).toEqual(['kw:SELECT', 'kw:FROM', 'com:-- all']);
+    expect(kinds('{"a": 1, "b": true}', 'json')).toEqual(['key:"a"', 'num:1', 'key:"b"', 'lit:true']);
+    expect(kinds('<div class="x">hi</div>', 'html')).toEqual(['tag:<div', 'attr:class', 'str:"x"', 'tag:>', 'tag:</div', 'tag:>']);
+    expect(kinds('.a { color: #fff; }', 'css')).toEqual(['prop:color', 'num:#fff']);
+    expect(kinds('echo $HOME # x', 'bash')).toEqual(['kw:echo', 'var:$HOME', 'com:# x']);
+    expect(kinds('Get-ChildItem -Path $dir', 'powershell')).toEqual(['fn:Get-ChildItem', 'attr:-Path', 'var:$dir']);
+    expect(highlight('if x', 'cobol')).toEqual([{ text: 'if x' }]);
+    // the tokens always add back up to the code
+    const code = 'function f(a) { return `t${a}` + 0x1F; } /* end';
+    expect(highlight(code, 'js').map(t => t.text).join('')).toBe(code);
+  });
+
+  it('code blocks: highlighted spans (text only) and a copy button that copies the code', async () => {
+    const writeText = clip();
+    const { container } = render(<Markdown text={'```ts\nconst a = "<b>";\n```'} />);
+    expect(container.querySelector('pre')!.textContent).toBe('const a = "<b>";');
+    expect(container.querySelector('pre .po-tok-kw')!.textContent).toBe('const');
+    expect(container.querySelector('b')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /copy code/i }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('const a = "<b>";'));
+    await waitFor(() => expect(screen.getByRole('button', { name: /copy code/i }).textContent).toMatch(/copied/i));
+  });
+
+  it('every message has a copy button (agent and You)', async () => {
+    const writeText = clip();
+    useOffice.setState({ tickets: { t: tk('t', { text: 'What does Save do?' }) }, feed: { t: [{ kind: 'message', role: 'pm', text: 'It **saves**.', id: 'm', ts: '' }] } });
+    render(<Feed ticketId="t" />);
+    const btns = screen.getAllByRole('button', { name: /copy message/i });
+    expect(btns).toHaveLength(2);
+    fireEvent.click(btns[1]);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('It **saves**.'));
+    fireEvent.click(btns[0]);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('What does Save do?'));
+  });
+
+  it('markdown tables', () => {
+    const { container } = render(<Markdown text={'| Name | Size |\n|---|--:|\n| a.ts | **2** |\n| b.ts | 3 |'} />);
+    const ths = [...container.querySelectorAll('thead th')].map(e => e.textContent);
+    expect(ths).toEqual(['Name', 'Size']);
+    const rows = [...container.querySelectorAll('tbody tr')].map(tr => [...tr.querySelectorAll('td')].map(e => e.textContent));
+    expect(rows).toEqual([['a.ts', '2'], ['b.ts', '3']]);
+    expect(container.querySelector('tbody strong')!.textContent).toBe('2');
+    expect((container.querySelector('tbody td:last-child') as HTMLElement).style.textAlign).toBe('right');
+  });
+
+  it('links open in a new tab with rel=noopener; only http(s)/mailto become links', () => {
+    const { container } = render(<Markdown text={'See [the docs](https://example.com/a) or https://x.dev/b. Not [this](javascript:alert(1)).'} />);
+    const links = [...container.querySelectorAll('a')];
+    expect(links.map(a => a.getAttribute('href'))).toEqual(['https://example.com/a', 'https://x.dev/b']);
+    expect(links[0].textContent).toBe('the docs');
+    for (const a of links) { expect(a.target).toBe('_blank'); expect(a.rel).toContain('noopener'); }
+    expect(container.textContent).toContain('[this](javascript:alert(1))');
   });
 });

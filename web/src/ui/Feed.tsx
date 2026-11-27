@@ -1,5 +1,6 @@
 import { Fragment, useState } from 'react';
 import { Markdown } from './Markdown';
+import { CopyButton } from './CopyButton';
 import { useOffice, type FeedItem } from '../state/store';
 import { clock, isFinished, roleColor, roleEmoji, roleShort, STAGE_LABEL, usageLine } from './format';
 import { GateCard } from './GateCard';
@@ -48,7 +49,10 @@ export function Answer({ text }: { text: string }) {
 function YouBubble({ text, ts }: { text: string; ts: string }) {
   return (
     <div className="po-you">
-      <div className="po-you-head"><span className="po-you-who">You</span><span className="po-dim po-time">{ts ? clock(ts) : ''}</span></div>
+      <div className="po-you-head">
+        <span className="po-you-who">You</span><span className="po-dim po-time">{ts ? clock(ts) : ''}</span>
+        <span className="po-msg-actions"><CopyButton text={text} label="Copy message" /></span>
+      </div>
       <div className="po-you-text">{text}</div>
     </div>
   );
@@ -74,7 +78,10 @@ function Row({ item, ticketId, onShow }: { item: FeedItem; ticketId: string; onS
     case 'message':
       return (
         <div className="po-msg">
-          <div className="po-msg-head"><Who item={item} /><span className="po-dim po-time">{clock(item.ts)}</span></div>
+          <div className="po-msg-head">
+            <Who item={item} /><span className="po-dim po-time">{clock(item.ts)}</span>
+            {item.status !== 'streaming' && <span className="po-msg-actions"><CopyButton text={item.text} label="Copy message" /></span>}
+          </div>
           {item.answer ? <Answer text={item.text} />
             : <div className="po-msg-text po-answer"><Markdown text={item.text} />{item.status === 'streaming' && <span className="po-cursor" aria-hidden>▍</span>}</div>}
         </div>
