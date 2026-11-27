@@ -52,10 +52,10 @@ function defaultUrl(): string {
   return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 }
 
-/** History replay for a project's drawer: GET /api/projects/:id/tickets?limit=20, merged into the store. */
+/** History replay for a project's drawer: GET /api/projects/:id/tickets?limit=100, merged into the store. */
 export async function loadHistory(projectId: string): Promise<void> {
   try {
-    const r = await fetch(`/api/projects/${encodeURIComponent(projectId)}/tickets?limit=20`);
+    const r = await fetch(`/api/projects/${encodeURIComponent(projectId)}/tickets?limit=100`);
     if (!r.ok) return;
     const body = await r.json() as { tickets: Ticket[]; events: Record<string, ServerEvent[]> };
     useOffice.getState().applyHistory(projectId, body.tickets ?? [], body.events ?? {});

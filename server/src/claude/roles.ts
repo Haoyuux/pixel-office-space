@@ -6,10 +6,13 @@ const REVIEW = [...READ, ...both(['git diff *', 'git log *', 'git status *', 'gi
 const DEV = [...READ, 'Edit', 'Write', 'MultiEdit',
   ...both(['npm *', 'npx *', 'node *', 'pnpm *', 'yarn *', 'dotnet *', 'git status *', 'git diff *', 'git -C * status *', 'git -C * diff *', 'cd *'])];
 const DOCS = [...READ, 'Edit', 'Write'];
+/** PM: read the code and inspect git state for answers and plans; never change anything. */
+const PM = [...READ, ...both(['git status *', 'git log *', 'git diff *', 'git branch *',
+  'git -C * status *', 'git -C * log *', 'git -C * diff *', 'git -C * branch *'])];
 
 /** Passed to the CLI as --allowedTools (Bash and PowerShell forms both). */
 export const ROLE_TOOLS: Record<RoleId, string[]> = {
-  pm: READ, techlead: REVIEW, security: REVIEW,
+  pm: PM, techlead: REVIEW, security: REVIEW,
   frontend: DEV, backend: DEV, devops: DEV, qa: DEV,
   uiux: DOCS, writer: DOCS,
 };

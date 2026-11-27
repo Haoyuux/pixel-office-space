@@ -315,6 +315,7 @@
 .po-you-head { display: flex; justify-content: flex-end; gap: 8px; font-size: 11px; }
 .po-you-who { color: var(--accent); font-weight: 700; }
 .po-you-text { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+.po-turn-sep { height: 0; border-top: 1px dashed var(--po-line-2); margin: 12px 0 4px; opacity: .7; }
 .po-answer { white-space: normal; min-width: 0; }
 .po-answer > * { margin: 0 0 6px; }
 .po-answer h4 { font-size: 13px; color: var(--accent); }

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { Markdown } from './Markdown';
 import { useOffice, type FeedItem } from '../state/store';
 import { clock, isFinished, roleColor, roleEmoji, roleShort, STAGE_LABEL, usageLine } from './format';
@@ -88,23 +88,45 @@ function Row({ item, ticketId, onShow }: { item: FeedItem; ticketId: string; onS
   }
 }
 
-/** Per-role messages, collapsed tool calls (click to expand), stage dividers, owner messages and gate cards. */
-export function Feed({ ticketId, onShow }: { ticketId: string; onShow?: (tab: 'plan' | 'changes') => void }) {
+
+/** One ticket of a conversation: the owner's bubble, then its items and (once finished) the usage line. */
+function TicketItems({ ticketId, onShow }: { ticketId: string; onShow?: (tab: 'plan' | 'changes') => void }) {
   const all = useOffice(s => s.feed[ticketId] ?? EMPTY);
   const filter = useOffice(s => s.roleFilter);
   const ticket = useOffice(s => s.tickets[ticketId]);
   const usage = ticket && isFinished(ticket) ? ticket.usage : undefined;
   const items = filter === 'all' ? all : all.filter(i => !i.role || i.role === filter);
-  const last = all[all.length - 1];
   const own = ticket?.text.trim() && !(all[0]?.kind === 'user' && all[0].text.trim() === ticket.text.trim()) ? ticket : undefined;
-  const { ref, paused, onScroll, follow } = useFollow<HTMLDivElement>(`${all.length}:${last?.text.length ?? 0}:${last?.status ?? ''}`);
+  return <>
+    {own && <YouBubble text={own.text} ts={own.createdAt} />}
+    {items.map(i => <Row key={`${i.kind}:${i.id}`} item={i} ticketId={ticketId} onShow={onShow} />)}
+    {usage && <div className="po-usage">{usageLine(usage)}</div>}
+  </>;
+}
+
+/**
+ * Per-role messages, collapsed tool calls (click to expand), stage dividers, owner messages and gate cards — for one
+ * ticket, or a whole conversation (`ticketIds`, oldest first, a thin separator between tickets).
+ */
+export function Feed({ ticketId, ticketIds, onShow }: { ticketId?: string; ticketIds?: string[]; onShow?: (tab: 'plan' | 'changes') => void }) {
+  const ids = ticketIds ?? (ticketId ? [ticketId] : []);
+  const feeds = useOffice(s => s.feed);
+  const tickets = useOffice(s => s.tickets);
+  const lastId = ids[ids.length - 1];
+  const tail = (lastId && feeds[lastId]) || EMPTY;
+  const last = tail[tail.length - 1];
+  const empty = ids.every(id => !feeds[id]?.length && !tickets[id]?.text.trim());
+  const { ref, paused, onScroll, follow } = useFollow<HTMLDivElement>(`${ids.length}:${tail.length}:${last?.text.length ?? 0}:${last?.status ?? ''}`);
   return (
     <div className="po-scroll-wrap">
       <div className="po-scroll po-feed" ref={ref} onScroll={onScroll}>
-        {own && <YouBubble text={own.text} ts={own.createdAt} />}
-        {items.length === 0 && !own && <div className="po-empty">No activity yet.</div>}
-        {items.map(i => <Row key={`${i.kind}:${i.id}`} item={i} ticketId={ticketId} onShow={onShow} />)}
-        {usage && <div className="po-usage">{usageLine(usage)}</div>}
+        {empty && <div className="po-empty">No activity yet.</div>}
+        {ids.map((id, i) => (
+          <Fragment key={id}>
+            {i > 0 && <div className="po-turn-sep" role="separator" />}
+            <TicketItems ticketId={id} onShow={onShow} />
+          </Fragment>
+        ))}
       </div>
       {paused && <button type="button" className="po-follow" onClick={follow}>↓ follow</button>}
     </div>

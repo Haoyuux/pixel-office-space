@@ -146,6 +146,8 @@ describe('Ask vs Ticket UI', () => {
 
   it('chats: 💬, "answered" chip, first line of the question, no pipeline; tickets: 🎫 + pipeline', () => {
     openDrawer([ticket({ id: 'a', title: 'Buttons', text: 'What buttons exist?\nbe brief', status: 'done', stage: 'done', answered: true }), ticket({ id: 'b', title: 'Other', status: 'done', stage: 'done', createdAt: '2026-11-25T10:00:00Z' })]);
+    fireEvent.click(screen.getByRole('button', { name: /past conversations/i }));
+    fireEvent.click(within(screen.getByRole('list', { name: /past conversations/i })).getByRole('button', { name: /What buttons exist/ }));
     expect(screen.queryByRole('list', { name: 'Pipeline' })).toBeNull();
     const head = document.querySelector('.po-ticket-row')!;
     expect(head.textContent).toContain('💬');
@@ -413,6 +415,11 @@ describe('M2: real agents UI', () => {
     return render(<Drawer projectId="p" />);
   };
   const box = () => screen.getByRole('textbox', { name: /message/i }) as HTMLTextAreaElement;
+  /** Opens the newest conversation from the past list (nothing is open by default when nothing runs). */
+  const openThread = () => {
+    fireEvent.click(screen.getByRole('button', { name: /past conversations/i }));
+    fireEvent.click(within(screen.getByRole('list', { name: /past conversations/i })).getAllByRole('button')[0]);
+  };
 
   it('fetches /api/system/claude and shows the missing banner', async () => {
     sys = claude({ found: false, loggedIn: false });
@@ -487,6 +494,7 @@ describe('M2: real agents UI', () => {
   it('Resume on an interrupted claude ticket posts resume and shows a 409 inline', async () => {
     reply = url => (url === '/api/system/claude' ? { status: 200, body: sys } : { status: 409, body: { error: 'Another ticket is running' } });
     openDrawer([ticket({ status: 'failed', reason: 'interrupted', agentsMode: 'claude', sessions: { pm: 's1' } })]);
+    openThread();
     fireEvent.click(screen.getByRole('button', { name: /^resume/i }));
     expect(await screen.findByText('Another ticket is running')).toBeTruthy();
     expect(posts()[0].url).toBe('/api/tickets/t/resume');
@@ -494,20 +502,24 @@ describe('M2: real agents UI', () => {
 
   it('no Resume on a not-a-git-repo failure (the git banner handles it)', () => {
     openDrawer([ticket({ status: 'failed', reason: 'not-a-git-repo', agentsMode: 'claude' })]);
+    openThread();
     expect(screen.queryByRole('button', { name: /^resume/i })).toBeNull();
     expect(screen.getByRole('button', { name: /initialize git/i })).toBeTruthy();
   });
 
   it('no Resume button on simulated or done tickets', () => {
     openDrawer([ticket({ status: 'failed', reason: 'interrupted', agentsMode: 'simulated' })]);
+    openThread();
     expect(screen.queryByRole('button', { name: /^resume/i })).toBeNull();
     cleanup();
     openDrawer([ticket({ status: 'done', stage: 'done', agentsMode: 'claude' })]);
+    openThread();
     expect(screen.queryByRole('button', { name: /^resume/i })).toBeNull();
   });
 
   it('usage line at the end of a finished ticket feed', () => {
     openDrawer([ticket({ status: 'done', stage: 'done', usage: { turns: 12, costUsd: 0.84, durationMs: 360000 } })]);
+    openThread();
     expect(screen.getByText('12 turns · 6 min · uses your Claude plan (≈$0.84 at API rates, not charged)')).toBeTruthy();
   });
 

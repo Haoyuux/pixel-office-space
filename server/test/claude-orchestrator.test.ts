@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process';
 import type { Project, RoleId, ServerEvent } from '@office/shared';
 import { ClaudeOrchestrator, NOT_A_GIT_REPO, type GitApi, workspacePath } from '../src/orchestrator/claude';
 import * as realGit from '../src/claude/git';
+import { ROLE_TOOLS } from '../src/claude/roles';
 import type { RunOptions, RunResult } from '../src/claude/runner';
 import { TicketLog } from '../src/ticketLog';
 
@@ -145,7 +146,9 @@ describe('ClaudeOrchestrator', () => {
     expect(of('gate.open')[0].payload).toEqual(plan);
     const pm = runner.of('pm')[0].o;
     expect(pm.cwd).toBe(repo);
-    expect(pm.allowedTools).toEqual(['Read', 'Glob', 'Grep']);
+    expect(pm.allowedTools).toEqual(ROLE_TOOLS.pm);
+    expect(pm.allowedTools).toContain('Bash(git log *)');
+    expect(pm.allowedTools).not.toContain('Edit');
     expect(pm.resume).toBeUndefined();
     expect(of('agent.session')[0]).toMatchObject({ role: 'pm', sessionId: 'pm-s1' });
     expect(o.find(t.id)!.sessions).toEqual({ pm: 'pm-s1' });
