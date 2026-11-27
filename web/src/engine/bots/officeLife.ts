@@ -1,4 +1,5 @@
 import type { Seat, Spot } from '../layout/types';
+import { personalWeights, type Personality } from './personality';
 
 /** Idle office life (spec §7.1): a pure, seeded activity picker. No Pixi; time and randomness are injected. */
 
@@ -22,6 +23,8 @@ export const SAME_PROJECT = 0.6;
 const COOLDOWN = 2;
 /** How many later picks still try an owed (previously infeasible) activity before it is dropped. */
 const OWED_TRIES = 3;
+/** Chance a bot with spot preferences takes a free preferred spot over any free spot of the activity. */
+export const PREFER = 0.75;
 
 export interface Intent {
   botId: string;
@@ -37,7 +40,11 @@ export interface Intent {
   filler?: boolean;
 }
 
-export interface LifeBot { id: string /* projectId:role */ }
+export interface LifeBot {
+  id: string /* projectId:role */;
+  /** Multiplies the activity weights and prefers some spots (personality.ts); none = the plain weights. */
+  personality?: Personality;
+}
 
 export interface OfficeLifeOptions {
   spots: Spot[];
@@ -57,6 +64,10 @@ interface State {
   /** A rolled activity that was infeasible: tried first on the next picks (it keeps the long-run mix on weight). */
   owed: ActivityId | null;
   owedTries: number;
+  personality?: Personality;
+  /** Activities wanted first on the next picks (a tired bot: coffee or lounge), tried before the weighted roll. */
+  urge: ActivityId[] | null;
+  urgeTries: number;
 }
 
 /**
@@ -99,6 +110,15 @@ export function calibrate(target: Record<ActivityId, number>): Record<ActivityId
  */
 const initiation = (w: Record<ActivityId, number>) => ({ ...w, chat: w.chat / 2 });
 const CAL_DAY = initiation(calibrate(DAY_WEIGHTS)), CAL_NIGHT = initiation(calibrate(NIGHT_WEIGHTS));
+/** Calibrated roll weights per personality and time of day (the multiplied weights are the long-run target). */
+const CAL_PERSONAL = new Map<string, Record<ActivityId, number>>();
+function rollWeights(p: Personality | undefined, night: boolean): Record<ActivityId, number> {
+  if (!p) return night ? CAL_NIGHT : CAL_DAY;
+  const key = `${p.id}:${night ? 'n' : 'd'}`;
+  let w = CAL_PERSONAL.get(key);
+  if (!w) { w = initiation(calibrate(personalWeights(night ? NIGHT_WEIGHTS : DAY_WEIGHTS, p, night))); CAL_PERSONAL.set(key, w); }
+  return w;
+}
 
 export class OfficeLife {
   private bots = new Map<string, State>();
@@ -123,7 +143,7 @@ export class OfficeLife {
     if (this.bots.has(bot.id)) return;
     this.bots.set(bot.id, {
       id: bot.id, projectId: bot.id.split(':')[0], history: [], current: null, until: -Infinity,
-      released: false, fresh: true, owed: null, owedTries: 0,
+      released: false, fresh: true, owed: null, owedTries: 0, personality: bot.personality, urge: null, urgeTries: 0,
     });
   }
 
@@ -169,6 +189,16 @@ export class OfficeLife {
     b.released = false; b.until = -Infinity; b.fresh = false; b.history = [];
   }
 
+  /**
+   * The bot wants one of these activities next (e.g. tired after a long ticket: coffee or lounge). Its next picks try
+   * them first, still within the cooldown, the out-of-room cap and feasibility; after a few blocked tries it gives up.
+   */
+  urge(botId: string, activities: ActivityId[]): void {
+    const b = this.bots.get(botId);
+    if (!b || !activities.length) return;
+    b.urge = [...activities]; b.urgeTries = 0;
+  }
+
   /** The bot reached its first spot: its stay is counted from now (walking time is not part of it). */
   arrived(botId: string): void {
     const b = this.bots.get(botId);
@@ -211,8 +241,12 @@ export class OfficeLife {
    * mix of chosen activities on the §7.1 weights even where capacity is tight (2 lounge seats, the 60% cap).
    */
   private pick(b: State, taken: Set<string>): Intent[] | null {
-    const w = this.o.isNight() ? CAL_NIGHT : CAL_DAY;
+    const w = rollWeights(b.personality, this.o.isNight());
     const ok = ACTIVITIES.filter(a => !b.history.slice(-COOLDOWN).includes(a));
+    if (b.urge) {
+      const urged = this.urged(b, ok, taken);
+      if (urged) return urged;
+    }
     const owed = b.owed && ok.includes(b.owed) ? b.owed : null;
     const want = owed ?? this.roll(ok, w);
     const made = want && this.fulfil(b, want, taken);
@@ -229,6 +263,17 @@ export class OfficeLife {
     return null;
   }
 
+  /** An urged activity (random order among the allowed ones), or null; the urge ends when met or after OWED_TRIES. */
+  private urged(b: State, ok: ActivityId[], taken: Set<string>): Intent[] | null {
+    const want = this.shuffle(b.urge!.filter(a => ok.includes(a)));
+    for (const a of want) {
+      const made = this.fulfil(b, a, taken);
+      if (made) { b.urge = null; return made; }
+    }
+    if (++b.urgeTries >= OWED_TRIES) b.urge = null;
+    return null;
+  }
+
   private roll(ok: ActivityId[], w: Record<ActivityId, number>): ActivityId | null {
     if (!ok.length) return null;
     let x = this.o.random() * ok.reduce((s, a) => s + w[a], 0);
@@ -238,7 +283,13 @@ export class OfficeLife {
 
   private fulfil(b: State, act: ActivityId, taken: Set<string>): Intent[] | null {
     const leave = this.mayLeave([b]) && !this.yielding;
-    const pick = (spots: Spot[]) => spots.length ? spots[Math.floor(this.o.random() * spots.length)] : null;
+    const prefer = b.personality?.prefer;
+    const pick = (spots: Spot[]) => {
+      // a preferred free spot (arcade, reading nook, sofa) wins most of the time
+      const liked = prefer ? spots.filter(s => s.tags.some(t => prefer.includes(t))) : [];
+      const from = liked.length && this.o.random() < PREFER ? liked : spots;
+      return from.length ? from[Math.floor(this.o.random() * from.length)] : null;
+    };
     const dur = this.ms(DURATION[act]);
     switch (act) {
       case 'desk': return [this.assign(b, act, [this.seat(b)], [dur])];

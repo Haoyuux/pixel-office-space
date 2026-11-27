@@ -1,10 +1,12 @@
 import { AnimatedSprite, Container, Graphics, Rectangle, Text, type Texture } from 'pixi.js';
-import { roleDef, type Look, type RoleId } from '@office/shared';
+import type { Look, RoleId } from '@office/shared';
 import { DIRS, dirFrom, iso, PZ, type Dir } from '../iso';
 import { FEET_Y, FRAME_H, HIP_Y, SIT_H, SIT_HIP_Y, type CharacterSheets, type Clip } from '../assets';
 import type { Spot } from '../layout/types';
 import type { Pt, WalkGrid } from '../walkgrid';
 import type { OfficeScene } from '../render/scene';
+import { personalityOf, type Personality } from './personality';
+import { botLabel, isEmote, type Emote, type Mood } from './mood';
 
 /** Metres per second (spec §6.3). */
 export const WALK_SPEED = 1.2;
@@ -16,9 +18,13 @@ const PIXEL_FONT = ['"Lucida Console"', '"Courier New"', 'monospace'];
 /** Head height above the ground point, px (the 2x sheets: feet at 202, top of the hair ≈ 48). */
 const HEAD_PX = FEET_Y - 48;
 const DONE_BUBBLE_MS = 3000, FADE_MS = 600;
+/** A mood emote shows this long, then fades. */
+export const EMOTE_MS = 2600;
 
-export type BubbleKind = '…' | '!' | '✗' | '✓' | '💬';
-const BUBBLE_COLOR: Record<BubbleKind, number> = { '…': 0x2b3550, '!': 0xd9821e, '✗': 0xc23b3b, '✓': 0x2f8f4e, '💬': 0x2b3550 };
+export type BubbleKind = '…' | '!' | '✗' | '✓' | '💬' | Emote;
+const BUBBLE_COLOR: Record<BubbleKind, number> = {
+  '…': 0x2b3550, '!': 0xd9821e, '✗': 0xc23b3b, '✓': 0x2f8f4e, '💬': 0x2b3550, '😄': 0x2b3550, '😤': 0x2b3550, '😮‍💨': 0x2b3550,
+};
 
 export interface BotOptions {
   id: string; // projectId:role
@@ -35,6 +41,8 @@ export class Bot {
   readonly id: string;
   readonly projectId: string;
   readonly role: RoleId;
+  /** Fixed per character name (office-life weights, hover label). */
+  readonly personality: Personality | undefined;
   /** World sprite container (night-tinted). Origin = the ground point under the bot. */
   readonly view = new Container();
   /** Bubble and hover label (UI: not tinted, drawn above the building). */
@@ -56,6 +64,8 @@ export class Bot {
   private bubbleBox = new Container();
   private bubbleKind: BubbleKind | null = null;
   private bubbleAge = 0;
+  private character: string;
+  private mood: Mood = 'neutral';
 
   constructor(o: BotOptions) {
     this.id = o.id; this.projectId = o.projectId; this.role = o.role;
@@ -65,7 +75,9 @@ export class Bot {
     this.sprite.anchor.set(0.5, FEET_Y / FRAME_H);
     this.view.addChild(this.sprite);
 
-    this.label = this.makeLabel(`${o.look.character} · ${roleDef(o.role).label}`);
+    this.character = o.look.character;
+    this.personality = personalityOf(o.look.character);
+    this.label = this.makeLabel(botLabel(this.character, o.role, this.personality, this.mood));
     this.label.visible = false;
     this.bubbleBox.visible = false;
     this.hud.addChild(this.bubbleBox, this.label);
@@ -80,6 +92,26 @@ export class Bot {
   }
 
   get walking(): boolean { return this.path.length > 0; }
+  /** The bubble on show (null = none). */
+  get bubbleShown(): BubbleKind | null { return this.bubbleKind; }
+
+  /** Mood face on the hover label. */
+  setMood(mood: Mood): void {
+    if (mood === this.mood || this.hud.destroyed) return;
+    this.mood = mood;
+    const visible = this.label.visible;
+    this.label.destroy({ children: true });
+    this.label = this.makeLabel(botLabel(this.character, this.role, this.personality, mood));
+    this.label.visible = visible;
+    this.hud.addChild(this.label);
+    this.place();
+  }
+
+  /** A mood emote in the bubble, only when no other bubble is up (work bubbles always win); it fades by itself. */
+  emote(kind: Emote): void {
+    if (this.bubbleKind !== null || this.hud.destroyed) return;
+    this.bubble(kind);
+  }
 
   /** Adds the bot to the scene's world (kept across layout rebuilds); the sprite gets the night tint like the building. */
   attach(scene: OfficeScene): void {
@@ -152,7 +184,7 @@ export class Bot {
     this.bubbleBox.alpha = 1;
     if (!kind) return;
     // the 💬 glyph is a white emoji, so its bubble is dark; the status symbols sit on white
-    const chat = kind === '💬', bg = chat ? 0x2b3550 : 0xffffff;
+    const chat = kind === '💬' || isEmote(kind), bg = chat ? 0x2b3550 : 0xffffff;
     const t = new Text({ text: kind, resolution: 2, anchor: 0.5, style: { fontFamily: PIXEL_FONT, fontSize: chat ? 22 : 24, fontWeight: 'bold', fill: BUBBLE_COLOR[kind] } });
     const w = Math.max(38, t.width + 16), h = 34;
     const g = new Graphics()
@@ -174,10 +206,11 @@ export class Bot {
       this.place();
       if (!this.path.length) this.arrive();
     }
-    if (this.bubbleKind === '✓') {
+    if (this.bubbleKind === '✓' || isEmote(this.bubbleKind)) {
+      const hold = this.bubbleKind === '✓' ? DONE_BUBBLE_MS : EMOTE_MS;
       this.bubbleAge += dtMs;
-      if (this.bubbleAge > DONE_BUBBLE_MS) this.bubbleBox.alpha = Math.max(0, 1 - (this.bubbleAge - DONE_BUBBLE_MS) / FADE_MS);
-      if (this.bubbleAge > DONE_BUBBLE_MS + FADE_MS) this.bubble(null);
+      if (this.bubbleAge > hold) this.bubbleBox.alpha = Math.max(0, 1 - (this.bubbleAge - hold) / FADE_MS);
+      if (this.bubbleAge > hold + FADE_MS) this.bubble(null);
     }
   }
 
