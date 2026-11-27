@@ -76,6 +76,7 @@ export class ProjectStore {
     if (patch.agentsMode !== undefined) next.agentsMode = checkMode(patch.agentsMode);
     beforeSave?.(next);
     Object.assign(p, next);
+    for (const k of Object.keys(p) as (keyof Project)[]) if (!(k in next)) delete p[k];
     this.save();
     return p;
   }

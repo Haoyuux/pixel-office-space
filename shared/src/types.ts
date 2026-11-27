@@ -6,10 +6,26 @@ export interface Project {
   looks: Record<RoleId, Look>; createdAt: string;
   /** Who works the tickets; missing = 'claude'. */
   agentsMode?: AgentsMode;
+  /** Multi-repo project: the git repos in the folder's direct subfolders (absent = the folder is one repo). */
+  repos?: RepoRef[];
+  /** What git detection found at the last add/update: 'none' = not a git repo (Initialize git is offered). */
+  gitKind?: RepoDetection['kind'];
 }
+export interface RepoRef { name: string; path: string }
+export type RepoDetection = { kind: 'single' } | { kind: 'multi'; repos: RepoRef[] } | { kind: 'none' };
 export type AgentsMode = 'claude' | 'simulated';
 /** Where a claude ticket works (persisted in the log so Resume / follow-ups can rebuild it). */
-export interface Workspace { branch: string; worktree: string; base: { branch: string; head: string }; merged?: boolean }
+export interface Workspace {
+  branch: string; worktree: string; base: { branch: string; head: string }; merged?: boolean;
+  /**
+   * Multi-repo ticket: `worktree` is the workspace folder and each repo has its own worktree at `<worktree>/<name>`
+   * (branch/base above mirror the first repo). Absent = single repo (the worktree is the workspace).
+   */
+  repos?: WorkspaceRepo[];
+}
+export interface WorkspaceRepo {
+  name: string; path: string; branch: string; base: { branch: string; head: string }; detached: boolean; merged?: boolean;
+}
 export type Stage = 'plan' | 'design' | 'build' | 'review' | 'test' | 'docs' | 'done';
 export type TicketStatus = 'queued' | 'running' | 'waiting' | 'done' | 'failed' | 'cancelled';
 export interface PlanTask { role: RoleId; text: string; files: string[] }

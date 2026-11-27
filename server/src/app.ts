@@ -2,8 +2,8 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
-import type { GateDecision, GateKind, Project, ServerEvent, Snapshot, Ticket } from '@office/shared';
-import { ProjectStore, ValidationError, NotFoundError } from './store';
+import type { GateDecision, GateKind, Project, RepoDetection, ServerEvent, Snapshot, Ticket } from '@office/shared';
+import { ProjectStore, ValidationError, NotFoundError, normalizeFolder } from './store';
 import { scaffoldOrExplain } from './scaffold';
 import { guardRequests } from './origin';
 import { Hub } from './hub';
@@ -17,7 +17,7 @@ export interface OfficeOptions {
   dataDir: string; orchestrator: Orchestrator; log: TicketLog; assetsDir?: string;
   /** `GET /api/system/claude` source (tests inject a fake; never the real CLI). */
   claudeSystem?: { status(): Promise<ClaudeStatus> };
-  git?: Pick<typeof realGit, 'isRepo' | 'hasCommit' | 'gitInit'>;
+  git?: Pick<typeof realGit, 'isRepo' | 'hasCommit' | 'gitInit'> & Partial<Pick<typeof realGit, 'detectRepos'>>;
 }
 
 const GATES: GateKind[] = ['plan', 'final', 'stuck'];
@@ -25,6 +25,16 @@ const GATES: GateKind[] = ['plan', 'final', 'stuck'];
 export function createOffice(opts: OfficeOptions): Office {
   const { orchestrator: orch, log } = opts;
   const git = opts.git ?? realGit;
+  const detect = git.detectRepos ?? realGit.detectRepos;
+  /** Records what git detection found on the project (repos only for a multi-repo folder). */
+  const applyGit = (p: Project, d: RepoDetection) => {
+    p.gitKind = d.kind;
+    if (d.kind === 'multi') p.repos = d.repos.map(r => ({ ...r }));
+    else delete p.repos;
+  };
+  const detectFolder = async (raw: unknown): Promise<RepoDetection> => {
+    try { return await detect(normalizeFolder(raw)); } catch { return { kind: 'none' }; } // the store reports folder errors
+  };
   let system = opts.claudeSystem;
   const store = new ProjectStore(join(opts.dataDir, 'projects.json'));
   const app = express();
@@ -48,15 +58,22 @@ export function createOffice(opts: OfficeOptions): Office {
 
   app.get('/api/projects', (_req, res) => res.json(store.list()));
 
-  app.post('/api/projects', (req, res) => {
-    // agent files first: a folder we can't write to must not leave a saved project behind
-    const p = store.add(req.body, n => scaffoldOrExplain(n.folder, n.team));
-    hub.broadcast(projectEvent('project.added', p));
-    res.status(201).json(p);
+  app.post('/api/projects', async (req, res, next) => {
+    try {
+      const d = await detectFolder(req.body?.folder);
+      // agent files first: a folder we can't write to must not leave a saved project behind
+      const p = store.add(req.body, n => { scaffoldOrExplain(n.folder, n.team); applyGit(n, d); });
+      hub.broadcast(projectEvent('project.added', p));
+      res.status(201).json(p);
+    } catch (e) { next(e); }
   });
 
-  app.patch('/api/projects/:id', (req, res) => {
+  app.patch('/api/projects/:id', async (req, res, next) => {
+    try { await patchProject(req, res); } catch (e) { next(e); }
+  });
+  const patchProject = async (req: Request, res: Response) => {
     const p = mustProject(req.params.id);
+    const d = await detectFolder(p.folder);
     const body = req.body ?? {};
     if (Array.isArray(body.team)) {
       const removed = p.team.filter(r => !body.team.includes(r));
@@ -67,10 +84,10 @@ export function createOffice(opts: OfficeOptions): Office {
       && (orch.current(p.id) || orch.queue(p.id).length)) {
       throw new ConflictError('Agents mode can only change when no ticket is running for this project');
     }
-    const u = store.update(p.id, body, n => scaffoldOrExplain(n.folder, n.team));
+    const u = store.update(p.id, body, n => { scaffoldOrExplain(n.folder, n.team); applyGit(n, d); });
     hub.broadcast(projectEvent('project.updated', u));
     res.json(u);
-  });
+  };
 
   app.delete('/api/projects/:id', (req, res) => {
     const p = mustProject(req.params.id);
@@ -129,7 +146,15 @@ export function createOffice(opts: OfficeOptions): Office {
     try {
       const p = mustProject(req.params.id);
       // a repo with no commits still needs the initial commit (gitInit handles an existing repo)
-      if (await git.isRepo(p.folder) && await git.hasCommit(p.folder)) throw new ConflictError('This folder is already a git repository');
+      const single = await git.isRepo(p.folder);
+      if (single && await git.hasCommit(p.folder)) throw new ConflictError('This folder is already a git repository');
+      if (!single) {
+        // never make a parent of repos into a repo of its own
+        const d = await detect(p.folder);
+        if (d.kind === 'multi') {
+          throw new ConflictError(`This folder holds git repos (${d.repos.map(r => r.name).join(', ')}); it is used as a multi-repo project and is not initialized itself`);
+        }
+      }
       await git.gitInit(p.folder);
       res.json({ ok: true, message: `Initialized git in ${p.folder} with an initial commit.` });
     } catch (e) { next(e); }

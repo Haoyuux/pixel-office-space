@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import request from 'supertest';
 import { join } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import type { Project, Ticket } from '@office/shared';
 import { createOffice, type Office } from '../src/app';
 import { boot } from '../src/boot';
@@ -211,5 +212,54 @@ describe('git-init + system', () => {
     expect(parseAuthStatus('Login method: user@example.com').accountType).toBeNull();
     expect(parseAuthStatus(AUTH)).toEqual({ loggedIn: true, accountType: 'Claude Ultra account', signInEndsAt: '2026-12-20T08:54:14.645Z' });
     expect(parseAuthStatus('Organization: X\nEmail: a@b.c').loggedIn).toBe(false);
+  });
+});
+
+describe('multi-repo detection (API)', () => {
+  {
+    const cfg = join(tmp(), 'gitconfig');
+    writeFileSync(cfg, '');
+    process.env.GIT_CONFIG_GLOBAL = cfg;
+    process.env.GIT_CONFIG_NOSYSTEM = '1';
+  }
+  const mkSub = (parent: string, name: string) => {
+    const d = join(parent, name);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, 'a.txt'), 'a');
+    const g = (...a: string[]) => execFileSync('git', ['-c', 'user.name=T', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...a], { cwd: d });
+    g('init', '-q'); g('add', '-A'); g('commit', '-q', '-m', 'init');
+  };
+
+  it('add stores repos (sorted) + gitKind; update re-detects', async () => {
+    const { office: o } = bootFake();
+    const folder = projectDir();
+    mkSub(folder, 'aspnet-core'); mkSub(folder, 'angular');
+    const r = await add(o, { folder });
+    expect(r.status).toBe(201);
+    expect(r.body.gitKind).toBe('multi');
+    expect(r.body.repos).toEqual([{ name: 'angular', path: join(folder, 'angular') }, { name: 'aspnet-core', path: join(folder, 'aspnet-core') }]);
+    mkSub(folder, 'mobile');
+    const u = await request(o.server).patch(`/api/projects/${r.body.id}`).send({ name: 'HRMS' });
+    expect(u.body.repos.map((x: { name: string }) => x.name)).toEqual(['angular', 'aspnet-core', 'mobile']);
+    expect((await request(o.server).get('/api/projects')).body[0].repos).toHaveLength(3);
+    const plain = await add(o);
+    expect(plain.body.gitKind).toBe('none');
+    expect(plain.body.repos).toBeUndefined();
+  });
+
+  it('git-init is refused (409) for a parent of repos and never runs', async () => {
+    const inits: string[] = [];
+    const dataDir = tmp();
+    const log = new TicketLog(join(dataDir, 'projects'));
+    const orchestrator = new SimulatedOrchestrator({ log, scheduler: new ManualScheduler() });
+    const folder = projectDir();
+    mkSub(folder, 'angular');
+    office = createOffice({ dataDir, orchestrator, log, git: { isRepo: async () => false, hasCommit: async () => false, gitInit: async d => { inits.push(d); } } });
+    const p = (await add(office, { folder })).body as Project;
+    expect(p.gitKind).toBe('multi');
+    const r = await request(office.server).post(`/api/projects/${p.id}/git-init`).send({});
+    expect(r.status).toBe(409);
+    expect(r.body.error).toMatch(/angular/);
+    expect(inits).toEqual([]);
   });
 });
