@@ -78,7 +78,11 @@ describe('env, args, binary', () => {
       PATH: '/bin', HOME: '/h', ANTHROPIC_API_KEY: 'k', ANTHROPIC_AUTH_TOKEN: 't', CLAUDE_CODE_USE_BEDROCK: '1',
       CLAUDE_CODE_USE_VERTEX: '1', claude_code_use_foundry: '1',
     });
-    expect(env).toEqual({ PATH: '/bin', HOME: '/h' });
+    expect(env).toEqual({ PATH: '/bin', HOME: '/h', MSBUILDDISABLENODEREUSE: '1', UseSharedCompilation: 'false' });
+  });
+
+  it('childEnv disables lingering MSBuild/compiler servers (they lock worktree files on Windows)', () => {
+    expect(childEnv({ MSBUILDDISABLENODEREUSE: '0', UseSharedCompilation: 'true' })).toEqual({ MSBUILDDISABLENODEREUSE: '1', UseSharedCompilation: 'false' });
   });
 
   it('builds args exactly, without and with resume', () => {

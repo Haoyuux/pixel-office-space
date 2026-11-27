@@ -3,6 +3,7 @@ import type { AgentsMode, Project, RoleId } from '@office/shared';
 import { api, paths } from './api';
 import { accentCss } from './format';
 import { Modal, RolePicker } from './Modal';
+import { ReposFound } from './GitBanner';
 
 /** Drawer `Team` button: the same 9 checkboxes, PATCH on save. A busy role can't be removed (409, shown inline). */
 export function TeamDialog({ project, onClose }: { project: Project; onClose: () => void }) {
@@ -31,6 +32,7 @@ export function TeamDialog({ project, onClose }: { project: Project; onClose: ()
   return (
     <Modal title={`team · ${project.name}`} accent={accentCss(project.accent)} onClose={onClose}>
       <div className="po-form">
+        <ReposFound repos={project.repos} />
         <p className="po-dim po-hint">New members walk in from the hallway; removed ones head out. Every room keeps a desk for every role.</p>
         <fieldset className="po-mode" disabled={modeBusy}>
           <legend className="po-dim">Agents</legend>

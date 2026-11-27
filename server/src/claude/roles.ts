@@ -2,9 +2,9 @@ import type { RoleId } from '@office/shared';
 
 const both = (patterns: string[]): string[] => patterns.flatMap(p => [`Bash(${p})`, `PowerShell(${p})`]);
 const READ = ['Read', 'Glob', 'Grep'];
-const REVIEW = [...READ, ...both(['git diff *', 'git log *', 'git status *'])];
+const REVIEW = [...READ, ...both(['git diff *', 'git log *', 'git status *', 'git -C * diff *', 'git -C * log *', 'git -C * status *'])];
 const DEV = [...READ, 'Edit', 'Write', 'MultiEdit',
-  ...both(['npm *', 'npx *', 'node *', 'pnpm *', 'yarn *', 'git status *', 'git diff *'])];
+  ...both(['npm *', 'npx *', 'node *', 'pnpm *', 'yarn *', 'dotnet *', 'git status *', 'git diff *', 'git -C * status *', 'git -C * diff *', 'cd *'])];
 const DOCS = [...READ, 'Edit', 'Write'];
 
 /** Passed to the CLI as --allowedTools (Bash and PowerShell forms both). */

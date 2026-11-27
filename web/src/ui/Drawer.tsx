@@ -7,6 +7,7 @@ import { ClaudeBanner } from './claudeStatus';
 import { Feed } from './Feed';
 import { RawLog } from './RawLog';
 import { Changes } from './Changes';
+import { GitBanner } from './GitBanner';
 import { PlanView } from './PlanView';
 import { PipelineBar } from './PipelineBar';
 import { TeamDialog } from './TeamDialog';
@@ -60,7 +61,9 @@ export function Drawer({ projectId }: { projectId: string }) {
   if (!project) return null;
   const accent = accentCss(project.accent);
   const mode = project.agentsMode ?? 'claude';
-  const needsGit = /not-a-git-repo/.test(tickets[0]?.status === 'failed' ? tickets[0].reason ?? '' : '');
+  // Initialize git is offered only when no repo was found (never for a parent of repos)
+  const needsGit = !project.repos?.length && project.gitKind !== 'multi'
+    && /not-a-git-repo/.test(tickets[0]?.status === 'failed' ? tickets[0].reason ?? '' : '');
 
   /** Runs one menu request at a time; `done` runs on success, the server error shows inline otherwise. */
   const once = async (req: () => ReturnType<typeof api>, done: () => void) => {
@@ -82,6 +85,11 @@ export function Drawer({ projectId }: { projectId: string }) {
           <h2 className="po-dh-name">{project.name.toUpperCase()}</h2>
           <span className="po-dh-folder" title={project.folder}>{project.folder}</span>
           <span className="po-grow" />
+          {!!project.repos?.length && (
+            <span className="po-badge po-repos" title={`Multi-repo project: ${project.repos.map(r => r.path).join(', ')}`}>
+              {project.repos.map(r => r.name).join(' · ')}
+            </span>
+          )}
           <span className={`po-badge ${mode}`} title="Who works this project's tickets (change it in Team)">{mode === 'claude' ? 'Claude Code' : 'Simulated'}</span>
           <button type="button" className="po-hbtn" onClick={() => setTeam(true)} title="Edit team">Team · {project.team.length}</button>
           <button type="button" className={`po-hbtn${menu ? ' on' : ''}`} aria-label="Project menu" aria-expanded={!!menu} onClick={() => { setMenu(m => (m ? null : 'open')); setMenuError(null); }}>⋯</button>
@@ -175,32 +183,13 @@ export function Drawer({ projectId }: { projectId: string }) {
           </div></div>
           : tab === 'feed' ? <Feed ticketId={shown.id} onShow={setTab} />
           : tab === 'raw' ? <RawLog ticketId={shown.id} />
-          : tab === 'changes' ? <Changes ticketId={shown.id} />
+          : tab === 'changes' ? <Changes ticketId={shown.id} repos={project.repos?.map(r => r.name)} />
           : <PlanView ticket={shown} />}
       </div>
 
       <Composer key={continueFrom?.id ?? ''} projectId={project.id} active={active} continueFrom={continueFrom} onCreated={() => setChosen(null)} />
       {team && <TeamDialog project={project} onClose={() => setTeam(false)} />}
     </aside>
-  );
-}
-
-/** One-line "not a git repo" banner with a button that runs git-init; the server's reply shows inline. */
-function GitBanner({ projectId }: { projectId: string }) {
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
-  const init = async () => {
-    setBusy(true);
-    const r = await api<{ message?: string }>('POST', paths.gitInit(projectId));
-    setBusy(false);
-    setResult(r.ok ? { ok: true, text: r.data?.message ?? 'Git initialized.' } : { ok: false, text: r.error });
-  };
-  return (
-    <div className="po-banner warn po-banner-row" role="status">
-      <span className="po-grow">This folder isn't a git repository — Claude agents work on a git branch.</span>
-      {!result?.ok && <button type="button" className="po-btn" disabled={busy} onClick={() => void init()}>{busy ? 'Initializing…' : 'Initialize git'}</button>}
-      {result && <span className={result.ok ? 'po-ok' : 'po-error-text'}>{result.text}</span>}
-    </div>
   );
 }
 

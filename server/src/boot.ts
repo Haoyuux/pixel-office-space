@@ -34,6 +34,7 @@ export function boot(opts: BootOptions): {
   let office: Office | undefined;
   const claude = new ClaudeOrchestrator({
     log, runner: opts.runner ?? new ClaudeRunner(), dataDir: opts.dataDir, getProject: id => office?.store.get(id),
+    onDetect: (id, d) => office?.setGit(id, d),
   });
   const orchestrator = new RoutingOrchestrator(opts.forceMode
     ? { claude: opts.forceMode === 'simulated' ? simulated : claude, simulated: opts.forceMode === 'simulated' ? simulated : claude }

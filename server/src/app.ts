@@ -1,9 +1,9 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
-import { existsSync } from 'node:fs';
-import type { GateDecision, GateKind, Project, ServerEvent, Snapshot, Ticket } from '@office/shared';
-import { ProjectStore, ValidationError, NotFoundError } from './store';
+import { existsSync, readdirSync } from 'node:fs';
+import type { GateDecision, GateKind, Project, RepoDetection, ServerEvent, Snapshot, Ticket } from '@office/shared';
+import { ProjectStore, ValidationError, NotFoundError, normalizeFolder, applyGit } from './store';
 import { scaffoldOrExplain } from './scaffold';
 import { guardRequests } from './origin';
 import { Hub } from './hub';
@@ -12,19 +12,36 @@ import type { TicketLog } from './ticketLog';
 import * as realGit from './claude/git';
 import { ClaudeSystem, type ClaudeStatus } from './claude/system';
 
-export interface Office { server: Server; store: ProjectStore; hub: Hub; close(): void }
+export interface Office {
+  server: Server; store: ProjectStore; hub: Hub; close(): void;
+  /** Ticket-start git re-detection: store it and tell the clients when it changed. */
+  setGit(projectId: string, d: RepoDetection): void;
+}
 export interface OfficeOptions {
   dataDir: string; orchestrator: Orchestrator; log: TicketLog; assetsDir?: string;
   /** `GET /api/system/claude` source (tests inject a fake; never the real CLI). */
   claudeSystem?: { status(): Promise<ClaudeStatus> };
-  git?: Pick<typeof realGit, 'isRepo' | 'hasCommit' | 'gitInit'>;
+  git?: Pick<typeof realGit, 'isRepo' | 'hasCommit' | 'gitInit'> & Partial<Pick<typeof realGit, 'detectRepos'>>;
 }
 
 const GATES: GateKind[] = ['plan', 'final', 'stuck'];
 
+/** Direct subfolders (no dot-folders/node_modules) that have a .git of their own. */
+function subfoldersWithGit(folder: string): string[] {
+  try {
+    return readdirSync(folder, { withFileTypes: true })
+      .filter(e => e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules' && existsSync(join(folder, e.name, '.git')))
+      .map(e => e.name).sort();
+  } catch { return []; }
+}
+
 export function createOffice(opts: OfficeOptions): Office {
   const { orchestrator: orch, log } = opts;
   const git = opts.git ?? realGit;
+  const detect = git.detectRepos ?? realGit.detectRepos;
+  const detectFolder = async (raw: unknown): Promise<RepoDetection> => {
+    try { return await detect(normalizeFolder(raw)); } catch { return { kind: 'none' }; } // the store reports folder errors
+  };
   let system = opts.claudeSystem;
   const store = new ProjectStore(join(opts.dataDir, 'projects.json'));
   const app = express();
@@ -48,15 +65,22 @@ export function createOffice(opts: OfficeOptions): Office {
 
   app.get('/api/projects', (_req, res) => res.json(store.list()));
 
-  app.post('/api/projects', (req, res) => {
-    // agent files first: a folder we can't write to must not leave a saved project behind
-    const p = store.add(req.body, n => scaffoldOrExplain(n.folder, n.team));
-    hub.broadcast(projectEvent('project.added', p));
-    res.status(201).json(p);
+  app.post('/api/projects', async (req, res, next) => {
+    try {
+      const d = await detectFolder(req.body?.folder);
+      // agent files first: a folder we can't write to must not leave a saved project behind
+      const p = store.add(req.body, n => { scaffoldOrExplain(n.folder, n.team); applyGit(n, d); });
+      hub.broadcast(projectEvent('project.added', p));
+      res.status(201).json(p);
+    } catch (e) { next(e); }
   });
 
-  app.patch('/api/projects/:id', (req, res) => {
+  app.patch('/api/projects/:id', async (req, res, next) => {
+    try { await patchProject(req, res); } catch (e) { next(e); }
+  });
+  const patchProject = async (req: Request, res: Response) => {
     const p = mustProject(req.params.id);
+    const d = await detectFolder(p.folder);
     const body = req.body ?? {};
     if (Array.isArray(body.team)) {
       const removed = p.team.filter(r => !body.team.includes(r));
@@ -67,10 +91,10 @@ export function createOffice(opts: OfficeOptions): Office {
       && (orch.current(p.id) || orch.queue(p.id).length)) {
       throw new ConflictError('Agents mode can only change when no ticket is running for this project');
     }
-    const u = store.update(p.id, body, n => scaffoldOrExplain(n.folder, n.team));
+    const u = store.update(p.id, body, n => { scaffoldOrExplain(n.folder, n.team); applyGit(n, d); });
     hub.broadcast(projectEvent('project.updated', u));
     res.json(u);
-  });
+  };
 
   app.delete('/api/projects/:id', (req, res) => {
     const p = mustProject(req.params.id);
@@ -129,7 +153,20 @@ export function createOffice(opts: OfficeOptions): Office {
     try {
       const p = mustProject(req.params.id);
       // a repo with no commits still needs the initial commit (gitInit handles an existing repo)
-      if (await git.isRepo(p.folder) && await git.hasCommit(p.folder)) throw new ConflictError('This folder is already a git repository');
+      const single = await git.isRepo(p.folder);
+      if (single && await git.hasCommit(p.folder)) throw new ConflictError('This folder is already a git repository');
+      if (!single) {
+        // never make a parent of repos into a repo of its own
+        const d = await detect(p.folder);
+        if (d.kind === 'multi') {
+          throw new ConflictError(`This folder holds git repos (${d.repos.map(r => r.name).join(', ')}); it is used as a multi-repo project and is not initialized itself`);
+        }
+        // sub-repos without a commit yet are still repos: commit in them instead of wrapping them in a new one
+        const subRepos = subfoldersWithGit(p.folder);
+        if (subRepos.length) {
+          throw new ConflictError(`This folder holds git repos (${subRepos.join(', ')}) with no commits yet; make a first commit in each instead of initializing the parent folder`);
+        }
+      }
       await git.gitInit(p.folder);
       res.json({ ok: true, message: `Initialized git in ${p.folder} with an initial commit.` });
     } catch (e) { next(e); }
@@ -159,5 +196,10 @@ export function createOffice(opts: OfficeOptions): Office {
     res.status(status).json({ error: status === 404 && own === 404 ? 'Not found' : err.message });
   });
 
-  return { server, store, hub, close() { hub.close(); server.close(); } };
+  const setGit = (id: string, d: RepoDetection) => {
+    const p = store.setGit(id, d);
+    if (p) hub.broadcast(projectEvent('project.updated', p));
+  };
+
+  return { server, store, hub, setGit, close() { hub.close(); server.close(); } };
 }

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
-  isRepo, hasCommit, gitInit, baseInfo, createWorktree, commitAll, diff, mergeIntoBase, removeWorktree, slug,
+  isRepo, hasCommit, gitInit, baseInfo, createWorktree, commitAll, diff, mergeIntoBase, removeWorktree, slug, detectRepos,
 } from '../src/claude/git';
 
 const dirs: string[] = [];
@@ -326,5 +326,38 @@ describe('git helper', () => {
     await gitInit(d);
     repos.push(d);
     expect(await hasCommit(d)).toBe(true);
+  });
+});
+
+describe('detectRepos', () => {
+  it('single when the folder is a repo (even a subfolder of one)', async () => {
+    const r = await mkRepo();
+    expect(await detectRepos(r)).toEqual({ kind: 'single' });
+    fs.mkdirSync(path.join(r, 'sub'));
+    expect(await detectRepos(path.join(r, 'sub'))).toEqual({ kind: 'single' });
+  });
+
+  it('multi: direct subfolders that are repos with a commit, sorted; skips dot/node_modules/empty repos', async () => {
+    const parent = tmp();
+    for (const name of ['zeta', 'angular', 'aspnet-core', 'node_modules', '.hidden']) {
+      const d = path.join(parent, name);
+      fs.mkdirSync(d);
+      fs.writeFileSync(path.join(d, 'a.txt'), 'a');
+      await gitInit(d);
+      repos.push(d);
+    }
+    fs.mkdirSync(path.join(parent, 'empty'));
+    git(path.join(parent, 'empty'), 'init', '-q');
+    fs.mkdirSync(path.join(parent, 'plain'));
+    fs.writeFileSync(path.join(parent, 'file.txt'), 'x');
+    const r = await detectRepos(parent);
+    expect(r).toEqual({ kind: 'multi', repos: ['angular', 'aspnet-core', 'zeta'].map(n => ({ name: n, path: path.join(parent, n) })) });
+  });
+
+  it('none when neither (and for a missing folder)', async () => {
+    const d = tmp();
+    fs.mkdirSync(path.join(d, 'plain'));
+    expect(await detectRepos(d)).toEqual({ kind: 'none' });
+    expect(await detectRepos(path.join(d, 'nope'))).toEqual({ kind: 'none' });
   });
 });

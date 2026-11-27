@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, renameSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { ROLE_IDS, CHARACTERS, ACCENTS, type Accent, type AgentsMode, type Look, type Project, type RoleId } from '@office/shared';
+import { ROLE_IDS, CHARACTERS, ACCENTS, type Accent, type AgentsMode, type Look, type Project, type RepoDetection, type RoleId } from '@office/shared';
 import { ValidationError, NotFoundError } from './errors';
 
 export { ValidationError, NotFoundError };
@@ -28,6 +28,13 @@ export function normalizeFolder(raw: unknown): string {
   if (!f) throw new ValidationError('Folder is required');
   if (!isAbsolute(f)) throw new ValidationError(`Folder must be an absolute path: ${f}`);
   return resolve(f);
+}
+
+/** Records what git detection found on the project (repos only for a multi-repo folder). */
+export function applyGit(p: Project, d: RepoDetection): void {
+  p.gitKind = d.kind;
+  if (d.kind === 'multi') p.repos = d.repos.map(r => ({ ...r }));
+  else delete p.repos;
 }
 
 const checkName = (n: unknown): string => {
@@ -76,6 +83,18 @@ export class ProjectStore {
     if (patch.agentsMode !== undefined) next.agentsMode = checkMode(patch.agentsMode);
     beforeSave?.(next);
     Object.assign(p, next);
+    for (const k of Object.keys(p) as (keyof Project)[]) if (!(k in next)) delete p[k];
+    this.save();
+    return p;
+  }
+
+  /** Ticket-start re-detection: store the result; returns the project when it changed. */
+  setGit(id: string, d: RepoDetection): Project | undefined {
+    const p = this.get(id);
+    if (!p) return undefined;
+    const before = JSON.stringify([p.gitKind, p.repos]);
+    applyGit(p, d);
+    if (JSON.stringify([p.gitKind, p.repos]) === before) return undefined;
     this.save();
     return p;
   }

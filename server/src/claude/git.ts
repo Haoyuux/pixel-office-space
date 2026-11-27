@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { DiffFile } from '@office/shared';
+import type { DiffFile, RepoDetection, RepoRef } from '@office/shared';
 
 const AUTHOR = [
   '-c', 'user.name=Pixel Office', '-c', 'user.email=office@localhost',
@@ -43,6 +43,27 @@ export async function isRepo(dir: string): Promise<boolean> {
 export async function hasCommit(dir: string): Promise<boolean> {
   if (!fs.existsSync(dir)) return false;
   return (await run(dir, ['rev-parse', '--verify', '-q', 'HEAD'])).code === 0;
+}
+
+const SKIP_DIRS = new Set(['node_modules']);
+
+/**
+ * Single repo: the folder is inside a git work tree. Otherwise its direct subfolders (no dot-folders/node_modules)
+ * that are repos with at least one commit make a multi-repo project (sorted by name). Neither: none.
+ */
+export async function detectRepos(folder: string): Promise<RepoDetection> {
+  if (!fs.existsSync(folder)) return { kind: 'none' };
+  if (await isRepo(folder)) return { kind: 'single' };
+  let entries: fs.Dirent[] = [];
+  try { entries = fs.readdirSync(folder, { withFileTypes: true }); } catch { return { kind: 'none' }; }
+  const repos: RepoRef[] = [];
+  for (const e of entries) {
+    if (!e.isDirectory() || e.name.startsWith('.') || SKIP_DIRS.has(e.name)) continue;
+    const p = path.join(folder, e.name);
+    if (await isRepo(p) && await hasCommit(p)) repos.push({ name: e.name, path: p });
+  }
+  repos.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return repos.length ? { kind: 'multi', repos } : { kind: 'none' };
 }
 
 export async function gitInit(dir: string): Promise<void> {

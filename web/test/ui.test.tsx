@@ -436,3 +436,74 @@ describe('M2: real agents UI', () => {
     expect((screen.getByRole('radio', { name: /claude code/i }) as HTMLInputElement).checked).toBe(true);
   });
 });
+
+describe('multi-repo projects UI', () => {
+  const REPOS = [{ name: 'angular', path: 'C:/hrms/angular' }, { name: 'aspnet-core', path: 'C:/hrms/aspnet-core' }];
+  const MULTI: Project = { ...P, gitKind: 'multi', repos: REPOS };
+  beforeEach(() => {
+    reply = url => (url === '/api/system/claude'
+      ? { status: 200, body: { found: true, version: '2', loggedIn: true, accountType: 'pro', signInEndsAt: null } }
+      : { status: 200, body: { ok: true } });
+  });
+  const openDrawer = (project: Project, tickets: Ticket[] = []) => {
+    useOffice.setState({ projects: { p: project }, tickets: Object.fromEntries(tickets.map(t => [t.id, t])), selectedProjectId: 'p', synced: true });
+    return render(<Drawer projectId="p" />);
+  };
+  const fill = () => {
+    fireEvent.change(screen.getByLabelText(/name/i), { target: { value: 'HRMS' } });
+    fireEvent.change(screen.getByLabelText(/folder/i), { target: { value: 'C:/hrms' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+  };
+
+  it('Add Project: shows "Repos found" from the response instead of closing right away', async () => {
+    const onClose = vi.fn();
+    reply = () => ({ status: 201, body: { ...MULTI, id: 'new' } });
+    render(<AddProjectDialog onClose={onClose} />);
+    fill();
+    expect(await screen.findByText('Repos found: angular, aspnet-core')).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: /initialize git/i })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /open project/i }));
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('Add Project: "Not a git repo — Initialize git" only when none', async () => {
+    reply = url => url.endsWith('/git-init')
+      ? { status: 200, body: { ok: true, message: 'Initialized git in C:/hrms with an initial commit.' } }
+      : { status: 201, body: { ...P, id: 'new', gitKind: 'none' } };
+    render(<AddProjectDialog onClose={() => {}} />);
+    fill();
+    expect(await screen.findByText(/Not a git repo/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /initialize git/i }));
+    expect(await screen.findByText('Initialized git in C:/hrms with an initial commit.')).toBeTruthy();
+    expect(posts().find(c => c.url === '/api/projects/new/git-init')).toBeTruthy();
+  });
+
+  it('Team dialog shows the repos found', async () => {
+    const { TeamDialog } = await import('../src/ui/TeamDialog');
+    render(<TeamDialog project={MULTI} onClose={() => {}} />);
+    expect(screen.getByText('Repos found: angular, aspnet-core')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /initialize git/i })).toBeNull();
+  });
+
+  it('drawer header shows repo chips; no Initialize git banner for a multi-repo project', () => {
+    openDrawer(MULTI, [ticket({ status: 'failed', reason: 'not-a-git-repo', agentsMode: 'claude' })]);
+    expect(screen.getByText('angular · aspnet-core')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /initialize git/i })).toBeNull();
+    cleanup();
+    openDrawer(P);
+    expect(screen.queryByText(/angular/)).toBeNull();
+  });
+
+  it('Changes tab groups files under repo headings', () => {
+    useOffice.setState({ diffs: { t: [
+      { path: 'angular/src/a.ts', patch: '+a\n' }, { path: 'aspnet-core/B.cs', patch: '+b\n-c\n' }, { path: 'angular/src/b.ts', patch: '+x\n' },
+    ] } });
+    openDrawer(MULTI, [ticket()]);
+    fireEvent.click(screen.getByRole('tab', { name: /changes/i }));
+    const groups = within(document.querySelector('.po-changes') as HTMLElement).getAllByRole('group');
+    expect(groups.map(g => within(g).getByRole('heading').textContent)).toEqual(['angular', 'aspnet-core']);
+    expect(within(groups[0]).getAllByRole('button').map(b => b.querySelector('.po-file-path')!.textContent)).toEqual(['src/a.ts', 'src/b.ts']);
+    expect(within(groups[1]).getByText('B.cs')).toBeTruthy();
+  });
+});
