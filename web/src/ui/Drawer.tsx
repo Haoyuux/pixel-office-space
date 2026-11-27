@@ -203,7 +203,7 @@ export function Drawer({ projectId }: { projectId: string }) {
             <span className="po-badge po-model" title="Claude model for this project's runs (change it with /model)">{project.model}</span>
           )}
           <span className={`po-badge ${mode}`} title="Who works this project's tickets (change it in Team)">{mode === 'claude' ? 'Claude Code' : 'Simulated'}</span>
-          <button type="button" className="po-hbtn" aria-label="New conversation" title="New conversation (/new · Ctrl+K)" onClick={startFresh}>＋ New</button>
+          <button type="button" className="po-hbtn" aria-label="New conversation" aria-keyshortcuts="Control+K" title="New conversation (/new · Ctrl+K)" onClick={startFresh}>＋ New</button>
           <button type="button" className="po-hbtn" onClick={() => setTeam(true)} title="Edit team">Team · {project.team.length}</button>
           <button type="button" className={`po-hbtn${menu ? ' on' : ''}`} aria-label="Project menu" aria-expanded={!!menu} onClick={() => { setMenu(m => (m ? null : 'open')); setMenuError(null); }}>⋯</button>
           <button type="button" className={`po-hbtn${full ? ' on' : ''}`} aria-label={full ? 'Exit full screen' : 'Full screen'} aria-pressed={full}
@@ -331,7 +331,7 @@ function Working({ ticket, busy, error, onStop }: { ticket: Ticket; busy: boolea
       </span>
       {error && <span className="po-error-text" role="alert">{error}</span>}
       <span className="po-grow" />
-      <button type="button" className="po-btn po-stop" disabled={busy} title="Stop (Esc)" onClick={onStop}>■ Stop</button>
+      <button type="button" className="po-btn po-stop" aria-keyshortcuts="Escape" disabled={busy} title="Stop (Esc)" onClick={onStop}>■ Stop</button>
     </div>
   );
 }
