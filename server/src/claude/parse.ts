@@ -70,10 +70,13 @@ export const pmValidator = (team: RoleId[], mode: TicketMode) => (v: unknown): P
   return plan ? { kind: 'plan', plan } : null;
 };
 
-/** Clearly prose: some text, no fenced json block, and not a bare JSON value either. */
+/**
+ * Clearly prose: some text, no fenced json block, not a bare JSON value, and no plan keys either ("summary"/"tasks"
+ * in prose is a broken plan: it gets the fixJson retry instead of being shown as an answer).
+ */
 export const isProse = (text: string): boolean => {
   const t = text.trim();
-  return !!t && !/```json/i.test(t) && !/^[[{]/.test(t);
+  return !!t && !/```json/i.test(t) && !/^[[{]/.test(t) && !/"(summary|tasks)"/.test(t);
 };
 
 export const validateReview = reviewValidator(ROLE_IDS);

@@ -318,6 +318,19 @@ describe('ClaudeOrchestrator', () => {
     expect(of('agent.message').some(m => m.role === 'techlead' && m.text.startsWith('Notes') && m.text.includes('QA has not run yet'))).toBe(true);
   });
 
+  it('fair review: a bare rejection from another reviewer still bounces when the rest was outside-the-repo notes', async () => {
+    const o = make();
+    runner.script = (c, n) => c.kind !== 'review' || n !== 1 ? undefined
+      : c.o.role === 'techlead' ? { result: fence({ approved: false, issues: [{ role: 'frontend', file: '../RULES.md', note: 'rules' }] }) }
+        : { result: fence({ approved: false, issues: [] }) };
+    await toFinal(o, repo, [...CORE, 'security']);
+    expect(runner.of('security', 'review').length).toBeGreaterThan(0);
+    const b = runner.calls.filter(c => c.kind === 'bounce');
+    expect(b.length).toBeGreaterThan(0);
+    expect(b[0].o.prompt).toContain('did not pass');
+    expect(b.some(c => c.o.prompt.includes('RULES.md'))).toBe(false);
+  });
+
   it('final approve → merged into the base when clean (base advanced); usage emitted', async () => {
     const o = make();
     const t = await toFinal(o, repo);
@@ -877,6 +890,16 @@ describe('ClaudeOrchestrator: ask vs ticket', () => {
     expectAnswered(o, t.id, 'There are two buttons: Save and Cancel.');
   });
 
+  it('auto: prose carrying a broken plan ("summary"/"tasks") gets the fixJson retry, not an answer', async () => {
+    const o = make();
+    runner.script = (c, n) => c.o.role !== 'pm' ? undefined
+      : c.kind === 'plan' && n === 1 ? { result: 'Plan: "summary": "Add link", "tasks": [ {"role": "frontend"' } : undefined;
+    const t = await ask(o, 'auto', 'Add a forgot password link');
+    expect(runner.of('pm').map(c => c.kind)).toEqual(['plan', 'fixjson']);
+    expect(o.find(t.id)!.openGate).toBe('plan');
+    expect(o.find(t.id)!.answered).toBeUndefined();
+  });
+
   it('auto: broken JSON still gets the one fixJson retry', async () => {
     const o = make();
     runner.script = (c, n) => c.o.role !== 'pm' ? undefined
@@ -1200,6 +1223,52 @@ describe('ClaudeOrchestrator: multi-repo projects', { timeout: 30_000 }, () => {
     expect(runner.of('pm')[0].o.prompt).not.toContain('_project');
     expect(fs.readFileSync(path.join(parent, 'docs', 'tickets', 'ticket-register.md'), 'utf8')).toBe('| id |\n');
     expect(of('ticket.diff').at(-1)!.files.map(f => f.path).some(p => p.includes('_project'))).toBe(false);
+  });
+
+  it('review guard: a path without the repo prefix that exists in a repo (or its folder does) is a real issue', async () => {
+    const o = make();
+    fs.mkdirSync(path.join(fe, 'src', 'app'), { recursive: true });
+    fs.writeFileSync(path.join(fe, 'src', 'app', 'x.ts'), 'x\n');
+    git(fe, 'add', '-A'); git(fe, 'commit', '-q', '-m', 'src');
+    writes();
+    const base = runner.script;
+    runner.script = (c, n) => c.kind === 'review' && n === 1
+      ? { result: fence({ approved: false, issues: [
+        { role: 'frontend', file: 'src\\app\\x.ts:12', note: 'null check missing' },
+        { role: 'frontend', file: 'src/app/new-file.ts', note: 'create the helper' },
+        { role: 'frontend', file: 'docs/tickets/ticket-register.md:3', note: 'register' }] }) }
+      : base(c, n);
+    const t = await toPlanGate(o, parent);
+    o.decide(t.id, 'plan', 'approved');
+    await o.idle();
+    const b = runner.of('frontend', 'bounce');
+    expect(b).toHaveLength(1);
+    expect(b[0].o.prompt).toContain('null check missing');
+    expect(b[0].o.prompt).toContain('create the helper');
+    expect(b[0].o.prompt).not.toContain('register');
+    expect(pmText()).toContain('docs/tickets/ticket-register.md');
+    expect(o.find(t.id)!.openGate).toBe('final');
+  });
+
+  it('resume keeps the parent-docs hint when <workspace>/_project exists (even if the parent docs are gone)', async () => {
+    const o = make();
+    fs.writeFileSync(path.join(parent, 'CLAUDE.md'), '# rules\n');
+    runner.script = c => c.o.role === 'frontend' && c.kind === 'stage' ? { hang: true }
+      : c.o.role === 'backend' && c.kind === 'stage' ? { result: 'done', write: { 'aspnet-core/api.txt': 'api\n' } } : undefined;
+    const t = await toPlanGate(o, parent);
+    o.decide(t.id, 'plan', 'approved');
+    await until(() => runner.of('frontend', 'stage').length === 1 && runner.of('backend', 'stage')[0]?.ended !== undefined);
+    await o.shutdown(50);
+    const log = new TicketLog(path.join(dataDir, 'tickets'));
+    log.recover();
+    fs.rmSync(path.join(parent, 'CLAUDE.md'));
+    expect(fs.existsSync(path.join(wsOf(t.id), '_project', 'CLAUDE.md'))).toBe(true);
+    const r2 = new FakeRunner();
+    const o2 = new ClaudeOrchestrator({ log, runner: r2, dataDir, getProject: () => project(parent) });
+    o2.resume(t.id);
+    await o2.idle();
+    expect(r2.of('frontend', 'stage')[0].o.prompt).toContain('_project/');
+    expect(r2.of('techlead', 'review')[0].o.prompt).toContain('_project/');
   });
 
   it('parent docs: none in the parent → no _project folder and no prompt line', async () => {
