@@ -804,7 +804,8 @@ describe('ClaudeOrchestrator: follow-ups, resume, messages', () => {
   });
 });
 
-describe('ClaudeOrchestrator: multi-repo projects', () => {
+// real git in two repos per test: slower than the single-repo cases, especially when the suites run in parallel
+describe('ClaudeOrchestrator: multi-repo projects', { timeout: 30_000 }, () => {
   let parent: string;
   let fe: string, be: string;
   const NAMES = ['angular', 'aspnet-core'];

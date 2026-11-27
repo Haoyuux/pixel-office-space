@@ -261,6 +261,22 @@ describe('multi-repo detection (API)', () => {
     await claude.shutdown(10);
   });
 
+  it('git-init is refused (409) for a parent whose sub-repos have no commits yet', async () => {
+    const inits: string[] = [];
+    const dataDir = tmp();
+    const log = new TicketLog(join(dataDir, 'projects'));
+    const orchestrator = new SimulatedOrchestrator({ log, scheduler: new ManualScheduler() });
+    const folder = projectDir();
+    mkdirSync(join(folder, 'angular'));
+    execFileSync('git', ['init', '-q'], { cwd: join(folder, 'angular') });
+    office = createOffice({ dataDir, orchestrator, log, git: { isRepo: async () => false, hasCommit: async () => false, gitInit: async d => { inits.push(d); } } });
+    const p = (await add(office, { folder })).body as Project;
+    const r = await request(office.server).post(`/api/projects/${p.id}/git-init`).send({});
+    expect(r.status).toBe(409);
+    expect(r.body.error).toMatch(/angular/);
+    expect(inits).toEqual([]);
+  });
+
   it('git-init is refused (409) for a parent of repos and never runs', async () => {
     const inits: string[] = [];
     const dataDir = tmp();

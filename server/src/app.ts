@@ -1,7 +1,7 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import type { GateDecision, GateKind, Project, RepoDetection, ServerEvent, Snapshot, Ticket } from '@office/shared';
 import { ProjectStore, ValidationError, NotFoundError, normalizeFolder, applyGit } from './store';
 import { scaffoldOrExplain } from './scaffold';
@@ -25,6 +25,15 @@ export interface OfficeOptions {
 }
 
 const GATES: GateKind[] = ['plan', 'final', 'stuck'];
+
+/** Direct subfolders (no dot-folders/node_modules) that have a .git of their own. */
+function subfoldersWithGit(folder: string): string[] {
+  try {
+    return readdirSync(folder, { withFileTypes: true })
+      .filter(e => e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules' && existsSync(join(folder, e.name, '.git')))
+      .map(e => e.name).sort();
+  } catch { return []; }
+}
 
 export function createOffice(opts: OfficeOptions): Office {
   const { orchestrator: orch, log } = opts;
@@ -151,6 +160,11 @@ export function createOffice(opts: OfficeOptions): Office {
         const d = await detect(p.folder);
         if (d.kind === 'multi') {
           throw new ConflictError(`This folder holds git repos (${d.repos.map(r => r.name).join(', ')}); it is used as a multi-repo project and is not initialized itself`);
+        }
+        // sub-repos without a commit yet are still repos: commit in them instead of wrapping them in a new one
+        const subRepos = subfoldersWithGit(p.folder);
+        if (subRepos.length) {
+          throw new ConflictError(`This folder holds git repos (${subRepos.join(', ')}) with no commits yet; make a first commit in each instead of initializing the parent folder`);
         }
       }
       await git.gitInit(p.folder);
