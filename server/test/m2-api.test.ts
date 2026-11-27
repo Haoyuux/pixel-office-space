@@ -247,6 +247,20 @@ describe('multi-repo detection (API)', () => {
     expect(plain.body.repos).toBeUndefined();
   });
 
+  it('ticket start re-detects repos and updates the stored project', async () => {
+    const { office: o, claude } = bootFake();
+    const folder = projectDir();
+    const p = (await add(o, { folder })).body as Project;
+    expect(p.gitKind).toBe('none');
+    mkSub(folder, 'angular');
+    await request(o.server).post(`/api/projects/${p.id}/tickets`).send({ text: 'x' });
+    const deadline = Date.now() + 5000;
+    while (!o.store.get(p.id)!.repos && Date.now() < deadline) await new Promise(r => setTimeout(r, 10));
+    expect(o.store.get(p.id)!.gitKind).toBe('multi');
+    expect(o.store.get(p.id)!.repos!.map(r => r.name)).toEqual(['angular']);
+    await claude.shutdown(10);
+  });
+
   it('git-init is refused (409) for a parent of repos and never runs', async () => {
     const inits: string[] = [];
     const dataDir = tmp();

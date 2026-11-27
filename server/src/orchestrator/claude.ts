@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   applyTicketEvent, type AgentState, type GateDecision, type GateKind, type Plan, type PlanTask, type Project, type RoleId,
-  type RepoRef, type ServerEvent, type Stage, type Ticket, type Workspace,
+  type RepoDetection, type RepoRef, type ServerEvent, type Stage, type Ticket, type Workspace,
 } from '@office/shared';
 import { ConflictError, ValidationError, type Orchestrator, type StartOptions } from './types';
 import { titleOf } from './fakeContent';
@@ -35,6 +35,8 @@ export interface ClaudeOrchestratorOptions {
   now?: () => Date;
   /** Current project record (Resume after a restart rebuilds the run from the log). */
   getProject?: (id: string) => Project | undefined;
+  /** Repo detection at ticket start (the server stores it on the project). */
+  onDetect?: (projectId: string, d: RepoDetection) => void;
 }
 
 type WorkStage = 'design' | 'build' | 'review' | 'test' | 'docs';
@@ -298,6 +300,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     // detection runs at every ticket start: repos may have been added to a multi-repo folder since
     const found = await this.git.detectRepos(folder);
     this.alive(run);
+    try { this.opts.onDetect?.(run.project.id, found); } catch { /* storing it is best effort */ }
     if (found.kind === 'multi') run.repos = found.repos;
     else run.repos = undefined;
     if (found.kind === 'none' || (found.kind === 'single' && !(await this.git.hasCommit(folder)))) {

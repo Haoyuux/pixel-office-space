@@ -3,7 +3,7 @@ import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import type { GateDecision, GateKind, Project, RepoDetection, ServerEvent, Snapshot, Ticket } from '@office/shared';
-import { ProjectStore, ValidationError, NotFoundError, normalizeFolder } from './store';
+import { ProjectStore, ValidationError, NotFoundError, normalizeFolder, applyGit } from './store';
 import { scaffoldOrExplain } from './scaffold';
 import { guardRequests } from './origin';
 import { Hub } from './hub';
@@ -12,7 +12,11 @@ import type { TicketLog } from './ticketLog';
 import * as realGit from './claude/git';
 import { ClaudeSystem, type ClaudeStatus } from './claude/system';
 
-export interface Office { server: Server; store: ProjectStore; hub: Hub; close(): void }
+export interface Office {
+  server: Server; store: ProjectStore; hub: Hub; close(): void;
+  /** Ticket-start git re-detection: store it and tell the clients when it changed. */
+  setGit(projectId: string, d: RepoDetection): void;
+}
 export interface OfficeOptions {
   dataDir: string; orchestrator: Orchestrator; log: TicketLog; assetsDir?: string;
   /** `GET /api/system/claude` source (tests inject a fake; never the real CLI). */
@@ -26,12 +30,6 @@ export function createOffice(opts: OfficeOptions): Office {
   const { orchestrator: orch, log } = opts;
   const git = opts.git ?? realGit;
   const detect = git.detectRepos ?? realGit.detectRepos;
-  /** Records what git detection found on the project (repos only for a multi-repo folder). */
-  const applyGit = (p: Project, d: RepoDetection) => {
-    p.gitKind = d.kind;
-    if (d.kind === 'multi') p.repos = d.repos.map(r => ({ ...r }));
-    else delete p.repos;
-  };
   const detectFolder = async (raw: unknown): Promise<RepoDetection> => {
     try { return await detect(normalizeFolder(raw)); } catch { return { kind: 'none' }; } // the store reports folder errors
   };
@@ -184,5 +182,10 @@ export function createOffice(opts: OfficeOptions): Office {
     res.status(status).json({ error: status === 404 && own === 404 ? 'Not found' : err.message });
   });
 
-  return { server, store, hub, close() { hub.close(); server.close(); } };
+  const setGit = (id: string, d: RepoDetection) => {
+    const p = store.setGit(id, d);
+    if (p) hub.broadcast(projectEvent('project.updated', p));
+  };
+
+  return { server, store, hub, setGit, close() { hub.close(); server.close(); } };
 }
