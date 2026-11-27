@@ -167,10 +167,12 @@ export function createOffice(opts: OfficeOptions): Office {
     const p = mustProject(req.params.id);
     for (const t of [...orch.queue(p.id), orch.current(p.id)]) if (t) orch.cancel(t.id);
     devServers.remove(p.id);
-    store.remove(p.id);
+    const moved = store.remove(p.id);
     attachments.removeProject(p.id);
     memory.removeProject(p.id);
     hub.broadcast({ type: 'project.removed', projectId: p.id, ts: now() });
+    // the rooms after it move up to close the gap
+    for (const m of moved) hub.broadcast(projectEvent('project.updated', m));
     res.json({ ok: true });
   });
 

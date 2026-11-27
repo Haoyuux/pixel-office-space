@@ -8,13 +8,26 @@ const newStore = () => new ProjectStore(join(tmp(), 'projects.json'));
 const input = (over: Record<string, unknown> = {}) => ({ name: 'Shop', folder: projectDir(), accent: 'cyan' as const, team: ['pm', 'qa'] as any, ...over });
 
 describe('ProjectStore', () => {
-  it('assigns the lowest free slot and keeps others stable', () => {
+  it('assigns slots in order; a removal closes the gap (later rooms move up), new projects go last', () => {
     const s = newStore();
+    const a = s.add(input()), b = s.add(input()), c = s.add(input()), d = s.add(input());
+    expect([a.slot, b.slot, c.slot, d.slot]).toEqual([0, 1, 2, 3]);
+    const moved = s.remove(b.id);
+    expect(moved.map(p => p.id)).toEqual([c.id, d.id]);
+    expect([s.get(a.id)!.slot, s.get(c.id)!.slot, s.get(d.id)!.slot]).toEqual([0, 1, 2]);
+    expect(s.remove(d.id)).toEqual([]);
+    expect(s.add(input()).slot).toBe(2);
+  });
+
+  it('closes slot gaps of an office saved before compaction', () => {
+    const file = join(tmp(), 'projects.json');
+    const s = new ProjectStore(file);
     const a = s.add(input()), b = s.add(input()), c = s.add(input());
-    expect([a.slot, b.slot, c.slot]).toEqual([0, 1, 2]);
-    s.remove(b.id);
-    expect(s.add(input()).slot).toBe(1);
-    expect(s.get(c.id)!.slot).toBe(2);
+    writeFileSync(file, JSON.stringify({ projects: [{ ...a }, { ...c }] })); // b's slot 1 left empty
+    const again = new ProjectStore(file);
+    expect(again.list().map(p => [p.id, p.slot])).toEqual([[a.id, 0], [c.id, 1]]);
+    expect(new ProjectStore(file).get(c.id)!.slot).toBe(1); // saved
+    void b;
   });
 
   it('rejects a missing folder or a file', () => {

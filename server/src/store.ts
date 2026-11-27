@@ -52,6 +52,8 @@ export class ProjectStore {
     if (existsSync(file)) this.projects = JSON.parse(readFileSync(file, 'utf8')).projects ?? [];
     // M1 projects predate agentsMode: they run real agents (the M2 default)
     for (const p of this.projects) p.agentsMode ??= 'claude';
+    // offices saved before removals compacted the slots: close any gap now
+    if (this.compact().length) this.save();
   }
 
   list(): Project[] { return [...this.projects].sort((a, b) => a.slot - b.slot); }
@@ -104,10 +106,20 @@ export class ProjectStore {
     return p;
   }
 
-  remove(id: string): void {
+  /** Removes the project and closes the gap it leaves: returns the projects whose slot (room) moved up. */
+  remove(id: string): Project[] {
     if (!this.get(id)) throw new NotFoundError(id);
     this.projects = this.projects.filter(p => p.id !== id);
+    const moved = this.compact();
     this.save();
+    return moved;
+  }
+
+  /** Slots 0..n-1 in the current order (no empty room in the building); returns the projects that moved. */
+  private compact(): Project[] {
+    const moved: Project[] = [];
+    [...this.projects].sort((a, b) => a.slot - b.slot).forEach((p, i) => { if (p.slot !== i) { p.slot = i; moved.push(p); } });
+    return moved;
   }
 
   private checkAccent(a: Accent): Accent {

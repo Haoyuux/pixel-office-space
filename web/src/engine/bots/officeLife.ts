@@ -157,7 +157,7 @@ export class OfficeLife {
   }
 
   /**
-   * The building changed. Spots are matched by id (rooms never move, slots are stable): reservations and
+   * The building changed. Spots are matched by id (a moved room keeps its spot ids; the bots are relocated by Population): reservations and
    * current intents carry over; an intent whose spot is gone ends now, so the bot re-picks on the next tick.
    */
   setLayout(spots: Spot[], seats: Record<string, Seat>): void {

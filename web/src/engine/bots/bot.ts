@@ -26,6 +26,19 @@ const BUBBLE_COLOR: Record<BubbleKind, number> = {
   '…': 0x2b3550, '!': 0xd9821e, '✗': 0xc23b3b, '✓': 0x2f8f4e, '💬': 0x2b3550, '😄': 0x2b3550, '😤': 0x2b3550, '😮‍💨': 0x2b3550,
 };
 
+/** A room's old rect and how far it moved. */
+export interface RoomMove { x0: number; y0: number; x1: number; y1: number; dx: number; dy: number }
+
+/** Project rooms whose position changed between two layouts. */
+export function roomMoves(prev: { id: string; kind: string; x0: number; y0: number; x1: number; y1: number }[],
+  next: { id: string; kind: string; x0: number; y0: number }[]): RoomMove[] {
+  const at = new Map(next.filter(r => r.kind === 'project').map(r => [r.id, r]));
+  return prev.flatMap(r => {
+    const n = r.kind === 'project' ? at.get(r.id) : undefined;
+    return n && (n.x0 !== r.x0 || n.y0 !== r.y0) ? [{ x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1, dx: n.x0 - r.x0, dy: n.y0 - r.y0 }] : [];
+  });
+}
+
 export interface BotOptions {
   id: string; // projectId:role
   projectId: string;
@@ -127,8 +140,28 @@ export class Bot {
     if (!this.hud.destroyed) this.hud.destroy({ children: true });
   }
 
-  /** The building changed: later walks use the new grid (rooms never move, so a walk in progress stays valid). */
+  /** The building changed: later walks use the new grid. Call `relocate` too when rooms moved. */
   setGrid(grid: WalkGrid): void { this.grid = grid; }
+
+  /**
+   * Rooms moved (a project was removed and the rooms after it closed the gap): a bot inside a moved room moves with
+   * it (seated or not), and a walk whose destination was in a moved room is re-routed to the moved destination.
+   */
+  relocate(moves: RoomMove[]): void {
+    const shift = (p: Pt): Pt | null => {
+      const m = moves.find(r => p.mx >= r.x0 && p.mx <= r.x1 && p.my >= r.y0 && p.my <= r.y1);
+      return m ? { mx: p.mx + m.dx, my: p.my + m.dy } : null;
+    };
+    const here = shift(this);
+    if (here) { this.mx = here.mx; this.my = here.my; }
+    const dest = this.path[this.path.length - 1];
+    const to = dest && (shift(dest) ?? (here ? dest : null));
+    if (to) {
+      const then = this.then;
+      this.path = [];
+      this.goTo(to, then);
+    } else if (here) this.place();
+  }
 
   /** Walk to a spot (or point) along the walk grid, then call `then`. Stands up first if seated. */
   goTo(target: Spot | Pt, then?: () => void): void {

@@ -7,6 +7,7 @@ import { parsePieces, footprint } from '../src/engine/pieces';
 import { NEON_SCALE } from '../src/engine/neon';
 import { PX } from '../src/engine/iso';
 import type { Placed } from '../src/engine/layout/types';
+import { roomMoves } from '../src/engine/bots/bot';
 
 const META = parsePieces(readFileSync(resolve(__dirname, '../../assets/office/Isometric_Pixel_Props/pieces.csv'), 'utf8'));
 const NEON = JSON.parse(readFileSync(resolve(__dirname, '../../assets/office/neon-office-free/manifest.json'), 'utf8')) as
@@ -211,5 +212,18 @@ describe('buildLayout', () => {
     expect(caf.filter(s => s.tags.includes('bar')).length).toBeGreaterThanOrEqual(4);
     expect(caf.some(s => s.tags.includes('corkboard'))).toBe(true);
     expect(L.pieces.filter(p => p.tag === 'corkboard').length).toBe(1);
+  });
+});
+
+describe('closing the gap of a removed project', () => {
+  it('reports the rooms that moved (old rect + offset); unmoved and removed rooms are left out', () => {
+    const before = buildLayout([proj('a', 0), proj('b', 1), proj('c', 2), proj('d', 3)], META);
+    const after = buildLayout([proj('a', 0), proj('c', 1), proj('d', 2)], META); // b removed, slots compacted
+    const m = roomMoves(before.rooms, after.rooms);
+    expect(m).toEqual([
+      { x0: 0, y0: 16, x1: 14, y1: 24, dx: 16, dy: -8 }, // c: row 2 left → row 1 right
+      { x0: 16, y0: 16, x1: 30, y1: 24, dx: -16, dy: 0 }, // d: row 2 right → row 2 left
+    ]);
+    expect(roomMoves(after.rooms, after.rooms)).toEqual([]);
   });
 });
