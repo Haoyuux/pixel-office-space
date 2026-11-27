@@ -273,6 +273,27 @@ describe('ClaudeOrchestrator', () => {
     expect(runner.of('qa', 'test')).toHaveLength(1);
   });
 
+  it('stuck after a round that changed nothing: retry needs a note (the note reaches the dev)', async () => {
+    const o = make();
+    let approve = false;
+    runner.script = c => c.kind === 'review' && !approve
+      ? { result: fence({ approved: false, issues: [{ role: 'frontend', file: 'ui.txt', note: 'needs an image file' }] }) }
+      : c.kind === 'bounce' && !approve ? { result: 'I cannot produce that image.' } // no files written
+        : undefined;
+    const t = await toFinal(o, repo);
+    expect(gates().at(-1)).toBe('stuck');
+    const open = of('gate.open').at(-1)!;
+    expect(open.payload).toMatchObject({ from: 'review', unchanged: true });
+    expect(() => o.decide(t.id, 'stuck', 'retry')).toThrow(/changed no files/);
+    expect(() => o.decide(t.id, 'stuck', 'retry', '   ')).toThrow(/changed no files/);
+    expect(o.find(t.id)!.openGate).toBe('stuck'); // still open
+    approve = true;
+    o.decide(t.id, 'stuck', 'retry', 'use assets/MeV2.webp instead');
+    await o.idle();
+    expect(runner.of('frontend', 'bounce').at(-1)!.o.prompt).toContain('use assets/MeV2.webp instead');
+    expect(gates().at(-1)).toBe('final');
+  });
+
   it('stuck retry bounces again and re-reviews; stuck cancel cancels', async () => {
     const o = make();
     let approve = false;

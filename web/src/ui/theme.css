@@ -531,3 +531,9 @@ fieldset.po-mode .po-mode-opt input { accent-color: var(--accent); }
 .po-run-note { padding: 4px 14px; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .po-run-panel > .po-error { margin: 6px 14px 0; }
 .po-run-hint { color: #f5c26b; }
+
+/* stuck gate: what is still open, and why a plain retry is blocked */
+.po-gate-asks { margin: 6px 0 2px; font-size: 12px; }
+.po-gate-asks ul { margin: 3px 0 0; padding-left: 18px; max-height: 140px; overflow-y: auto; }
+.po-gate-asks li { margin: 2px 0; line-height: 1.4; overflow-wrap: anywhere; }
+.po-gate-warn { margin: 6px 0 2px; padding: 6px 9px; border-radius: 5px; border: 1px solid #6b5326; background: rgba(245, 194, 107, 0.08); color: #f5c26b; font-size: 12px; }

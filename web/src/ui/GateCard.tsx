@@ -60,6 +60,13 @@ export function GateCard({ ticketId, item, onShow }: { ticketId: string; item: F
   }
 
   const p = parse(item.detail);
+  const issues = gate === 'stuck' && Array.isArray(p.issues)
+    ? (p.issues as { role?: unknown; file?: unknown; note?: unknown }[]).filter(i => typeof i?.note === 'string')
+      .map(i => ({ role: String(i.role ?? ''), file: typeof i.file === 'string' ? i.file : '', note: String(i.note) }))
+    : [];
+  /** A plain retry would repeat a round that changed nothing: the note is required (the server refuses otherwise). */
+  const unchanged = gate === 'stuck' && p.unchanged === true;
+  const needsNote = (d: GateDecision) => unchanged && d === 'retry' && !note.trim();
   const body = gate === 'plan'
     ? <>
         <div className="po-gate-title">Approve the plan?</div>
@@ -75,6 +82,13 @@ export function GateCard({ ticketId, item, onShow }: { ticketId: string; item: F
       : <>
           <div className="po-gate-title">The team is stuck</div>
           <div className="po-gate-text">{STAGE_LABEL[(p.from as keyof typeof STAGE_LABEL) ?? 'review'] ?? 'Review'} bounced the work back {String(p.bounces ?? 3)}× without converging.</div>
+          {issues.length > 0 && (
+            <div className="po-gate-asks">
+              <div className="po-dim">Still open:</div>
+              <ul>{issues.map((i, n) => <li key={n}><b>{i.role}</b>{i.file ? <span className="po-dim"> · {i.file}</span> : null} — {i.note}</li>)}</ul>
+            </div>
+          )}
+          {unchanged && <div className="po-gate-warn" role="note">The last round changed no files, so another round as is would fail the same way. Tell the team what to do in the note — or Accept / Cancel.</div>}
         </>;
 
   return (
@@ -82,11 +96,12 @@ export function GateCard({ ticketId, item, onShow }: { ticketId: string; item: F
       <div className="po-gate-head">⏸ WAITING FOR YOU</div>
       {body}
       <textarea className="po-gate-note" aria-label="Note" rows={1} value={note} disabled={!!sent}
-        placeholder={gate === 'stuck' ? 'note for the next round (optional)' : 'note (optional)'} onChange={e => setNote(e.target.value)} />
+        placeholder={gate === 'stuck' ? (unchanged ? 'what should the team do? (required for One more round)' : 'note for the next round (optional)') : 'note (optional)'} onChange={e => setNote(e.target.value)} />
       {error && <div className="po-error" role="alert">{error}</div>}
       <div className="po-gate-actions">
         {CHOICES[gate]?.map(c => (
-          <button key={c.decision} type="button" className={`po-btn ${c.tone}${sent === c.decision ? ' sent' : ''}`} disabled={!!sent} onClick={() => decide(c.decision)}>
+          <button key={c.decision} type="button" className={`po-btn ${c.tone}${sent === c.decision ? ' sent' : ''}`} disabled={!!sent || needsNote(c.decision)}
+            title={needsNote(c.decision) ? 'Add a note first: the last round changed nothing' : undefined} onClick={() => decide(c.decision)}>
             {c.decision === 'accept' && p.from === 'test' ? 'Accept & continue' : c.label}
           </button>
         ))}
