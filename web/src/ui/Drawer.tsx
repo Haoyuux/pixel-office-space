@@ -18,6 +18,8 @@ import { PastConversations, threadTitle, visibleThreads } from './PastConversati
 import { loadHistory } from '../state/socket';
 
 export const DRAWER_WIDTH = 560;
+/** Full-screen chat: most of the window, a strip of the office stays visible on the left. */
+export const FULL_WIDTH = `max(${DRAWER_WIDTH}px, calc(100vw - 96px))`;
 type Tab = 'feed' | 'raw' | 'changes' | 'plan';
 const TABS: { id: Tab; label: string }[] = [{ id: 'feed', label: 'Feed' }, { id: 'raw', label: 'Raw log' }, { id: 'changes', label: 'Changes' }, { id: 'plan', label: 'Plan' }];
 
@@ -50,6 +52,8 @@ export function Drawer({ projectId }: { projectId: string }) {
   const [tab, setTab] = useState<Tab>('feed');
   const [team, setTeam] = useState(false);
   const [past, setPast] = useState(false);
+  /** ⛶ full-screen chat: the drawer covers most of the window (the office stays visible at the edge). */
+  const [full, setFull] = useState(false);
   const [pastFilter, setPastFilter] = useState('');
   const pastBox = useRef<HTMLInputElement>(null);
   const [pastFocus, setPastFocus] = useState(0);
@@ -99,6 +103,7 @@ export function Drawer({ projectId }: { projectId: string }) {
     if (menu) { setMenu(null); return; }
     if (past) { setPast(false); return; }
     if (running) { void stop(); return; }
+    if (full) { setFull(false); return; }
     if (!fromComposer) close();
   };
   const composer = useRef<ComposerHandle>(null);
@@ -175,7 +180,7 @@ export function Drawer({ projectId }: { projectId: string }) {
   };
 
   return (
-    <aside className="po-drawer" style={{ ['--accent' as string]: accent, width: DRAWER_WIDTH }} aria-label={`${project.name} console`}>
+    <aside className={`po-drawer${full ? ' full' : ''}`} style={{ ['--accent' as string]: accent, width: full ? FULL_WIDTH : DRAWER_WIDTH }} aria-label={`${project.name} console`}>
       <header className="po-dh">
         <div className="po-dh-row">
           <span className="po-dh-dot" aria-hidden />
@@ -194,6 +199,8 @@ export function Drawer({ projectId }: { projectId: string }) {
           <button type="button" className="po-hbtn" aria-label="New conversation" title="New conversation (/new)" onClick={startFresh}>＋ New</button>
           <button type="button" className="po-hbtn" onClick={() => setTeam(true)} title="Edit team">Team · {project.team.length}</button>
           <button type="button" className={`po-hbtn${menu ? ' on' : ''}`} aria-label="Project menu" aria-expanded={!!menu} onClick={() => { setMenu(m => (m ? null : 'open')); setMenuError(null); }}>⋯</button>
+          <button type="button" className={`po-hbtn${full ? ' on' : ''}`} aria-label={full ? 'Exit full screen' : 'Full screen'} aria-pressed={full}
+            title={full ? 'Restore (Esc)' : 'Full-screen chat'} onClick={() => setFull(f => !f)}>⛶</button>
           <button type="button" className="po-hbtn" aria-label="Close console" onClick={close}>✕</button>
         </div>
         {menu && (

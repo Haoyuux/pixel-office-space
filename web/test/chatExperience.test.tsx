@@ -372,3 +372,22 @@ describe('past conversations: rename, pin, delete, search, titles', () => {
     expect(titles()).toEqual(['🎫 Dark mode']);
   });
 });
+
+describe('full-screen chat', () => {
+  it('⛶ expands the drawer; ⛶ again or Esc restores (Esc then closes the drawer)', () => {
+    open([tk('a', { mode: 'ask', answered: true })]);
+    const drawer = () => document.querySelector('.po-drawer') as HTMLElement;
+    expect(drawer().style.width).toBe('560px');
+    fireEvent.click(screen.getByRole('button', { name: 'Full screen' }));
+    expect(drawer().className).toContain('full');
+    expect(drawer().style.width).toContain('100vw');
+    fireEvent.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(drawer().className).not.toContain('full');
+    fireEvent.click(screen.getByRole('button', { name: 'Full screen' }));
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(drawer().className).not.toContain('full');
+    expect(useOffice.getState().selectedProjectId).toBe('p');
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(useOffice.getState().selectedProjectId).toBeNull();
+  });
+});

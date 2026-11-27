@@ -470,3 +470,8 @@ fieldset.po-mode .po-mode-opt input { accent-color: var(--accent); }
 .po-msg-act.danger:hover { color: var(--po-red); }
 .po-past-rename { flex: 1; min-width: 0; height: 30px; margin: 2px 0; padding: 0 8px; background: var(--po-bg); color: var(--po-text); border: 1px solid var(--accent); border-radius: 5px; font: inherit; outline: none; }
 .po-past-confirm { flex-basis: 100%; margin: 4px 0; }
+
+/* ---------- full-screen chat ---------- */
+.po-drawer { transition: width .18s ease; }
+.po-drawer.full { box-shadow: -24px 0 60px rgba(0, 0, 0, 0.55); }
+.po-drawer.full .po-feed { padding-left: max(16px, calc((100% - 960px) / 2)); padding-right: max(16px, calc((100% - 960px) / 2)); }
