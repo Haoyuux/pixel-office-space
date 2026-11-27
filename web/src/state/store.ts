@@ -53,8 +53,10 @@ function fold(v: TicketView, e: TicketEvent): TicketView {
     case 'agent.message': {
       const at = v.feed.findIndex(f => f.kind === 'message' && f.id === e.messageId);
       if (at < 0) return push(item({ kind: 'message', role: e.role, text: e.text, id: e.messageId, status: e.streaming ? 'streaming' : undefined }));
+      if (e.streaming && v.feed[at].status !== 'streaming') return v; // a late delta after the final text
       const feed = [...v.feed];
-      feed[at] = { ...feed[at], text: feed[at].text + e.text, status: e.streaming ? 'streaming' : undefined };
+      // deltas append; the final full text (streaming: false, same id) replaces what streamed so far
+      feed[at] = { ...feed[at], text: e.streaming ? feed[at].text + e.text : e.text, status: e.streaming ? 'streaming' : undefined };
       return { ...v, feed };
     }
     case 'agent.tool': {

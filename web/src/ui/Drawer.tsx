@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { roleDef, type Project, type RoleId, type Ticket, type TicketMode } from '@office/shared';
+import { roleDef, type Project, type RoleId, type Stage, type Ticket, type TicketMode } from '@office/shared';
 import { useOffice } from '../state/store';
 import { api, paths } from './api';
 import { accentCss, kindIcon, kindStatus, kindTitle, ticketKind, canResume, isActive, relativeDate, roleEmoji, roleShort, STATUS_ICON } from './format';
@@ -74,15 +74,40 @@ export function Drawer({ projectId }: { projectId: string }) {
     if (threadOf(openRoot, useOffice.getState().tickets).some(t => !feed[t.id])) void loadHistory(projectId);
   }, [openRoot, projectId]);
 
+  /** The open conversation's latest ticket while an agent works on it (■ Stop, "Thinking…"). */
+  const running = shown?.status === 'running' ? shown : undefined;
+  const [stopBusy, setStopBusy] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
+  useEffect(() => { setStopError(null); setStopBusy(false); }, [running?.id]);
+  /** ■ Stop: a chat answer (or planning) stops at once; a change ticket in a work stage goes through the cancel confirm. */
+  const stop = async () => {
+    if (!running) return;
+    if (ticketKind(running) === 'ticket' && running.stage && WORK_STAGES.includes(running.stage)) { setMenuError(null); setMenu('cancel'); return; }
+    if (stopBusy) return;
+    setStopBusy(true); setStopError(null);
+    const r = await api('POST', paths.stop(running.id));
+    setStopBusy(false);
+    if (!r.ok) setStopError(r.error);
+  };
+  /** Esc: popups first, then stop a running answer; from the window (not typing) it finally closes the drawer. */
+  const escape = (fromComposer: boolean) => {
+    if (menu) { setMenu(null); return; }
+    if (past) { setPast(false); return; }
+    if (running) { void stop(); return; }
+    if (!fromComposer) close();
+  };
+  const escapeRef = useRef(escape);
+  escapeRef.current = escape;
+
   useEffect(() => {
-    // Escape closes the menu, then the drawer; never while a dialog is open (it handles its own Escape) or while typing
+    // never while a dialog is open (it handles its own Escape); the composer handles its own keys
     const key = (e: globalThis.KeyboardEvent) => {
       if (e.key !== 'Escape' || team || document.querySelector('.po-modal') || e.target instanceof HTMLTextAreaElement) return;
-      if (menu) setMenu(null); else close();
+      escapeRef.current(false);
     };
     window.addEventListener('keydown', key);
     return () => window.removeEventListener('keydown', key);
-  }, [team, menu]);
+  }, [team]);
 
   if (!project) return null;
   const accent = accentCss(project.accent);
@@ -258,13 +283,49 @@ export function Drawer({ projectId }: { projectId: string }) {
           : <PlanView ticket={latestWith(t => !!t.plan)} />}
       </div>
 
-      <Composer key={openRoot ?? ''} projectId={project.id} active={active} latest={shown} refocus={refocus}
+      {running && <Working ticket={running} busy={stopBusy} error={stopError} onStop={() => void stop()} />}
+      <Composer key={openRoot ?? ''} projectId={project.id} active={active} latest={shown} refocus={refocus} onEscape={() => escape(true)}
         onCreated={(created, followUp) => {
           // a follow-up stays in this conversation; a new conversation opens once its ticket arrives
           refocus.current = true; setFresh(false); setChosen(followUp ? openRoot ?? null : created?.id ?? null);
         }} onCommand={command} />
       {team && <TeamDialog project={project} onClose={() => setTeam(false)} />}
     </aside>
+  );
+}
+
+const WORK_STAGES: Stage[] = ['design', 'build', 'review', 'test', 'docs'];
+
+/** "12s", "2m 05s". */
+export const elapsed = (ms: number) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+};
+
+/** "● Thinking… 12s   ■ Stop": shown while an agent works on the open conversation. */
+function Working({ ticket, busy, error, onStop }: { ticket: Ticket; busy: boolean; error: string | null; onStop: () => void }) {
+  const feed = useOffice(s => s.feed[ticket.id]);
+  // counted from the owner's latest message to this ticket (or its creation)
+  const since = useMemo(() => {
+    const you = [...(feed ?? [])].reverse().find(f => f.kind === 'user');
+    const t = Date.parse(you?.ts ?? ticket.createdAt);
+    return Number.isFinite(t) ? t : Date.now();
+  }, [feed, ticket.createdAt]);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const typing = feed?.[feed.length - 1]?.status === 'streaming';
+  return (
+    <div className="po-working">
+      <span role="status" aria-label="Working" className="po-working-text">
+        <span className="po-working-dot" aria-hidden>●</span> {typing ? 'Typing…' : 'Thinking…'} {elapsed(now - since)}
+      </span>
+      {error && <span className="po-error-text" role="alert">{error}</span>}
+      <span className="po-grow" />
+      <button type="button" className="po-btn po-stop" disabled={busy} title="Stop (Esc)" onClick={onStop}>■ Stop</button>
+    </div>
   );
 }
 
@@ -343,7 +404,7 @@ function ModeSwitch({ mode, onChange }: { mode: TicketMode; onChange: (m: Ticket
  * Input box. A conversation is open (`latest` = its newest ticket): running / waiting → message to the team; otherwise
  * a follow-up ticket of it. Nothing open → a new conversation (queued while another ticket runs). The toggle forces a new one.
  */
-function Composer({ projectId, active, latest, refocus, onCreated, onCommand }: {
+function Composer({ projectId, active, latest, refocus, onCreated, onCommand, onEscape }: {
   projectId: string;
   /** The project's running ticket (any conversation). */
   active: Ticket | undefined;
@@ -351,6 +412,8 @@ function Composer({ projectId, active, latest, refocus, onCreated, onCommand }: 
   onCreated: (created: Ticket | undefined, followUp: boolean) => void;
   refocus?: { current: boolean };
   onCommand?: (name: CommandName, arg: string) => Promise<string | void>;
+  /** Esc with no popup open (stops a running answer). */
+  onEscape?: () => void;
 }) {
   const [text, setText] = useState('');
   const [mode, setMode] = useState<TicketMode>('auto');
@@ -412,6 +475,7 @@ function Composer({ projectId, active, latest, refocus, onCreated, onCommand }: 
       if (e.key === 'Tab') { e.preventDefault(); edit(rowsShown[sel].complete); return; }
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void runCommand(rowsShown[sel].run); return; }
     }
+    if (e.key === 'Escape') { e.preventDefault(); onEscape?.(); return; }
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); }
   };
   const hint = continuing ? 'Continue this conversation…' : toTeam ? 'message the team…' : active ? 'queue a new ticket…'

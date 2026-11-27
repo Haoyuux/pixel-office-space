@@ -413,3 +413,10 @@ fieldset.po-mode .po-mode-opt input { accent-color: var(--accent); }
 .po-cmdcard-grid > div { display: flex; gap: 10px; }
 .po-cmdcard-grid dt { flex: none; min-width: 110px; color: var(--accent); }
 .po-cmdcard-grid dd { margin: 0; color: var(--po-dim); }
+
+/* ---------- chat experience: working indicator, stop ---------- */
+.po-working { flex: none; display: flex; align-items: center; gap: 10px; padding: 6px 16px; border-top: 1px solid var(--po-line); background: var(--po-panel); font-size: 12px; }
+.po-working-text { color: var(--accent); white-space: nowrap; }
+.po-working-dot { display: inline-block; animation: po-pulse 1.2s ease-in-out infinite; }
+.po-stop { height: 24px; padding: 0 10px; color: var(--po-red); border-color: #6b2a33; background: #1d1116; }
+.po-stop:hover:not(:disabled) { border-color: var(--po-red); }

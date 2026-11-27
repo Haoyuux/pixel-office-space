@@ -29,5 +29,6 @@ export const paths = {
   messages: (ticketId: string) => `/api/tickets/${enc(ticketId)}/messages`,
   cancel: (ticketId: string) => `/api/tickets/${enc(ticketId)}/cancel`,
   resume: (ticketId: string) => `/api/tickets/${enc(ticketId)}/resume`,
+  stop: (ticketId: string) => `/api/tickets/${enc(ticketId)}/stop`,
   gitInit: (projectId: string) => `/api/projects/${enc(projectId)}/git-init`,
 };
