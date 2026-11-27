@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { roleDef, type RoleId, type Ticket } from '@office/shared';
+import { roleDef, type RoleId, type Ticket, type TicketMode } from '@office/shared';
 import { useOffice } from '../state/store';
 import { api, paths } from './api';
 import { accentCss, canResume, isActive, isFinished, relativeDate, roleEmoji, roleShort, STATUS_ICON } from './format';
@@ -144,6 +144,7 @@ export function Drawer({ projectId }: { projectId: string }) {
                     <span className="po-past-meta">
                       <span className="po-dim">{relativeDate(t.createdAt)}</span>
                       <span className={`po-chip ${t.status}`}>{t.status}</span>
+                      {t.answered && <span className="po-chip answered" title="The PM answered; nothing was changed">✓ answered</span>}
                       {roles.length > 0 && <span title={roles.map(roleShort).join(', ')}>{roles.map(roleEmoji).join('')}</span>}
                       {t.usage && <span className="po-dim" title="Uses your Claude plan — not charged">{t.usage.turns} turns</span>}
                     </span>
@@ -209,9 +210,30 @@ function ResumeButton({ ticketId }: { ticketId: string }) {
   </>;
 }
 
+const MODES: { id: TicketMode; label: string; hint: string }[] = [
+  { id: 'auto', label: 'Auto', hint: 'The PM decides: answers a question, plans a change' },
+  { id: 'ask', label: 'Ask', hint: 'Just an answer — nothing is changed' },
+  { id: 'ticket', label: 'Ticket', hint: 'Always plan and build (plan gate, team, final review)' },
+];
+
+/** Auto · Ask · Ticket: how the PM treats a new request. */
+function ModeSwitch({ mode, onChange }: { mode: TicketMode; onChange: (m: TicketMode) => void }) {
+  return (
+    <div className="po-mode" role="radiogroup" aria-label="Mode">
+      {MODES.map(m => (
+        <label key={m.id} className={`po-mode-opt${mode === m.id ? ' on' : ''}`} title={m.hint}>
+          <input type="radio" name="po-mode" value={m.id} checked={mode === m.id} onChange={() => onChange(m.id)} />
+          <span>{m.label}</span>
+        </label>
+      ))}
+    </div>
+  );
+}
+
 /** Input box: no running ticket → new ticket (or a follow-up of the picked finished ticket); running → message to the team, or a queued ticket with the toggle on. */
 function Composer({ projectId, active, continueFrom, onCreated }: { projectId: string; active: Ticket | undefined; continueFrom?: Ticket; onCreated: () => void }) {
   const [text, setText] = useState('');
+  const [mode, setMode] = useState<TicketMode>('auto');
   const [asTicket, setAsTicket] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -223,8 +245,8 @@ function Composer({ projectId, active, continueFrom, onCreated }: { projectId: s
     const t = text.trim();
     if (!t || busy) return;
     setBusy(true); setError(null);
-    const r = continuing ? await api('POST', paths.tickets(projectId), { text: t, parentTicketId: continueFrom!.id })
-      : creating ? await api('POST', paths.tickets(projectId), { text: t }) : await api('POST', paths.messages(active!.id), { text: t });
+    const r = continuing ? await api('POST', paths.tickets(projectId), { text: t, parentTicketId: continueFrom!.id, mode })
+      : creating ? await api('POST', paths.tickets(projectId), { text: t, mode }) : await api('POST', paths.messages(active!.id), { text: t });
     setBusy(false);
     if (!r.ok) { setError(r.error); return; }
     setText('');
@@ -234,7 +256,8 @@ function Composer({ projectId, active, continueFrom, onCreated }: { projectId: s
   const key = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); }
   };
-  const hint = continuing ? 'Continue this conversation…' : !active ? 'describe a new ticket…' : asTicket ? 'queue a new ticket…' : 'message the team…';
+  const hint = continuing ? 'Continue this conversation…' : !active ? (mode === 'ask' ? 'ask a question…' : 'describe a new ticket…')
+    : asTicket ? 'queue a new ticket…' : 'message the team…';
   const rows = Math.min(6, Math.max(1, text.split('\n').length));
 
   return (
@@ -257,6 +280,7 @@ function Composer({ projectId, active, continueFrom, onCreated }: { projectId: s
         ) : <span className="po-dim">creates a ticket</span>}
         {continuing && <span className="po-dim po-follow-of">follow-up of “{continueFrom!.title}”</span>}
         <span className="po-grow" />
+        {creating && <ModeSwitch mode={mode} onChange={setMode} />}
         <span className="po-dim">⏎ send · ⇧⏎ newline</span>
       </div>
     </footer>
