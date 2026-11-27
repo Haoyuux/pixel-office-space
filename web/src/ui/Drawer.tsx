@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { roleDef, type Project, type RoleId, type Stage, type Ticket } from '@office/shared';
 import { useOffice } from '../state/store';
 import { api, paths } from './api';
-import { accentCss, kindIcon, kindStatus, kindTitle, ticketKind, canResume, isActive, relativeDate, roleEmoji, roleShort, STATUS_ICON } from './format';
+import { accentCss, kindIcon, kindStatus, kindTitle, ticketKind, canResume, isActive, roleShort } from './format';
 import { ClaudeBanner, useClaudeStatus } from './claudeStatus';
 import { COMMANDS, MODEL_DESC, isModel, type CommandName } from './slash';
 import { Composer, type ComposerHandle } from './Composer';
@@ -14,6 +14,7 @@ import { PlanView } from './PlanView';
 import { PipelineBar } from './PipelineBar';
 import { TeamDialog } from './TeamDialog';
 import { rootOf, threadOf, threadsOf } from './threads';
+import { PastConversations, threadTitle, visibleThreads } from './PastConversations';
 import { loadHistory } from '../state/socket';
 
 export const DRAWER_WIDTH = 560;
@@ -30,7 +31,8 @@ export function Drawer({ projectId }: { projectId: string }) {
   const roleFilter = useOffice(s => s.roleFilter);
   const diffs = useOffice(s => s.diffs);
   const tickets = useMemo(() => Object.values(all).filter(t => t.projectId === projectId).sort(byNewest), [all, projectId]);
-  const threads = useMemo(() => threadsOf(projectId, all), [all, projectId]);
+  const meta = useOffice(s => s.conversations);
+  const threads = useMemo(() => visibleThreads(threadsOf(projectId, all), meta), [all, projectId, meta]);
   const active = tickets.find(isActive);
   const queued = tickets.filter(t => t.status === 'queued');
   /** A ticket of the conversation the owner opened (any ticket of the thread: its root is looked up). */
@@ -38,7 +40,9 @@ export function Drawer({ projectId }: { projectId: string }) {
   /** /new or /clear: nothing is shown and the next message starts a fresh conversation. */
   const [fresh, setFresh] = useState(false);
   // the open conversation: the one picked, else the one running; nothing → welcome + a fresh composer
-  const openRoot = fresh ? undefined : (chosen && all[chosen] ? rootOf(chosen, all) : undefined) ?? (active ? rootOf(active.id, all) : undefined);
+  const pickedRoot = fresh ? undefined : (chosen && all[chosen] ? rootOf(chosen, all) : undefined) ?? (active ? rootOf(active.id, all) : undefined);
+  // a deleted conversation is closed (back to the welcome view)
+  const openRoot = pickedRoot && !meta[pickedRoot]?.deleted ? pickedRoot : undefined;
   const thread = useMemo(() => (openRoot ? threadOf(openRoot, all) : []), [openRoot, all]);
   /** The latest ticket of the conversation: header, pipeline, raw log, and what the composer continues. */
   const shown = thread[thread.length - 1];
@@ -119,6 +123,7 @@ export function Drawer({ projectId }: { projectId: string }) {
   }, [team]);
 
   if (!project) return null;
+  const title = openRoot && thread[0] ? threadTitle({ root: thread[0] }, meta[openRoot]) : shown ? kindTitle(shown) : '';
   const accent = accentCss(project.accent);
   const mode = project.agentsMode ?? 'claude';
   // Initialize git is offered only when no repo was found (never for a parent of repos)
@@ -136,8 +141,6 @@ export function Drawer({ projectId }: { projectId: string }) {
   const remove = () => once(() => api('DELETE', paths.project(project.id)), close);
   const target = active;
   const cancelTicket = () => { if (target) void once(() => api('POST', paths.cancel(target.id)), () => setMenu(null)); };
-  const q = pastFilter.trim().toLowerCase();
-  const pastShown = q ? threads.filter(th => th.tickets.some(t => kindTitle(t).toLowerCase().includes(q))) : threads;
   /** Back to the welcome view: the next message starts a new conversation (nothing is lost). */
   const startFresh = () => { refocus.current = true; setChosen(null); setFresh(true); setPast(false); };
 
@@ -221,7 +224,7 @@ export function Drawer({ projectId }: { projectId: string }) {
       <div className="po-ticketbar">
         <div className="po-ticket-row">
           <span aria-hidden>{kindIcon(shown)}</span>
-          {shown ? <span className="po-ticket-title" title={kindTitle(shown)}>{kindTitle(shown)}</span>
+          {shown ? <span className="po-ticket-title" title={title}>{title}</span>
             : <span className="po-dim po-grow">no conversations yet — ask below</span>}
           {shown && <span className={`po-chip ${shown.status}`}>{shown.status === 'waiting' ? '⏸ waiting for you' : kindStatus(shown)}</span>}
           {queued.length > 0 && <span className="po-chip queued" title={queued.map(t => t.title).join('\n')}>+{queued.length} queued</span>}
@@ -231,32 +234,8 @@ export function Drawer({ projectId }: { projectId: string }) {
             </button>
           )}
         </div>
-        {past && <div className="po-past-wrap">
-          <input ref={pastBox} className="po-past-filter" aria-label="Filter conversations" placeholder="filter by title…" value={pastFilter}
-            spellCheck={false} onChange={e => setPastFilter(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); setPast(false); } }} />
-          <ul className="po-past" aria-label="Past conversations">
-            {pastShown.length === 0 && <li className="po-dim po-past-none">no conversation matches</li>}
-            {pastShown.map(({ root, latest, tickets: ts }) => {
-              const roles = [...new Set(ts.flatMap(t => Object.keys(t.agentStates) as RoleId[]))];
-              const turns = ts.reduce((n, t) => n + (t.usage?.turns ?? 0), 0);
-              return (
-                <li key={root.id}>
-                  <button type="button" className={`po-past-item${root.id === openRoot ? ' on' : ''}`} onClick={() => { setChosen(root.id); setFresh(false); setPast(false); }}>
-                    <span className="po-past-title">{kindIcon(latest)} {kindTitle(root)}</span>
-                    <span className="po-past-meta">
-                      <span className="po-dim">{relativeDate(latest.createdAt)}</span>
-                      <span className={`po-chip ${latest.status}`}>{kindStatus(latest)}</span>
-                      <span className="po-dim" title="Messages in this conversation">{ts.length} message{ts.length === 1 ? '' : 's'}</span>
-                      {roles.length > 0 && <span title={roles.map(roleShort).join(', ')}>{roles.map(roleEmoji).join('')}</span>}
-                      {turns > 0 && <span className="po-dim" title="Uses your Claude plan — not charged">{turns} turns</span>}
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </div>}
+        {past && <PastConversations projectId={project.id} threads={threads} openRoot={openRoot} filter={pastFilter} onFilter={setPastFilter}
+          inputRef={pastBox} onOpen={id => { setChosen(id); setFresh(false); setPast(false); }} onClose={() => setPast(false)} />}
         {(!shown || ticketKind(shown) === 'ticket') && <PipelineBar team={project.team} ticket={shown} />}
         {shown?.status === 'failed' && shown.reason && (
           <div className="po-fail-row">

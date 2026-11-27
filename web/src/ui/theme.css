@@ -460,3 +460,13 @@ fieldset.po-mode .po-mode-opt input { accent-color: var(--accent); }
 .po-you-att { margin: 4px 0 0; justify-content: flex-end; }
 .po-attach { flex: none; align-self: center; }
 .po-slash-file { color: var(--po-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- past conversations: rename, pin, delete ---------- */
+.po-past-row { position: relative; display: flex; flex-wrap: wrap; align-items: stretch; }
+.po-past-row > .po-past-item { flex: 1; min-width: 0; }
+.po-past-actions { display: inline-flex; align-items: center; gap: 1px; padding: 0 4px; opacity: 0; transition: opacity .12s; }
+.po-past-row:hover .po-past-actions, .po-past-actions:focus-within, .po-past-row.pinned .po-past-actions { opacity: 1; }
+.po-msg-act.on { color: var(--po-amber); }
+.po-msg-act.danger:hover { color: var(--po-red); }
+.po-past-rename { flex: 1; min-width: 0; height: 30px; margin: 2px 0; padding: 0 8px; background: var(--po-bg); color: var(--po-text); border: 1px solid var(--accent); border-radius: 5px; font: inherit; outline: none; }
+.po-past-confirm { flex-basis: 100%; margin: 4px 0; }

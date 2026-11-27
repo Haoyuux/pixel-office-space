@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, waitFor, act, within } from '@testing-library/react';
 import type { Project, Ticket } from '@office/shared';
 import { useOffice, resetOffice } from '../src/state/store';
 import { Drawer } from '../src/ui/Drawer';
@@ -282,5 +282,93 @@ describe('composer: attachments, @files, recall, edit-and-resend', () => {
     render(<Feed ticketId="t" />);
     expect(screen.getByRole('list', { name: /attached files/i }).textContent).toContain('shot.png');
     expect(screen.getByText(/Stopped by you/)).toBeTruthy();
+  });
+});
+
+describe('past conversations: rename, pin, delete, search, titles', () => {
+  const A = tk('a', { text: 'What does login do?', mode: 'ask', answered: true, createdAt: '2026-11-26T10:00:00Z' });
+  const B = tk('b', { text: 'And logout?', parentTicketId: 'a', mode: 'ask', answered: true, createdAt: '2026-11-26T10:05:00Z' });
+  const X = tk('x', { text: 'Dark mode', title: 'Dark mode', createdAt: '2026-11-26T11:00:00Z' });
+  const pastList = () => {
+    if (!screen.queryByRole('list', { name: /past conversations/i })) fireEvent.click(screen.getByRole('button', { name: /past conversations/i }));
+    return screen.getByRole('list', { name: /past conversations/i });
+  };
+  const titles = () => [...pastList().querySelectorAll('.po-past-item .po-past-title')].map(e => e.textContent);
+  const rowOf = (re: RegExp) => [...pastList().querySelectorAll<HTMLElement>('li')].find(li => re.test(li.textContent ?? ''))!;
+
+  it('shows the meta title (rename / auto title) instead of the question', () => {
+    open([A, B, X], { conversations: { a: { projectId: 'p', title: 'Login flow' } } });
+    expect(titles()).toEqual(['🎫 Dark mode', '💬 Login flow']);
+    fireEvent.click(within(pastList()).getByRole('button', { name: /Login flow/ }));
+    expect(document.querySelector('.po-ticket-title')!.textContent).toBe('Login flow');
+  });
+
+  it('snapshot and conversation.updated fill the meta', () => {
+    useOffice.getState().apply({ type: 'snapshot', snapshot: { projects: [P], tickets: [A], conversations: { a: { projectId: 'p', title: 'T1' } } } });
+    expect(useOffice.getState().conversations.a.title).toBe('T1');
+    useOffice.getState().apply({ type: 'conversation.updated', projectId: 'p', ts: '', rootId: 'a', meta: { projectId: 'p', title: 'T2', pinned: true } });
+    expect(useOffice.getState().conversations.a).toEqual({ projectId: 'p', title: 'T2', pinned: true });
+  });
+
+  it('rename inline: ✎ → input → Enter PATCHes {title}', async () => {
+    reply = (url, method) => (url === '/api/conversations/a' && method === 'PATCH' ? { status: 200, body: { rootId: 'a', projectId: 'p', title: 'Login Q' } } : undefined);
+    open([A, B, X]);
+    fireEvent.click(within(rowOf(/login do/)).getByRole('button', { name: /rename/i }));
+    const input = screen.getByRole('textbox', { name: /conversation title/i }) as HTMLInputElement;
+    expect(input.value).toBe('What does login do?');
+    fireEvent.change(input, { target: { value: 'Login Q' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(posts()[0]).toMatchObject({ url: '/api/conversations/a', method: 'PATCH', body: { title: 'Login Q' } });
+    await waitFor(() => expect(titles()).toContain('💬 Login Q'));
+  });
+
+  it('Esc cancels a rename without a request', () => {
+    open([A, X]);
+    fireEvent.click(within(rowOf(/login do/)).getByRole('button', { name: /rename/i }));
+    fireEvent.keyDown(screen.getByRole('textbox', { name: /conversation title/i }), { key: 'Escape' });
+    expect(screen.queryByRole('textbox', { name: /conversation title/i })).toBeNull();
+    expect(posts()).toHaveLength(0);
+  });
+
+  it('📌 pin PATCHes {pinned: true}; pinned rows come first', async () => {
+    reply = (url, method) => (url === '/api/conversations/a' && method === 'PATCH' ? { status: 200, body: { rootId: 'a', projectId: 'p', pinned: true } } : undefined);
+    open([A, B, X]);
+    expect(titles()[0]).toContain('Dark mode');
+    fireEvent.click(within(rowOf(/login do/)).getByRole('button', { name: /^pin conversation/i }));
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(posts()[0].body).toEqual({ pinned: true });
+    await waitFor(() => expect(titles()[0]).toContain('What does login do?'));
+    expect(within(rowOf(/login do/)).getByRole('button', { name: /unpin/i })).toBeTruthy();
+  });
+
+  it('🗑 delete asks inline, then DELETEs (JSON); the row is hidden and the count drops', async () => {
+    reply = (url, method) => (url === '/api/conversations/a' && method === 'DELETE' ? { status: 200, body: { rootId: 'a', projectId: 'p', deleted: true } } : undefined);
+    open([A, B, X]);
+    fireEvent.click(within(rowOf(/login do/)).getByRole('button', { name: /delete conversation/i }));
+    expect(posts()).toHaveLength(0);
+    fireEvent.click(within(screen.getByRole('group', { name: /confirm delete/i })).getByRole('button', { name: /^delete$/i }));
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(posts()[0]).toMatchObject({ url: '/api/conversations/a', method: 'DELETE' });
+    const init = (fetch as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls.find(c => c[1]?.method === 'DELETE')![1];
+    expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json');
+    await waitFor(() => expect(titles()).toEqual(['🎫 Dark mode']));
+    expect(screen.getByRole('button', { name: /past conversations/i }).textContent).toContain('1');
+  });
+
+  it('a server error shows inline on the row', async () => {
+    reply = url => (url === '/api/conversations/a' ? { status: 404, body: { error: 'no such conversation' } } : undefined);
+    open([A, X]);
+    fireEvent.click(within(rowOf(/login do/)).getByRole('button', { name: /^pin conversation/i }));
+    await waitFor(() => expect(screen.getByText('no such conversation')).toBeTruthy());
+  });
+
+  it('search matches titles and message text', () => {
+    open([A, B, X], { feed: { b: [{ kind: 'message', role: 'pm', text: 'It clears the session cookie.', id: 'm', ts: '' }] } });
+    pastList();
+    fireEvent.change(screen.getByRole('textbox', { name: /filter conversations/i }), { target: { value: 'cookie' } });
+    expect(titles()).toEqual(['💬 What does login do?']);
+    fireEvent.change(screen.getByRole('textbox', { name: /filter conversations/i }), { target: { value: 'dark' } });
+    expect(titles()).toEqual(['🎫 Dark mode']);
   });
 });

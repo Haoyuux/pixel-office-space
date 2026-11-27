@@ -48,7 +48,7 @@ describe('threaded conversations', () => {
   it('past conversations: one row per thread, root title, latest status/kind, message count', () => {
     open([A, B, X]);
     expect(screen.getByRole('button', { name: /past conversations/i }).textContent).toContain('2');
-    const rows = within(pastList()).getAllByRole('button');
+    const rows = [...pastList().querySelectorAll<HTMLElement>('.po-past-item')];
     expect(rows).toHaveLength(2);
     expect(rows[0].textContent).toContain('What does login do?');
     expect(rows[0].textContent).not.toContain('And logout?');

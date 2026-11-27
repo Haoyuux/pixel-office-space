@@ -1,4 +1,4 @@
-import type { ServerEvent, Ticket } from '@office/shared';
+import type { ConversationMeta, ServerEvent, Ticket } from '@office/shared';
 import { useOffice } from './store';
 
 /**
@@ -57,8 +57,9 @@ export async function loadHistory(projectId: string): Promise<void> {
   try {
     const r = await fetch(`/api/projects/${encodeURIComponent(projectId)}/tickets?limit=100`);
     if (!r.ok) return;
-    const body = await r.json() as { tickets: Ticket[]; events: Record<string, ServerEvent[]> };
+    const body = await r.json() as { tickets: Ticket[]; events: Record<string, ServerEvent[]>; conversations?: Record<string, ConversationMeta> };
     useOffice.getState().applyHistory(projectId, body.tickets ?? [], body.events ?? {});
+    if (body.conversations && typeof body.conversations === 'object') useOffice.getState().setConversations(body.conversations);
   } catch { /* offline: the next snapshot retries */ }
 }
 
