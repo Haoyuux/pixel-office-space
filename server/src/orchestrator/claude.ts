@@ -14,7 +14,7 @@ import { newTranslateContext, translate } from '../claude/translate';
 import { MAX_TURNS, ROLE_TOOLS } from '../claude/roles';
 import {
   bouncePrompt, CONTINUE, deliverNotesPrompt, diffSummary, fixJsonPrompt, followUpPrompt, planPrompt, previousContext,
-  repoContext, reviewPrompt, stagePrompt, testPrompt, withOwnerNotes,
+  repoContext, reviewPrompt, SHARED_MODULES_RULE, stagePrompt, testPrompt, withOwnerNotes,
 } from '../claude/prompts';
 import { extractJson, planValidator, reviewValidator, testValidator, type PlanWithMap } from '../claude/parse';
 
@@ -66,6 +66,8 @@ interface Issue { role: RoleId; file?: string; note: string }
 interface Unit {
   name: string; /** the owner's repo */ repo: string; /** its worktree */ path: string; branch: string;
   base: { branch: string; head: string }; merged?: boolean;
+  /** `<path>/node_modules` is a junction to the owner's repo's node_modules. */
+  sharedModules?: boolean;
 }
 /** Where the non-PM roles work: the one worktree (single repo) or a plain folder holding one worktree per repo. */
 interface Ws { path: string; multi: boolean; units: Unit[] }
@@ -414,17 +416,21 @@ export class ClaudeOrchestrator implements Orchestrator {
     const pws = run.parent?.workspace;
     if (pws && !pws.merged) {
       const ws = restoreWs(folder, pws);
-      for (const u of ws.units) delete u.merged;
       let all = true;
       for (const u of ws.units) if (!(await this.git.branchExists(u.repo, u.branch))) { all = false; break; }
       if (all) {
+        for (const u of ws.units) {
+          // partly merged parent: that repo's work is in its base now, so diff/merge from where the base is today
+          if (u.merged) u.base = { ...u.base, head: (await this.git.baseInfo(u.repo)).head };
+          delete u.merged;
+        }
         // follow-up of an unmerged ticket: continue on the same branch(es) (worktrees recreated if removed)
         run.ws = ws;
         await this.attachAll(ws);
         this.alive(run);
         await this.provisionAgents(run);
         this.workspace(run);
-        this.log(run, 'pm', `Continuing on branch ${ws.units[0].branch}`);
+        this.log(run, 'pm', `Continuing on ${branchesOf(ws.units)}`);
         return;
       }
     }
@@ -441,7 +447,7 @@ export class ClaudeOrchestrator implements Orchestrator {
           ws.units.push({ name: r.name, repo: r.path, path: wt.path, branch: wt.branch, base: { branch: info.branch, head: info.head } });
         }
       } catch (e) {
-        await this.removeWs(ws);
+        await this.removeWs(run, ws);
         throw e;
       }
       run.ws = ws;
@@ -451,7 +457,8 @@ export class ClaudeOrchestrator implements Orchestrator {
       const wt = await this.git.createWorktree(folder, wsPath, branch, info.head);
       run.ws = { path: wt.path, multi: false, units: [{ name: '', repo: folder, path: wt.path, branch: wt.branch, base: { branch: info.branch, head: info.head } }] };
     }
-    if (run.ended || this.stopping) { await this.removeWs(run.ws); throw new Ended(); }
+    if (run.ended || this.stopping) { await this.removeWs(run, run.ws); throw new Ended(); }
+    await this.shareModules(run.ws);
     await this.provisionAgents(run);
     this.workspace(run);
     const ws = run.ws;
@@ -481,12 +488,46 @@ export class ClaudeOrchestrator implements Orchestrator {
     for (const u of ws.units) {
       if (!fs.existsSync(path.join(u.path, '.git'))) u.path = (await this.git.attachWorktree(u.repo, u.path, u.branch)).path;
     }
+    await this.shareModules(ws);
   }
 
-  /** Remove every unit's worktree (branches kept) and the workspace folder. */
-  private async removeWs(ws: Ws) {
-    for (const u of ws.units) await this.git.removeWorktree(u.repo, u.path).catch(() => undefined);
-    if (ws.multi) fs.rmSync(ws.path, { recursive: true, force: true, maxRetries: 5 });
+  /**
+   * A worktree has no node_modules (ignored files are not checked out): link each one to the owner's repo copy
+   * (a junction, so no admin rights on Windows) and exclude it so commitAll never picks the link up.
+   */
+  private async shareModules(ws: Ws) {
+    for (const u of ws.units) {
+      const own = path.join(u.repo, 'node_modules');
+      const mine = path.join(u.path, 'node_modules');
+      if (isLink(mine)) { u.sharedModules = true; continue; }
+      if (!fs.existsSync(own) || fs.existsSync(mine)) continue;
+      try {
+        fs.symlinkSync(own, mine, 'junction');
+        await this.git.excludePath(u.path, '/node_modules');
+        u.sharedModules = true;
+      } catch { /* best effort: the agent can still install into the worktree */ }
+    }
+  }
+
+  /**
+   * Remove every unit's worktree (branches kept) and the workspace folder. Never throws: a file still locked
+   * (dotnet/MSBuild, a test runner) must not fail a ticket whose work is done; leftovers are reported in the log.
+   */
+  private async removeWs(run: Run, ws: Ws) {
+    const left: string[] = [];
+    for (const u of ws.units) {
+      // drop the node_modules junction first so the removal never descends into the owner's node_modules
+      const mine = path.join(u.path, 'node_modules');
+      try { if (isLink(mine)) unlinkDir(mine); } catch { left.push(mine); continue; }
+      try { await this.git.removeWorktree(u.repo, u.path); } catch { left.push(u.path); }
+    }
+    if (ws.multi) {
+      try { fs.rmSync(ws.path, { recursive: true, force: true, maxRetries: 5 }); } catch { left.push(ws.path); }
+    }
+    if (left.length) {
+      try { this.log(run, 'pm', `Could not remove ${[...new Set(left)].join(', ')} (files in use?) — left for manual cleanup; your work is safe.`); }
+      catch { /* the run may be gone */ }
+    }
   }
 
   /** The branch diff of every unit; multi-repo paths are prefixed with `<repo>/`. */
@@ -503,7 +544,10 @@ export class ClaudeOrchestrator implements Orchestrator {
   /** Multi-repo projects: tell the agent which subfolders are repos. */
   private ctx(run: Run, prompt: string): string {
     const names = run.ws?.multi ? run.ws.units.map(u => u.name) : (run.repos ?? []).map(r => r.name);
-    return names.length ? `${prompt}\n\n${repoContext(names)}` : prompt;
+    const parts = [prompt];
+    if (names.length) parts.push(repoContext(names));
+    if (run.ws?.units.some(u => u.sharedModules)) parts.push(SHARED_MODULES_RULE);
+    return parts.join('\n\n');
   }
 
   /**
@@ -690,7 +734,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     this.alive(run);
     if (!changed.length) {
       this.message(run, 'pm', 'No changes were made — nothing to merge.');
-      await this.removeWs(ws);
+      await this.removeWs(run, ws);
       this.finish(run, 'done');
       return;
     }
@@ -712,7 +756,7 @@ export class ClaudeOrchestrator implements Orchestrator {
       const f = path.join(run.project.folder, MAP_FILE);
       if (!fs.existsSync(f)) { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, run.projectMap); }
     }
-    await this.removeWs(ws);
+    await this.removeWs(run, ws);
     this.finish(run, 'done');
   }
 
@@ -741,7 +785,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     if (problems.length) {
       const instr = changed.map(u => `# ${u.name}\n${problems.find(p => p.u === u)?.instructions ?? manual(u)}`).join('\n\n');
       this.message(run, 'pm', `Nothing was merged: ${problems.map(p => `${p.u.name}: ${p.reason}`).join('; ')}.\n` +
-        `Your work is safe on branch ${changed[0].branch} in ${changed.map(u => u.name).join(', ')}. To merge it yourself, run:\n${instr}`);
+        `Your work is safe on ${branchesOf(changed)} in ${changed.map(u => u.name).join(', ')}. To merge it yourself, run:\n${instr}`);
       return;
     }
     const merged: { u: Unit; sha: string }[] = [];
@@ -760,7 +804,7 @@ export class ClaudeOrchestrator implements Orchestrator {
         : '';
       const instr = [`# ${u.name}\n${res.instructions}`, ...rest.map(r => `# ${r.name}\n${manual(r)}`)].join('\n\n');
       this.message(run, 'pm', `Merge stopped at ${u.name}: ${res.reason}\n${undo}` +
-        `Not merged: ${[u, ...rest].map(r => r.name).join(', ')}. Your work is safe on branch ${u.branch}. To merge it yourself, run:\n${instr}`);
+        `Not merged: ${[u, ...rest].map(r => r.name).join(', ')}. Your work is safe on ${branchesOf([u, ...rest])}. To merge it yourself, run:\n${instr}`);
       return;
     }
     this.workspace(run, true);
@@ -913,7 +957,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     if (how === 'cancelled' && run.ws) {
       const ws = run.ws;
       const inflight = [...run.inflight];
-      const p = Promise.allSettled(inflight).then(() => this.removeWs(ws)).catch(() => undefined);
+      const p = Promise.allSettled(inflight).then(() => this.removeWs(run, ws)).catch(() => undefined);
       this.pending.add(p);
       void p.finally(() => this.pending.delete(p));
     }
@@ -950,6 +994,18 @@ export class ClaudeOrchestrator implements Orchestrator {
     this.opts.log.append(e);
     for (const l of this.listeners) l(e);
   }
+}
+
+const isLink = (p: string) => { try { return fs.lstatSync(p).isSymbolicLink(); } catch { return false; } };
+/** Remove a junction/symlink itself (never its target's contents). */
+function unlinkDir(p: string) {
+  try { fs.unlinkSync(p); } catch { fs.rmdirSync(p); }
+}
+/** "branch X", or "branches angular: X, aspnet-core: Y" when a repo needed a different name. */
+function branchesOf(units: Unit[]): string {
+  const names = [...new Set(units.map(u => u.branch))];
+  if (names.length === 1) return `branch ${names[0]}`;
+  return `branches ${units.map(u => `${u.name}: ${u.branch}`).join(', ')}`;
 }
 
 /** Rebuild the per-repo worktrees from a persisted workspace (old single-repo shape has no `repos`). */

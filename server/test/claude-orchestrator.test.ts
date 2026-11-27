@@ -4,7 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { Project, RoleId, ServerEvent } from '@office/shared';
-import { ClaudeOrchestrator, NOT_A_GIT_REPO } from '../src/orchestrator/claude';
+import { ClaudeOrchestrator, NOT_A_GIT_REPO, type GitApi } from '../src/orchestrator/claude';
+import * as realGit from '../src/claude/git';
 import type { RunOptions, RunResult } from '../src/claude/runner';
 import { TicketLog } from '../src/ticketLog';
 
@@ -97,9 +98,9 @@ class FakeRunner {
 let runner: FakeRunner;
 let events: ServerEvent[];
 let dataDir: string;
-const make = () => {
+const make = (git?: GitApi) => {
   runner = new FakeRunner(); events = []; dataDir = tmp('po-data-');
-  const o = new ClaudeOrchestrator({ log: new TicketLog(path.join(dataDir, 'tickets')), runner, dataDir });
+  const o = new ClaudeOrchestrator({ log: new TicketLog(path.join(dataDir, 'tickets')), runner, dataDir, git });
   o.onEvent(e => events.push(e));
   return o;
 };
@@ -1019,5 +1020,80 @@ describe('ClaudeOrchestrator: multi-repo projects', () => {
       expect(r.branch).toBe(pw.branch);
       expect(git(r.path, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(pw.branch);
     }
+  });
+
+  it('follow-up after a partial merge: merged repos get their current HEAD as the new base', async () => {
+    const o = make();
+    const t1 = await toPlanGate(o, parent);
+    writes();
+    o.decide(t1.id, 'plan', 'approved');
+    await o.idle();
+    fs.writeFileSync(path.join(be, 'api.txt'), 'mine\n');
+    git(be, 'add', '-A'); git(be, 'commit', '-q', '-m', 'mine');
+    const beBase = o.find(t1.id)!.workspace!.repos![1].base.head;
+    o.decide(t1.id, 'final', 'approved');
+    await o.idle();
+    expect(o.find(t1.id)!.workspace!.repos![0].merged).toBe(true);
+    const t2 = o.startTicket(project(parent), 'More', { parentTicketId: t1.id });
+    await o.idle();
+    o.decide(t2.id, 'plan', 'approved');
+    await o.idle();
+    const w = o.find(t2.id)!.workspace!;
+    expect(w.repos![0].base.head).toBe(git(fe, 'rev-parse', 'HEAD'));
+    expect(w.repos![1].base.head).toBe(beBase);
+    expect(of('ticket.diff').at(-1)!.files.map(f => f.path)).not.toContain('angular/ui.txt');
+  });
+
+  it('a cleanup failure after the merge (Windows file locks) never fails the ticket', async () => {
+    const o = make({ ...realGit, removeWorktree: async () => { throw new Error('EBUSY: resource busy or locked'); } });
+    const t = await toPlanGate(o, parent);
+    writes();
+    o.decide(t.id, 'plan', 'approved');
+    await o.idle();
+    const rm = fs.rmSync;
+    const ws = wsOf(t.id);
+    (fs as any).rmSync = (p: fs.PathLike, opts?: fs.RmOptions) => {
+      if (path.resolve(String(p)) === path.resolve(ws)) throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+      return rm(p, opts);
+    };
+    try {
+      o.decide(t.id, 'final', 'approved');
+      await o.idle();
+    } finally { (fs as any).rmSync = rm; }
+    expect(o.find(t.id)!.status).toBe('done');
+    expect(fs.existsSync(path.join(fe, 'ui.txt'))).toBe(true);
+    expect(o.find(t.id)!.workspace!.merged).toBe(true);
+    expect(of('log.raw').map(e => e.line).join('\n')).toMatch(/left for manual cleanup/);
+    for (const r of [fe, be]) git(r, 'worktree', 'remove', '--force', path.join(ws, path.basename(r)));
+  });
+
+  it('node_modules: junction to the owner\'s copy, never committed, unlinked before removal (owner copy survives)', async () => {
+    const nm = path.join(fe, 'node_modules');
+    fs.mkdirSync(path.join(nm, 'pkg'), { recursive: true });
+    fs.writeFileSync(path.join(nm, 'pkg', 'marker.txt'), 'keep\n');
+    fs.writeFileSync(path.join(fe, '.gitignore'), 'node_modules/\n');
+    git(fe, 'add', '-A'); git(fe, 'commit', '-q', '-m', 'ignore');
+    const o = make();
+    const t = await toPlanGate(o, parent);
+    let linked = false;
+    runner.script = (c): Reply | undefined => {
+      if (c.kind !== 'stage') return undefined;
+      const wnm = path.join(c.o.cwd, 'angular', 'node_modules');
+      linked ||= fs.lstatSync(wnm).isSymbolicLink() && fs.existsSync(path.join(wnm, 'pkg', 'marker.txt'));
+      return c.o.role === 'frontend' ? { result: 'done', write: { 'angular/ui.txt': 'ui\n' } } : { result: 'done' };
+    };
+    o.decide(t.id, 'plan', 'approved');
+    await o.idle();
+    expect(linked).toBe(true);
+    expect(fs.existsSync(path.join(wsOf(t.id), 'aspnet-core', 'node_modules'))).toBe(false);
+    expect(runner.of('frontend', 'stage')[0].o.prompt).toMatch(/never run npm install/);
+    expect(git(path.join(wsOf(t.id), 'angular'), 'ls-files')).not.toMatch(/node_modules/);
+    expect(of('ticket.diff').at(-1)!.files.map(f => f.path)).toEqual(['angular/ui.txt']);
+    o.decide(t.id, 'final', 'approved');
+    await o.idle();
+    expect(o.find(t.id)!.status).toBe('done');
+    expect(fs.existsSync(wsOf(t.id))).toBe(false);
+    expect(fs.readFileSync(path.join(nm, 'pkg', 'marker.txt'), 'utf8')).toBe('keep\n');
+    expect(git(fe, 'status', '--porcelain')).toBe('');
   });
 });

@@ -122,8 +122,15 @@ export function repoContext(names: string[]): string {
   const n = names[0];
   return `This is a multi-repo project: the working folder holds ${names.length} git repos, one per subfolder: ` +
     `${names.map(r => `${r}/`).join(', ')}. File paths are relative to the working folder (e.g. ${n}/src/...). ` +
-    `Run git and build commands inside a repo's subfolder (e.g. git -C ${n} status, git -C ${n} diff, cd ${n} && npm test).`;
+    `Run git and build commands inside a repo's subfolder (e.g. git -C ${n} status, git -C ${n} diff). ` +
+    `Always use one-shot commands that exit on their own, never watch/serve modes: e.g. ` +
+    `cd ${n} && npx ng test --watch=false --browsers=ChromeHeadless, cd ${n} && npx ng build, ` +
+    `cd <dotnet-repo> && dotnet build, cd <dotnet-repo> && dotnet test.`;
 }
+
+/** The worktree's node_modules is a link to the owner's checkout. */
+export const SHARED_MODULES_RULE = "node_modules is shared with the owner's checkout — never run npm install/ci/uninstall/update; " +
+  'if a new dependency is needed, say so in your report.';
 
 export function fixJsonPrompt(): string {
   return 'Your last reply did not contain valid JSON in the required shape. Reply again with only the corrected fenced ```json block.';

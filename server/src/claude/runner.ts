@@ -68,7 +68,13 @@ export function resolveClaudeBinArgs(env: NodeJS.ProcessEnv = process.env): stri
 /** Copy of env without the vars that would switch the CLI away from the subscription login (case-insensitive). */
 export function childEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(env)) if (!STRIPPED_ENV.includes(k.toUpperCase())) out[k] = v;
+  const forced = ['MSBUILDDISABLENODEREUSE', 'USESHAREDCOMPILATION'];
+  for (const [k, v] of Object.entries(env)) {
+    if (!STRIPPED_ENV.includes(k.toUpperCase()) && !forced.includes(k.toUpperCase())) out[k] = v;
+  }
+  // dotnet build servers / shared compilers outlive the run and lock files in the worktree (Windows): turn them off
+  out.MSBUILDDISABLENODEREUSE = '1';
+  out.UseSharedCompilation = 'false';
   return out;
 }
 
