@@ -3,7 +3,7 @@ import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { extractJson, planValidator, validateReview, validateTest, reviewValidator, testValidator } from '../src/claude/parse';
 import { ROLE_TOOLS, MAX_TURNS } from '../src/claude/roles';
-import { planPrompt, stagePrompt, reviewPrompt, testPrompt, bouncePrompt, fixJsonPrompt } from '../src/claude/prompts';
+import { planPrompt, stagePrompt, reviewPrompt, testPrompt, bouncePrompt, fixJsonPrompt, repoContext, diffSummary } from '../src/claude/prompts';
 import { agentFileFor, legacyAgentFile, scaffoldAgents, MANAGED_MARKER } from '../src/scaffold';
 import { projectDir } from './helpers';
 
@@ -42,6 +42,34 @@ describe('roles', () => {
     expect(ROLE_TOOLS.backend).toContain('PowerShell(npm *)');
     expect(ROLE_TOOLS.writer).toEqual(['Read', 'Glob', 'Grep', 'Edit', 'Write']);
     expect(MAX_TURNS).toMatchObject({ plan: 30, review: 30, build: 80, test: 80, docs: 30 });
+  });
+
+  it('multi-repo tools: reviewers get git -C; devs/QA get dotnet, git -C and cd (both shells)', () => {
+    for (const r of ['techlead', 'security'] as const) {
+      for (const sh of ['Bash', 'PowerShell']) {
+        for (const c of ['diff', 'log', 'status']) expect(ROLE_TOOLS[r]).toContain(`${sh}(git -C * ${c} *)`);
+      }
+      expect(ROLE_TOOLS[r].some(t => t.includes('dotnet') || t.includes('cd *'))).toBe(false);
+    }
+    for (const r of ['frontend', 'backend', 'devops', 'qa'] as const) {
+      for (const sh of ['Bash', 'PowerShell']) {
+        for (const c of ['dotnet *', 'git -C * status *', 'git -C * diff *', 'cd *']) expect(ROLE_TOOLS[r]).toContain(`${sh}(${c})`);
+      }
+    }
+    expect(ROLE_TOOLS.pm).toEqual(['Read', 'Glob', 'Grep']);
+  });
+});
+
+describe('multi-repo prompt helpers', () => {
+  it('repoContext names every repo subfolder; diffSummary lists files with +/- counts', () => {
+    const c = repoContext(['angular', 'aspnet-core']);
+    expect(c).toContain('angular/');
+    expect(c).toContain('aspnet-core/');
+    expect(c).toContain('git -C angular');
+    const s = diffSummary([{ path: 'angular/a.ts', patch: '--- a/a.ts\n+++ b/a.ts\n@@\n-x\n+y\n+z\n' }, { path: 'aspnet-core/b.cs', patch: '+n\n' }]);
+    expect(s).toBe('- angular/a.ts (+2 -1)\n- aspnet-core/b.cs (+1 -0)');
+    expect(reviewPrompt(plan as any, s)).toContain('- angular/a.ts (+2 -1)');
+    expect(reviewPrompt(plan as any)).not.toContain('Changed files');
   });
 });
 
