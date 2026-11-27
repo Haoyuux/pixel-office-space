@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { MEMORY_MAX_CHARS, MEMORY_MAX_ENTRIES, type MemoryEntry } from '@office/shared';
+import { MEMORY_TEXT_MAX, MEMORY_MAX_ENTRIES, type MemoryEntry } from '@office/shared';
 import { useOffice } from '../state/store';
 import { api, paths } from './api';
 import { relativeDate } from './format';
@@ -73,14 +73,14 @@ export function MemoryPanel({ projectId }: { projectId: string }) {
           {entries.map(e => (
             <li key={e.id} className="po-memory-item">
               {editing?.id === e.id ? <div className="po-memory-edit">
-                <textarea aria-label="Edit memory entry" value={editing.text} maxLength={MEMORY_MAX_CHARS} rows={3} autoFocus
+                <textarea aria-label="Edit memory entry" value={editing.text} maxLength={MEMORY_TEXT_MAX} rows={3} autoFocus
                   onChange={ev => setEditing({ id: e.id, text: ev.target.value })}
                   onKeyDown={ev => {
                     if (ev.key === 'Escape') { ev.stopPropagation(); setEditing(null); }
                     if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); void save(); }
                   }} />
                 <div className="po-actions">
-                  <span className="po-dim po-memory-count">{editing.text.length}/{MEMORY_MAX_CHARS}</span>
+                  <span className="po-dim po-memory-count">{editing.text.length}/{MEMORY_TEXT_MAX}</span>
                   <button type="button" className="po-btn ghost" onClick={() => setEditing(null)}>Cancel</button>
                   <button type="button" className="po-btn primary" disabled={busy || !editing.text.trim()} onClick={() => void save()}>Save</button>
                 </div>
@@ -99,11 +99,11 @@ export function MemoryPanel({ projectId }: { projectId: string }) {
         </ul>}
       <div className="po-memory-add">
         <textarea aria-label="New memory entry" placeholder={full ? `Memory is full (${MEMORY_MAX_ENTRIES} entries) — delete one first` : 'e.g. Run tests with npm test -w web; never edit generated files in dist/'}
-          value={draft} maxLength={MEMORY_MAX_CHARS} rows={2} disabled={full}
+          value={draft} maxLength={MEMORY_TEXT_MAX} rows={2} disabled={full}
           onChange={e => setDraft(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void add(); } }} />
         <div className="po-actions">
-          <span className="po-dim po-memory-count">{entries?.length ?? 0}/{MEMORY_MAX_ENTRIES} entries · {draft.length}/{MEMORY_MAX_CHARS}</span>
+          <span className="po-dim po-memory-count">{entries?.length ?? 0}/{MEMORY_MAX_ENTRIES} entries · {draft.length}/{MEMORY_TEXT_MAX}</span>
           <button type="button" className="po-btn primary" disabled={busy || full || !draft.trim()} onClick={() => void add()}>Remember</button>
         </div>
       </div>

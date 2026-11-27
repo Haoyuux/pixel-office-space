@@ -38,14 +38,14 @@ export type ServerEvent =
   | ({ type: 'user.message'; text: string; attachments?: Attachment[] } & TBase)
   /** Conversation meta changed (rename, pin, delete, auto title). */
   | ({ type: 'conversation.updated'; rootId: string; meta: ConversationMeta } & Base)
+  /** The project's team memory changed (owner edit or PM lessons): refetch GET /api/projects/:id/memory. */
+  | ({ type: 'memory.updated' } & Base)
   | ({ type: 'agent.session'; role: RoleId; sessionId: string } & TBase)
   /** Per-ticket totals across all runs (cost is an estimate). */
   | ({ type: 'ticket.usage'; turns: number; costUsd: number; durationMs: number } & TBase)
   | ({ type: 'ticket.workspace'; workspace: Workspace } & TBase)
   /** A failed/interrupted ticket was resumed (Resume button). */
-  | ({ type: 'ticket.resumed'; stage: Stage | null; queued?: boolean } & TBase)
-  /** A project's team memory changed (GET /api/projects/:id/memory for the entries). */
-  | ({ type: 'memory.updated' } & Base);
+  | ({ type: 'ticket.resumed'; stage: Stage | null; queued?: boolean } & TBase);
 
 export type TicketEvent = Extract<ServerEvent, { seq: number }>;
 export type EventOf<T extends ServerEvent['type']> = Extract<ServerEvent, { type: T }>;

@@ -1,4 +1,4 @@
-import { ROLE_IDS, type Plan, type PlanTask, type RoleId, type TicketMode } from '@office/shared';
+import { MEMORY_LESSON_MAX, MEMORY_LESSONS_MAX, ROLE_IDS, type Plan, type PlanTask, type RoleId, type TicketMode } from '@office/shared';
 
 export interface ReviewIssue { role: RoleId; file: string; note: string }
 export interface TestFailure { role: RoleId; note: string }
@@ -57,10 +57,26 @@ export const testValidator = (team: RoleId[]) => (v: unknown): TestVerdict | nul
   return { passed: v.passed, failures, unassigned, notes: notesOf(v.notes) };
 };
 
-/** The PM's first reply: a plan (today's shape, `"kind": "plan"` optional) or, outside ticket mode, an answer. */
-export type PmReply = { kind: 'plan'; plan: PlanWithMap } | { kind: 'answer'; answer: string };
+/**
+ * The PM's first reply: a plan (today's shape, `"kind": "plan"` optional) or, outside ticket mode, an answer.
+ * memory: the PM's lessons for the team memory (added once the ticket/answer completes).
+ */
+export type PmReply = ({ kind: 'plan'; plan: PlanWithMap } | { kind: 'answer'; answer: string }) & { memory?: string[] };
+
+/** Optional `"memory"` lessons: ≤ 3 non-empty strings ≤ 200 chars; anything malformed is dropped, never a parse failure. */
+export const lessonsOf = (v: unknown): string[] => Array.isArray(v)
+  ? v.filter((x): x is string => typeof x === 'string').map(x => x.replace(/\s+/g, ' ').trim())
+    .filter(x => x && x.length <= MEMORY_LESSON_MAX).slice(0, MEMORY_LESSONS_MAX)
+  : [];
 
 export const pmValidator = (team: RoleId[], mode: TicketMode) => (v: unknown): PmReply | null => {
+  const reply = pmReply(team, mode, v);
+  if (!reply) return null;
+  const memory = lessonsOf(isObj(v) ? v.memory : undefined);
+  return memory.length ? { ...reply, memory } : reply;
+};
+
+function pmReply(team: RoleId[], mode: TicketMode, v: unknown): PmReply | null {
   if (mode !== 'ticket' && isObj(v) && v.kind === 'answer') {
     return typeof v.answer === 'string' && v.answer.trim() ? { kind: 'answer', answer: v.answer.trim() } : null;
   }
@@ -68,7 +84,7 @@ export const pmValidator = (team: RoleId[], mode: TicketMode) => (v: unknown): P
   if (isObj(v) && v.kind !== undefined && v.kind !== 'plan') return null;
   const plan = planValidator(team)(v);
   return plan ? { kind: 'plan', plan } : null;
-};
+}
 
 /**
  * Clearly prose: some text, no fenced json block, not a bare JSON value, and no plan keys either ("summary"/"tasks"

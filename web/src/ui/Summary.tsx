@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { Summary, SummaryProject } from '@office/shared';
+import type { Summary, ProjectSummary } from '@office/shared';
 import { useOffice } from '../state/store';
 import { api, paths } from './api';
 import { Modal } from './Modal';
@@ -99,7 +99,7 @@ export function SummaryPanel({ since: initial, onClose }: { since?: string; onCl
   );
 }
 
-function ProjectCard({ p, now, onOpen }: { p: SummaryProject; now: number; onOpen: (projectId: string, rootId: string) => void }) {
+function ProjectCard({ p, now, onOpen }: { p: ProjectSummary; now: number; onOpen: (projectId: string, rootId: string) => void }) {
   const accent = useOffice(s => s.projects[p.projectId]?.accent);
   const waiting = p.waiting ?? [], items = p.items ?? [];
   const counts = [p.finished && `✓ ${p.finished} finished`, p.answered && `💬 ${p.answered} answered`, p.failed && `✕ ${p.failed} failed`,

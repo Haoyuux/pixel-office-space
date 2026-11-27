@@ -27,9 +27,17 @@ beforeEach(() => {
     const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'Content-Type': 'application/json' } });
     if (!url.startsWith('/api/projects/p/memory')) return json({});
     if (fail && method !== 'GET') return json({ error: fail }, 400);
-    if (method === 'POST') entries = [...entries, { id: `m${entries.length + 1}`, text: body.text, source: 'owner', at: '2026-11-27T10:00:00Z' }];
-    if (method === 'PATCH') entries = entries.map(e => (url.endsWith(`/${e.id}`) ? { ...e, text: body.text } : e));
-    if (method === 'DELETE') entries = entries.filter(e => !url.endsWith(`/${e.id}`));
+    // the server's reply shapes: POST → 201 + entry, PATCH → entry, DELETE → {ok:true}, GET → {entries}
+    if (method === 'POST') {
+      const entry: MemoryEntry = { id: `m${entries.length + 1}`, text: body.text, source: 'owner', at: '2026-11-27T10:00:00Z' };
+      entries = [...entries, entry];
+      return json(entry, 201);
+    }
+    if (method === 'PATCH') {
+      entries = entries.map(e => (url.endsWith(`/${e.id}`) ? { ...e, text: body.text } : e));
+      return json(entries.find(e => url.endsWith(`/${e.id}`)));
+    }
+    if (method === 'DELETE') { entries = entries.filter(e => !url.endsWith(`/${e.id}`)); return json({ ok: true }); }
     return json({ entries });
   }));
   useOffice.setState({ projects: { p: P }, tickets: {}, selectedProjectId: 'p', synced: true });

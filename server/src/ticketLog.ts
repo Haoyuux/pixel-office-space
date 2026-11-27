@@ -28,12 +28,17 @@ export class TicketLog {
 
   /** All tickets of a project, oldest first. */
   tickets(projectId: string): Ticket[] {
+    return this.entries(projectId).map(e => e.ticket);
+  }
+
+  /** All tickets of a project with their events, oldest first. */
+  entries(projectId: string): { ticket: Ticket; events: ServerEvent[] }[] {
     const d = join(this.dir, projectId);
     if (!existsSync(d)) return [];
     return readdirSync(d).filter(f => f.endsWith('.jsonl'))
-      .map(f => this.rebuild(this.read(projectId, f.slice(0, -6))))
-      .filter((t): t is Ticket => !!t)
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      .map(f => { const events = this.read(projectId, f.slice(0, -6)); return { ticket: this.rebuild(events), events }; })
+      .filter((e): e is { ticket: Ticket; events: ServerEvent[] } => !!e.ticket)
+      .sort((a, b) => a.ticket.createdAt.localeCompare(b.ticket.createdAt));
   }
 
   /** One ticket rebuilt from its log (any project), with its events. */

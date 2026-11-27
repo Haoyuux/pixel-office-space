@@ -14,6 +14,8 @@ import { ClaudeSystem, type ClaudeStatus } from './claude/system';
 import { AttachmentStore } from './attachments';
 import { ConversationStore } from './conversations';
 import { ProjectFiles } from './files';
+import { MemoryStore } from './memory';
+import { buildSummary } from './summary';
 
 export interface Office {
   server: Server; store: ProjectStore; hub: Hub; close(): void;
@@ -25,6 +27,8 @@ export interface OfficeOptions {
   /** `GET /api/system/claude` source (tests inject a fake; never the real CLI). */
   claudeSystem?: { status(): Promise<ClaudeStatus> };
   git?: Pick<typeof realGit, 'isRepo' | 'hasCommit' | 'gitInit'> & Partial<Pick<typeof realGit, 'detectRepos' | 'lsFiles'>>;
+  /** Team memory (shared with the claude orchestrator, which reads it into prompts and adds the PM's lessons). */
+  memory?: MemoryStore;
 }
 
 const GATES: GateKind[] = ['plan', 'final', 'stuck'];
@@ -50,6 +54,7 @@ export function createOffice(opts: OfficeOptions): Office {
   const attachments = new AttachmentStore(opts.dataDir);
   const conversations = new ConversationStore(join(opts.dataDir, 'conversations.json'));
   const files = new ProjectFiles(git.lsFiles ?? realGit.lsFiles);
+  const memory = opts.memory ?? new MemoryStore(opts.dataDir);
   const app = express();
   app.use(guardRequests);
   // uploads are JSON base64 (≤ 10 MB decoded): only this route accepts a large body
@@ -65,6 +70,7 @@ export function createOffice(opts: OfficeOptions): Office {
   const hub = new Hub(server, snapshot);
   orch.onEvent(e => hub.broadcast(e));
   const now = () => new Date().toISOString();
+  memory.onChange(projectId => hub.broadcast({ type: 'memory.updated', projectId, ts: now() }));
   const projectEvent = (type: 'project.added' | 'project.updated', p: Project): ServerEvent => ({ type, project: p, projectId: p.id, ts: now() });
 
   const mustProject = (id: string) => { const p = store.get(id); if (!p) throw new NotFoundError('Project not found'); return p; };
@@ -108,6 +114,17 @@ export function createOffice(opts: OfficeOptions): Office {
 
   app.get('/api/projects', (_req, res) => res.json(store.list()));
 
+  /** Summary board: `?since=<ISO>` (missing = the last 24 hours). */
+  app.get('/api/summary', (req, res) => {
+    const raw = req.query.since;
+    let since = Date.now() - 24 * 3600_000;
+    if (raw !== undefined) {
+      since = typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}/.test(raw) ? Date.parse(raw) : NaN;
+      if (Number.isNaN(since)) throw new ValidationError('since must be an ISO date/time');
+    }
+    res.json(buildSummary(since, store.list(), id => log.entries(id), conversations.all()));
+  });
+
   app.post('/api/projects', async (req, res, next) => {
     try {
       const d = await detectFolder(req.body?.folder);
@@ -144,6 +161,7 @@ export function createOffice(opts: OfficeOptions): Office {
     for (const t of [...orch.queue(p.id), orch.current(p.id)]) if (t) orch.cancel(t.id);
     store.remove(p.id);
     attachments.removeProject(p.id);
+    memory.removeProject(p.id);
     hub.broadcast({ type: 'project.removed', projectId: p.id, ts: now() });
     res.json({ ok: true });
   });
@@ -192,6 +210,20 @@ export function createOffice(opts: OfficeOptions): Office {
       const q = typeof req.query.q === 'string' ? req.query.q : '';
       res.json({ files: await files.search(p, q) });
     } catch (e) { next(e); }
+  });
+
+  app.get('/api/projects/:id/memory', (req, res) => {
+    res.json({ entries: memory.list(mustProject(req.params.id).id) });
+  });
+  app.post('/api/projects/:id/memory', (req, res) => {
+    res.status(201).json(memory.add(mustProject(req.params.id).id, req.body));
+  });
+  app.patch('/api/projects/:id/memory/:entryId', (req, res) => {
+    res.json(memory.update(mustProject(req.params.id).id, req.params.entryId, req.body));
+  });
+  app.delete('/api/projects/:id/memory/:entryId', (req, res) => {
+    memory.remove(mustProject(req.params.id).id, req.params.entryId);
+    res.json({ ok: true });
   });
 
   const conversationRoot = (id: string) => {
