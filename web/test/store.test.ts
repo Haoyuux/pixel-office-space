@@ -62,6 +62,27 @@ describe('office store', () => {
     expect(msgs[0]).toMatchObject({ text: 'Hello there', role: 'frontend', id: 'm' });
   });
 
+  it('the final non-streaming message replaces the streamed text (same messageId)', () => {
+    apply(ev({ type: 'ticket.created', ticket: T }));
+    for (const text of ['Hel', 'lo'])
+      apply(ev({ type: 'agent.message', role: 'pm', text, streaming: true, messageId: 'm' }));
+    expect(feed()[0]).toMatchObject({ text: 'Hello', status: 'streaming' });
+    apply(ev({ type: 'agent.message', role: 'pm', text: 'Hello world.', streaming: false, messageId: 'm' }));
+    const msgs = feed().filter(f => f.kind === 'message');
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].text).toBe('Hello world.');
+    expect(msgs[0].status).toBeUndefined();
+  });
+
+  it('user.message attachments reach the feed item; ticket.done stopped marks the end and the ticket', () => {
+    apply(ev({ type: 'ticket.created', ticket: { ...T, status: 'running' } }));
+    apply(ev({ type: 'user.message', text: 'see', attachments: [{ id: 'a', name: 'a.png', path: '/a.png' }] }));
+    apply(ev({ type: 'ticket.done', stopped: true }));
+    expect(feed().find(f => f.kind === 'user')!.attachments).toEqual([{ id: 'a', name: 'a.png', path: '/a.png' }]);
+    expect(feed()[feed().length - 1]).toMatchObject({ kind: 'stage', text: 'done', detail: 'stopped' });
+    expect(useOffice.getState().tickets.t.stopped).toBe(true);
+  });
+
   it('gate.open adds a gate item and sets openGate; gate.closed clears it', () => {
     apply(ev({ type: 'ticket.created', ticket: T }));
     apply(ev({ type: 'gate.open', gate: 'plan', payload: null }));

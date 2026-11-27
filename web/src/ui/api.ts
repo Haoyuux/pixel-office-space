@@ -29,5 +29,9 @@ export const paths = {
   messages: (ticketId: string) => `/api/tickets/${enc(ticketId)}/messages`,
   cancel: (ticketId: string) => `/api/tickets/${enc(ticketId)}/cancel`,
   resume: (ticketId: string) => `/api/tickets/${enc(ticketId)}/resume`,
+  stop: (ticketId: string) => `/api/tickets/${enc(ticketId)}/stop`,
   gitInit: (projectId: string) => `/api/projects/${enc(projectId)}/git-init`,
+  attachments: (projectId: string) => `/api/projects/${enc(projectId)}/attachments`,
+  files: (projectId: string, q: string) => `/api/projects/${enc(projectId)}/files?q=${enc(q)}`,
+  conversation: (rootId: string) => `/api/conversations/${enc(rootId)}`,
 };

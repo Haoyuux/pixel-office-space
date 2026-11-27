@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { roleDef, type Project, type RoleId, type Ticket, type TicketMode } from '@office/shared';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { roleDef, type Project, type RoleId, type Stage, type Ticket } from '@office/shared';
 import { useOffice } from '../state/store';
 import { api, paths } from './api';
-import { accentCss, kindIcon, kindStatus, kindTitle, ticketKind, canResume, isActive, relativeDate, roleEmoji, roleShort, STATUS_ICON } from './format';
+import { accentCss, kindIcon, kindStatus, kindTitle, ticketKind, canResume, isActive, roleShort } from './format';
 import { ClaudeBanner, useClaudeStatus } from './claudeStatus';
-import { COMMANDS, MODEL_DESC, isModel, parseCommand, suggest, type CommandName } from './slash';
+import { COMMANDS, MODEL_DESC, isModel, type CommandName } from './slash';
+import { Composer, type ComposerHandle } from './Composer';
 import { Feed } from './Feed';
 import { RawLog } from './RawLog';
 import { Changes } from './Changes';
@@ -13,9 +14,12 @@ import { PlanView } from './PlanView';
 import { PipelineBar } from './PipelineBar';
 import { TeamDialog } from './TeamDialog';
 import { rootOf, threadOf, threadsOf } from './threads';
+import { PastConversations, threadTitle, visibleThreads } from './PastConversations';
 import { loadHistory } from '../state/socket';
 
 export const DRAWER_WIDTH = 560;
+/** Full-screen chat: most of the window, a strip of the office stays visible on the left. */
+export const FULL_WIDTH = `max(${DRAWER_WIDTH}px, calc(100vw - 96px))`;
 type Tab = 'feed' | 'raw' | 'changes' | 'plan';
 const TABS: { id: Tab; label: string }[] = [{ id: 'feed', label: 'Feed' }, { id: 'raw', label: 'Raw log' }, { id: 'changes', label: 'Changes' }, { id: 'plan', label: 'Plan' }];
 
@@ -29,7 +33,8 @@ export function Drawer({ projectId }: { projectId: string }) {
   const roleFilter = useOffice(s => s.roleFilter);
   const diffs = useOffice(s => s.diffs);
   const tickets = useMemo(() => Object.values(all).filter(t => t.projectId === projectId).sort(byNewest), [all, projectId]);
-  const threads = useMemo(() => threadsOf(projectId, all), [all, projectId]);
+  const meta = useOffice(s => s.conversations);
+  const threads = useMemo(() => visibleThreads(threadsOf(projectId, all), meta), [all, projectId, meta]);
   const active = tickets.find(isActive);
   const queued = tickets.filter(t => t.status === 'queued');
   /** A ticket of the conversation the owner opened (any ticket of the thread: its root is looked up). */
@@ -37,7 +42,9 @@ export function Drawer({ projectId }: { projectId: string }) {
   /** /new or /clear: nothing is shown and the next message starts a fresh conversation. */
   const [fresh, setFresh] = useState(false);
   // the open conversation: the one picked, else the one running; nothing → welcome + a fresh composer
-  const openRoot = fresh ? undefined : (chosen && all[chosen] ? rootOf(chosen, all) : undefined) ?? (active ? rootOf(active.id, all) : undefined);
+  const pickedRoot = fresh ? undefined : (chosen && all[chosen] ? rootOf(chosen, all) : undefined) ?? (active ? rootOf(active.id, all) : undefined);
+  // a deleted conversation is closed (back to the welcome view)
+  const openRoot = pickedRoot && !meta[pickedRoot]?.deleted ? pickedRoot : undefined;
   const thread = useMemo(() => (openRoot ? threadOf(openRoot, all) : []), [openRoot, all]);
   /** The latest ticket of the conversation: header, pipeline, raw log, and what the composer continues. */
   const shown = thread[thread.length - 1];
@@ -45,6 +52,8 @@ export function Drawer({ projectId }: { projectId: string }) {
   const [tab, setTab] = useState<Tab>('feed');
   const [team, setTeam] = useState(false);
   const [past, setPast] = useState(false);
+  /** ⛶ full-screen chat: the drawer covers most of the window (the office stays visible at the edge). */
+  const [full, setFull] = useState(false);
   const [pastFilter, setPastFilter] = useState('');
   const pastBox = useRef<HTMLInputElement>(null);
   const [pastFocus, setPastFocus] = useState(0);
@@ -74,17 +83,58 @@ export function Drawer({ projectId }: { projectId: string }) {
     if (threadOf(openRoot, useOffice.getState().tickets).some(t => !feed[t.id])) void loadHistory(projectId);
   }, [openRoot, projectId]);
 
+  /** The open conversation's latest ticket while an agent works on it (■ Stop, "Thinking…"). */
+  const running = shown?.status === 'running' ? shown : undefined;
+  const [stopBusy, setStopBusy] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
+  useEffect(() => { setStopError(null); setStopBusy(false); }, [running?.id]);
+  /** ■ Stop: a chat answer (or planning) stops at once; a change ticket in a work stage goes through the cancel confirm. */
+  const stop = async () => {
+    if (!running) return;
+    if (ticketKind(running) === 'ticket' && running.stage && WORK_STAGES.includes(running.stage)) { setMenuError(null); setMenu('cancel'); return; }
+    if (stopBusy) return;
+    setStopBusy(true); setStopError(null);
+    const r = await api('POST', paths.stop(running.id));
+    setStopBusy(false);
+    if (!r.ok) setStopError(r.error);
+  };
+  /** Esc: popups first, then stop a running answer; from the window (not typing) it finally closes the drawer. */
+  const escape = (fromComposer: boolean) => {
+    if (menu) { setMenu(null); return; }
+    if (past) { setPast(false); return; }
+    if (card) { setCard(null); return; }
+    if (running) { void stop(); return; }
+    if (full) { setFull(false); return; }
+    if (!fromComposer) close();
+  };
+  const composer = useRef<ComposerHandle>(null);
+  const feeds = useOffice(s => s.feed);
+  /** The owner's messages in the open conversation, oldest first (↑ recall in the composer). */
+  const yourTexts = useMemo(() => thread.flatMap(t => {
+    const f = feeds[t.id] ?? [];
+    const own = t.text.trim() && !(f[0]?.kind === 'user' && f[0].text.trim() === t.text.trim()) ? [t.text] : [];
+    return [...own, ...f.filter(i => i.kind === 'user').map(i => i.text)];
+  }), [thread, feeds]);
+  const escapeRef = useRef(escape);
+  escapeRef.current = escape;
+  const shortcuts = useRef({ fresh: () => {}, slash: () => {} });
+
   useEffect(() => {
-    // Escape closes the menu, then the drawer; never while a dialog is open (it handles its own Escape) or while typing
+    // never while a dialog is open (it handles its own Escape); the composer handles its own keys
     const key = (e: globalThis.KeyboardEvent) => {
-      if (e.key !== 'Escape' || team || document.querySelector('.po-modal') || e.target instanceof HTMLTextAreaElement) return;
-      if (menu) setMenu(null); else close();
+      if (team || document.querySelector('.po-modal')) return;
+      // Ctrl+K new conversation, Ctrl+/ the slash menu (also while typing)
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); shortcuts.current.fresh(); return; }
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key === '/') { e.preventDefault(); shortcuts.current.slash(); return; }
+      if (e.key !== 'Escape' || e.target instanceof HTMLTextAreaElement) return;
+      escapeRef.current(false);
     };
     window.addEventListener('keydown', key);
     return () => window.removeEventListener('keydown', key);
-  }, [team, menu]);
+  }, [team]);
 
   if (!project) return null;
+  const title = openRoot && thread[0] ? threadTitle({ root: thread[0] }, meta[openRoot]) : shown ? kindTitle(shown) : '';
   const accent = accentCss(project.accent);
   const mode = project.agentsMode ?? 'claude';
   // Initialize git is offered only when no repo was found (never for a parent of repos)
@@ -102,10 +152,9 @@ export function Drawer({ projectId }: { projectId: string }) {
   const remove = () => once(() => api('DELETE', paths.project(project.id)), close);
   const target = active;
   const cancelTicket = () => { if (target) void once(() => api('POST', paths.cancel(target.id)), () => setMenu(null)); };
-  const q = pastFilter.trim().toLowerCase();
-  const pastShown = q ? threads.filter(th => th.tickets.some(t => kindTitle(t).toLowerCase().includes(q))) : threads;
   /** Back to the welcome view: the next message starts a new conversation (nothing is lost). */
   const startFresh = () => { refocus.current = true; setChosen(null); setFresh(true); setPast(false); };
+  shortcuts.current = { fresh: startFresh, slash: () => { setPast(false); setMenu(null); composer.current?.openSlash(); } };
 
   /** Drawer-side slash commands; a returned string is shown under the composer as a hint. */
   const command = async (name: CommandName, arg: string): Promise<string | void> => {
@@ -138,7 +187,7 @@ export function Drawer({ projectId }: { projectId: string }) {
   };
 
   return (
-    <aside className="po-drawer" style={{ ['--accent' as string]: accent, width: DRAWER_WIDTH }} aria-label={`${project.name} console`}>
+    <aside className={`po-drawer${full ? ' full' : ''}`} style={{ ['--accent' as string]: accent, width: full ? FULL_WIDTH : DRAWER_WIDTH }} aria-label={`${project.name} console`}>
       <header className="po-dh">
         <div className="po-dh-row">
           <span className="po-dh-dot" aria-hidden />
@@ -154,9 +203,11 @@ export function Drawer({ projectId }: { projectId: string }) {
             <span className="po-badge po-model" title="Claude model for this project's runs (change it with /model)">{project.model}</span>
           )}
           <span className={`po-badge ${mode}`} title="Who works this project's tickets (change it in Team)">{mode === 'claude' ? 'Claude Code' : 'Simulated'}</span>
-          <button type="button" className="po-hbtn" aria-label="New conversation" title="New conversation (/new)" onClick={startFresh}>＋ New</button>
+          <button type="button" className="po-hbtn" aria-label="New conversation" aria-keyshortcuts="Control+K" title="New conversation (/new · Ctrl+K)" onClick={startFresh}>＋ New</button>
           <button type="button" className="po-hbtn" onClick={() => setTeam(true)} title="Edit team">Team · {project.team.length}</button>
           <button type="button" className={`po-hbtn${menu ? ' on' : ''}`} aria-label="Project menu" aria-expanded={!!menu} onClick={() => { setMenu(m => (m ? null : 'open')); setMenuError(null); }}>⋯</button>
+          <button type="button" className={`po-hbtn${full ? ' on' : ''}`} aria-label={full ? 'Exit full screen' : 'Full screen'} aria-pressed={full}
+            title={full ? 'Restore (Esc)' : 'Full-screen chat'} onClick={() => setFull(f => !f)}>⛶</button>
           <button type="button" className="po-hbtn" aria-label="Close console" onClick={close}>✕</button>
         </div>
         {menu && (
@@ -187,7 +238,7 @@ export function Drawer({ projectId }: { projectId: string }) {
       <div className="po-ticketbar">
         <div className="po-ticket-row">
           <span aria-hidden>{kindIcon(shown)}</span>
-          {shown ? <span className="po-ticket-title" title={kindTitle(shown)}>{kindTitle(shown)}</span>
+          {shown ? <span className="po-ticket-title" title={title}>{title}</span>
             : <span className="po-dim po-grow">no conversations yet — ask below</span>}
           {shown && <span className={`po-chip ${shown.status}`}>{shown.status === 'waiting' ? '⏸ waiting for you' : kindStatus(shown)}</span>}
           {queued.length > 0 && <span className="po-chip queued" title={queued.map(t => t.title).join('\n')}>+{queued.length} queued</span>}
@@ -197,32 +248,8 @@ export function Drawer({ projectId }: { projectId: string }) {
             </button>
           )}
         </div>
-        {past && <div className="po-past-wrap">
-          <input ref={pastBox} className="po-past-filter" aria-label="Filter conversations" placeholder="filter by title…" value={pastFilter}
-            spellCheck={false} onChange={e => setPastFilter(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); setPast(false); } }} />
-          <ul className="po-past" aria-label="Past conversations">
-            {pastShown.length === 0 && <li className="po-dim po-past-none">no conversation matches</li>}
-            {pastShown.map(({ root, latest, tickets: ts }) => {
-              const roles = [...new Set(ts.flatMap(t => Object.keys(t.agentStates) as RoleId[]))];
-              const turns = ts.reduce((n, t) => n + (t.usage?.turns ?? 0), 0);
-              return (
-                <li key={root.id}>
-                  <button type="button" className={`po-past-item${root.id === openRoot ? ' on' : ''}`} onClick={() => { setChosen(root.id); setFresh(false); setPast(false); }}>
-                    <span className="po-past-title">{kindIcon(latest)} {kindTitle(root)}</span>
-                    <span className="po-past-meta">
-                      <span className="po-dim">{relativeDate(latest.createdAt)}</span>
-                      <span className={`po-chip ${latest.status}`}>{kindStatus(latest)}</span>
-                      <span className="po-dim" title="Messages in this conversation">{ts.length} message{ts.length === 1 ? '' : 's'}</span>
-                      {roles.length > 0 && <span title={roles.map(roleShort).join(', ')}>{roles.map(roleEmoji).join('')}</span>}
-                      {turns > 0 && <span className="po-dim" title="Uses your Claude plan — not charged">{turns} turns</span>}
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </div>}
+        {past && <PastConversations projectId={project.id} threads={threads} openRoot={openRoot} filter={pastFilter} onFilter={setPastFilter}
+          inputRef={pastBox} onOpen={id => { setChosen(id); setFresh(false); setPast(false); }} onClose={() => setPast(false)} />}
         {(!shown || ticketKind(shown) === 'ticket') && <PipelineBar team={project.team} ticket={shown} />}
         {shown?.status === 'failed' && shown.reason && (
           <div className="po-fail-row">
@@ -252,19 +279,60 @@ export function Drawer({ projectId }: { projectId: string }) {
             <div className="po-welcome-title">{project.name} is ready.</div>
             <div>Ask a question, or describe a change — the PM answers, or plans it for your approval.</div>
           </div></div>
-          : tab === 'feed' ? <Feed ticketIds={thread.map(t => t.id)} onShow={setTab} />
+          : tab === 'feed' ? <Feed ticketIds={thread.map(t => t.id)} onShow={setTab} onEdit={t => composer.current?.prefill(t)} />
           : tab === 'raw' ? <RawLog ticketId={shown.id} />
           : tab === 'changes' ? <Changes ticketId={latestWith(t => !!diffs[t.id]?.length).id} repos={project.repos?.map(r => r.name)} />
           : <PlanView ticket={latestWith(t => !!t.plan)} />}
       </div>
 
-      <Composer key={openRoot ?? ''} projectId={project.id} active={active} latest={shown} refocus={refocus}
+      {running && <Working ticket={running} busy={stopBusy} error={stopError} onStop={() => void stop()} />}
+      <Composer ref={composer} key={openRoot ?? ''} projectId={project.id} history={yourTexts} active={active} latest={shown} refocus={refocus} onEscape={() => escape(true)}
         onCreated={(created, followUp) => {
           // a follow-up stays in this conversation; a new conversation opens once its ticket arrives
           refocus.current = true; setFresh(false); setChosen(followUp ? openRoot ?? null : created?.id ?? null);
         }} onCommand={command} />
       {team && <TeamDialog project={project} onClose={() => setTeam(false)} />}
     </aside>
+  );
+}
+
+const SHORTCUTS: [string, string][] = [
+  ['Ctrl+K', 'New conversation'], ['Ctrl+/', 'Open the commands'], ['Esc', 'Stop the running answer · close popups'],
+  ['↑', 'Recall your previous message (empty box)'], ['@', 'Mention a file'],
+];
+
+const WORK_STAGES: Stage[] = ['design', 'build', 'review', 'test', 'docs'];
+
+/** "12s", "2m 05s". */
+export const elapsed = (ms: number) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+};
+
+/** "● Thinking… 12s   ■ Stop": shown while an agent works on the open conversation. */
+function Working({ ticket, busy, error, onStop }: { ticket: Ticket; busy: boolean; error: string | null; onStop: () => void }) {
+  const feed = useOffice(s => s.feed[ticket.id]);
+  // counted from the owner's latest message to this ticket (or its creation)
+  const since = useMemo(() => {
+    const you = [...(feed ?? [])].reverse().find(f => f.kind === 'user');
+    const t = Date.parse(you?.ts ?? ticket.createdAt);
+    return Number.isFinite(t) ? t : Date.now();
+  }, [feed, ticket.createdAt]);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const typing = feed?.[feed.length - 1]?.status === 'streaming';
+  return (
+    <div className="po-working">
+      <span role="status" aria-label="Working" className="po-working-text">
+        <span className="po-working-dot" aria-hidden>●</span> {typing ? 'Typing…' : 'Thinking…'} {elapsed(now - since)}
+      </span>
+      {error && <span className="po-error-text" role="alert">{error}</span>}
+      <span className="po-grow" />
+      <button type="button" className="po-btn po-stop" aria-keyshortcuts="Escape" disabled={busy} title="Stop (Esc)" onClick={onStop}>■ Stop</button>
+    </div>
   );
 }
 
@@ -296,6 +364,7 @@ function CommandCard({ kind, project, onClose }: { kind: 'status' | 'help'; proj
       {kind === 'status' ? <StatusRows project={project} /> : (
         <dl className="po-cmdcard-grid">
           {COMMANDS.map(c => <div key={c.name}><dt>/{c.name}{c.args ? ` ${c.args}` : ''}</dt><dd>{c.desc}</dd></div>)}
+          {SHORTCUTS.map(([k, d]) => <div key={k}><dt>{k}</dt><dd>{d}</dd></div>)}
         </dl>
       )}
     </section>
@@ -319,140 +388,3 @@ function StatusRows({ project }: { project: Project }) {
   return <dl className="po-cmdcard-grid">{rows.map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}</dl>;
 }
 
-const MODES: { id: TicketMode; label: string; hint: string }[] = [
-  { id: 'auto', label: 'Auto', hint: 'The PM decides: answers a question, plans a change' },
-  { id: 'ask', label: 'Chat', hint: 'Just an answer — nothing is changed' },
-  { id: 'ticket', label: 'Change', hint: 'Always plan and build (plan gate, team, final review)' },
-];
-
-/** Auto · Chat · Change: how the PM treats a new request. */
-function ModeSwitch({ mode, onChange }: { mode: TicketMode; onChange: (m: TicketMode) => void }) {
-  return (
-    <div className="po-mode" role="radiogroup" aria-label="Mode">
-      {MODES.map(m => (
-        <label key={m.id} className={`po-mode-opt${mode === m.id ? ' on' : ''}`} title={m.hint}>
-          <input type="radio" name="po-mode" value={m.id} checked={mode === m.id} onChange={() => onChange(m.id)} />
-          <span>{m.label}</span>
-        </label>
-      ))}
-    </div>
-  );
-}
-
-/**
- * Input box. A conversation is open (`latest` = its newest ticket): running / waiting → message to the team; otherwise
- * a follow-up ticket of it. Nothing open → a new conversation (queued while another ticket runs). The toggle forces a new one.
- */
-function Composer({ projectId, active, latest, refocus, onCreated, onCommand }: {
-  projectId: string;
-  /** The project's running ticket (any conversation). */
-  active: Ticket | undefined;
-  latest: Ticket | undefined;
-  onCreated: (created: Ticket | undefined, followUp: boolean) => void;
-  refocus?: { current: boolean };
-  onCommand?: (name: CommandName, arg: string) => Promise<string | void>;
-}) {
-  const [text, setText] = useState('');
-  const [mode, setMode] = useState<TicketMode>('auto');
-  const [asTicket, setAsTicket] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  /** Feedback from a slash command (unknown command, nothing running…). */
-  const [note, setNote] = useState<string | null>(null);
-  const [pick, setPick] = useState(0);
-  /** Esc closed the popup; it opens again when the text changes. */
-  const [dismissed, setDismissed] = useState(false);
-  const box = useRef<HTMLTextAreaElement>(null);
-  const toTeam = !!latest && !asTicket && isActive(latest);
-  const continuing = !!latest && !asTicket && !toTeam;
-  const creating = !toTeam;
-  const rowsShown = dismissed ? [] : suggest(text);
-  const sel = rowsShown.length ? Math.min(pick, rowsShown.length - 1) : 0;
-
-  useEffect(() => { if (refocus?.current) { refocus.current = false; box.current?.focus(); } }, [refocus]);
-
-  const edit = (v: string) => { setText(v); setPick(0); setDismissed(false); setNote(null); };
-
-  /** Runs `/name arg` locally: never sent to the agents. */
-  const runCommand = async (raw: string) => {
-    const c = parseCommand(raw);
-    setError(null);
-    if (!c || !c.known) { setNote('Unknown command — type /help'); return; }
-    const name = c.name as CommandName;
-    if (name === 'model' && !c.arg) { edit('/model '); box.current?.focus(); return; } // shows the model picker
-    setText(''); setPick(0); setDismissed(false); setNote(null);
-    if (name === 'chat' || name === 'change' || name === 'auto') { setMode(name === 'chat' ? 'ask' : name === 'change' ? 'ticket' : 'auto'); return; }
-    const out = await onCommand?.(name, c.arg);
-    if (out) setNote(out);
-  };
-
-  const send = async () => {
-    const t = text.trim();
-    if (t.startsWith('/')) { void runCommand(t); return; }
-    if (!t || busy) return;
-    setBusy(true); setError(null);
-    const r = toTeam ? await api<Ticket>('POST', paths.messages(latest!.id), { text: t })
-      : await api<Ticket>('POST', paths.tickets(projectId), continuing ? { text: t, parentTicketId: latest!.id, mode } : { text: t, mode });
-    setBusy(false);
-    if (!r.ok) { setError(r.error); return; }
-    setText('');
-    if (creating) {
-      const created = r.data && typeof r.data === 'object' && typeof r.data.id === 'string' ? r.data : undefined;
-      setAsTicket(false); onCreated(created, continuing);
-    }
-    box.current?.focus();
-  };
-  const key = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.nativeEvent.isComposing) return;
-    if (rowsShown.length) {
-      const n = rowsShown.length;
-      if (e.key === 'ArrowDown') { e.preventDefault(); setPick((sel + 1) % n); return; }
-      if (e.key === 'ArrowUp') { e.preventDefault(); setPick((sel - 1 + n) % n); return; }
-      if (e.key === 'Escape') { e.preventDefault(); setDismissed(true); return; }
-      if (e.key === 'Tab') { e.preventDefault(); edit(rowsShown[sel].complete); return; }
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void runCommand(rowsShown[sel].run); return; }
-    }
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); }
-  };
-  const hint = continuing ? 'Continue this conversation…' : toTeam ? 'message the team…' : active ? 'queue a new ticket…'
-    : mode === 'ask' ? 'Ask a question…' : mode === 'ticket' ? 'Describe a change…' : 'Ask anything, or describe a change…';
-  const rows = Math.min(6, Math.max(1, text.split('\n').length));
-  const unknown = text.startsWith('/') && !rowsShown.length && !dismissed && !parseCommand(text)?.known && !/\s/.test(text.trim());
-
-  return (
-    <footer className="po-composer">
-      {error && <div className="po-error" role="alert">{error}</div>}
-      {rowsShown.length > 0 && (
-        <ul className="po-slash" role="listbox" aria-label="Commands">
-          {rowsShown.map((r, i) => (
-            <li key={r.label} role="option" aria-selected={i === sel} className={i === sel ? 'on' : ''}
-              onMouseEnter={() => setPick(i)} onMouseDown={e => { e.preventDefault(); void runCommand(r.run); }}>
-              <span className="po-slash-cmd">{r.label}</span> <span className="po-slash-desc">{r.desc}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-      {(note || unknown) && <div className="po-slash-note" role="status">{unknown ? 'Unknown command — type /help' : note}</div>}
-      <div className={`po-input${creating ? ' ticket' : ''}`}>
-        <span className="po-prompt" aria-hidden>›</span>
-        <textarea ref={box} aria-label="Message" rows={rows} style={{ overflowY: rows >= 6 ? 'auto' : 'hidden' }} value={text} placeholder={hint}
-          spellCheck={false} onChange={e => edit(e.target.value)} onKeyDown={key} />
-        <button type="button" className="po-btn primary po-send" disabled={busy || !text.trim()} onClick={() => void send()}>
-          {continuing && !active ? 'Continue' : creating && active ? 'Queue' : 'Send'}
-        </button>
-      </div>
-      <div className="po-composer-foot">
-        {active || latest ? (
-          <label className="po-toggle">
-            <input type="checkbox" checked={asTicket} onChange={e => setAsTicket(e.target.checked)} />
-            <span>New ticket instead</span>
-          </label>
-        ) : <span className="po-dim">Auto decides: questions get an answer, changes become a ticket</span>}
-        {continuing && <span className="po-dim po-follow-of">follow-up of “{latest!.title}”</span>}
-        <span className="po-grow" />
-        {creating && <ModeSwitch mode={mode} onChange={setMode} />}
-        <span className="po-dim">⏎ send · ⇧⏎ newline</span>
-      </div>
-    </footer>
-  );
-}

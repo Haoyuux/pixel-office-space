@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { applyTicketEvent, type DiffFile, type Project, type RoleId, type ServerEvent, type Ticket, type TicketEvent } from '@office/shared';
+import { applyTicketEvent, type Attachment, type ConversationMeta, type DiffFile, type Project, type RoleId, type ServerEvent, type Ticket, type TicketEvent } from '@office/shared';
 
 export interface FeedItem {
   kind: 'message' | 'tool' | 'gate' | 'user' | 'stage';
@@ -11,6 +11,10 @@ export interface FeedItem {
   ts: string;
   /** The PM's answer to an Ask (rendered as markdown-ish text). */
   answer?: boolean;
+  /** Tool name of a tool item (Read, Grep, Bash…): tool-activity grouping. */
+  tool?: string;
+  /** Files attached to an owner message. */
+  attachments?: Attachment[];
 }
 
 /** The PM's raw structured reply carrying an answer (shown again, cleanly, as the answer message). */
@@ -24,6 +28,8 @@ export interface OfficeState {
   lastSeq: Record<string, number>;
   /** Latest fake diff per ticket (Changes tab). */
   diffs: Record<string, DiffFile[]>;
+  /** Conversation meta by root ticket id (title, pinned, deleted). */
+  conversations: Record<string, ConversationMeta>;
   selectedProjectId: string | null;
   roleFilter: RoleId | 'all';
   night: boolean;
@@ -33,6 +39,8 @@ export interface OfficeState {
   apply(e: ServerEvent): boolean;
   /** History replay (GET /api/projects/:id/tickets): merges the events by seq and rebuilds those tickets. */
   applyHistory(projectId: string, tickets: Ticket[], events: Record<string, ServerEvent[]>): void;
+  /** Merges conversation meta (history response, PATCH/DELETE replies). */
+  setConversations(meta: Record<string, ConversationMeta>): void;
   select(projectId: string | null): void;
   setRoleFilter(f: RoleId | 'all'): void;
   setNight(on: boolean): void;
@@ -53,13 +61,15 @@ function fold(v: TicketView, e: TicketEvent): TicketView {
     case 'agent.message': {
       const at = v.feed.findIndex(f => f.kind === 'message' && f.id === e.messageId);
       if (at < 0) return push(item({ kind: 'message', role: e.role, text: e.text, id: e.messageId, status: e.streaming ? 'streaming' : undefined }));
+      if (e.streaming && v.feed[at].status !== 'streaming') return v; // a late delta after the final text
       const feed = [...v.feed];
-      feed[at] = { ...feed[at], text: feed[at].text + e.text, status: e.streaming ? 'streaming' : undefined };
+      // deltas append; the final full text (streaming: false, same id) replaces what streamed so far
+      feed[at] = { ...feed[at], text: e.streaming ? feed[at].text + e.text : e.text, status: e.streaming ? 'streaming' : undefined };
       return { ...v, feed };
     }
     case 'agent.tool': {
       const at = v.feed.findIndex(f => f.kind === 'tool' && f.id === e.toolId);
-      const next = item({ kind: 'tool', role: e.role, text: e.summary, detail: e.detail, status: e.status, id: e.toolId });
+      const next = item({ kind: 'tool', role: e.role, text: e.summary, detail: e.detail, status: e.status, id: e.toolId, tool: e.tool });
       if (at < 0) return push(next);
       const feed = [...v.feed];
       feed[at] = { ...next, ts: feed[at].ts, detail: e.detail ?? feed[at].detail };
@@ -76,7 +86,7 @@ function fold(v: TicketView, e: TicketEvent): TicketView {
       feed[at] = { ...feed[at], status: e.decision, ...(e.note ? { detail: e.note } : {}) };
       return { ...v, feed };
     }
-    case 'user.message': return push(item({ kind: 'user', text: e.text, id: `user:${e.seq}` }));
+    case 'user.message': return push(item({ kind: 'user', text: e.text, id: `user:${e.seq}`, ...(e.attachments?.length ? { attachments: e.attachments } : {}) }));
     case 'ticket.stage': return push(item({ kind: 'stage', text: e.stage, detail: e.roles.join(', '), id: `stage:${e.seq}` }));
     case 'ticket.answered': {
       // the answer is the PM's last message; its raw JSON reply before it is noise
@@ -87,7 +97,7 @@ function fold(v: TicketView, e: TicketEvent): TicketView {
         .filter((f, i) => i === at || !(f.kind === 'message' && f.role === 'pm' && RAW_ANSWER.test(f.text)));
       return { ...v, feed };
     }
-    case 'ticket.done': return push(item({ kind: 'stage', text: 'done', id: `end:${e.seq}` }));
+    case 'ticket.done': return push(item({ kind: 'stage', text: 'done', id: `end:${e.seq}`, ...(e.stopped ? { detail: 'stopped' } : {}) }));
     case 'ticket.failed': return push(item({ kind: 'stage', text: 'failed', detail: e.reason, id: `end:${e.seq}` }));
     case 'ticket.cancelled': return push(item({ kind: 'stage', text: 'cancelled', id: `end:${e.seq}` }));
     case 'log.raw': return { ...v, raw: [...v.raw, e.line] };
@@ -99,6 +109,7 @@ function fold(v: TicketView, e: TicketEvent): TicketView {
 const initial = () => ({
   projects: {} as Record<string, Project>, tickets: {} as Record<string, Ticket>, feed: {} as Record<string, FeedItem[]>,
   raw: {} as Record<string, string[]>, lastSeq: {} as Record<string, number>, diffs: {} as Record<string, DiffFile[]>,
+  conversations: {} as Record<string, ConversationMeta>,
   selectedProjectId: null as string | null, roleFilter: 'all' as RoleId | 'all', night: initialNight(), synced: false,
 });
 
@@ -119,7 +130,7 @@ export const useOffice = create<OfficeState>()((set, get) => ({
       const projects = Object.fromEntries(e.snapshot.projects.map(p => [p.id, p]));
       const tickets = { ...s.tickets };
       for (const t of e.snapshot.tickets) tickets[t.id] = t;
-      set({ projects, tickets, synced: true, selectedProjectId: s.selectedProjectId && projects[s.selectedProjectId] ? s.selectedProjectId : null });
+      set({ projects, tickets, synced: true, ...(e.snapshot.conversations ? { conversations: { ...e.snapshot.conversations } } : {}), selectedProjectId: s.selectedProjectId && projects[s.selectedProjectId] ? s.selectedProjectId : null });
       return true;
     }
     if (e.type === 'project.added' || e.type === 'project.updated') { set({ projects: { ...s.projects, [e.project.id]: e.project } }); return true; }
@@ -128,6 +139,7 @@ export const useOffice = create<OfficeState>()((set, get) => ({
       set({ projects, selectedProjectId: s.selectedProjectId === e.projectId ? null : s.selectedProjectId });
       return true;
     }
+    if (e.type === 'conversation.updated') { set({ conversations: { ...s.conversations, [e.rootId]: e.meta } }); return true; }
     if (!isTicketEvent(e)) return false;
     const id = e.ticketId;
     if (e.seq <= (s.lastSeq[id] ?? 0)) return false;
@@ -171,6 +183,7 @@ export const useOffice = create<OfficeState>()((set, get) => ({
     if (changed) set({ tickets, feed, raw, lastSeq, diffs });
   },
 
+  setConversations(meta) { set(s => ({ conversations: { ...s.conversations, ...meta } })); },
   select(projectId) { set({ selectedProjectId: projectId }); },
   setRoleFilter(f) { set({ roleFilter: f }); },
   setNight(on) {

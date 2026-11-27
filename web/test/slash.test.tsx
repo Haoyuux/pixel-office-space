@@ -167,11 +167,11 @@ describe('slash commands', () => {
     openDrawer([ticket({ id: 'a', title: 'Add login', status: 'done' }), ticket({ id: 'b', title: 'Dark mode', status: 'done', createdAt: '2026-11-26T11:00:00Z' })]);
     run('/resume');
     const list = screen.getByRole('list', { name: /past conversations/i });
-    expect(within(list).getAllByRole('button')).toHaveLength(2);
+    expect(list.querySelectorAll('.po-past-item')).toHaveLength(2);
     expect(list.parentElement!.contains(document.activeElement)).toBe(true);
     run('/resume dark');
     const l2 = screen.getByRole('list', { name: /past conversations/i });
-    expect(within(l2).getAllByRole('button').map(b => b.textContent)).toEqual([expect.stringContaining('Dark mode')]);
+    expect([...l2.querySelectorAll('.po-past-item')].map(b => b.textContent)).toEqual([expect.stringContaining('Dark mode')]);
   });
 
   it('/cancel asks for the inline confirm; nothing running → hint', async () => {
