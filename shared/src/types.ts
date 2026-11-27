@@ -66,3 +66,21 @@ export interface Ticket {
 export interface Attachment { id: string; name: string; path: string }
 /** Per-conversation (root ticket) metadata: `<dataDir>/conversations.json`. deleted = soft-deleted (hidden; logs kept). */
 export interface ConversationMeta { projectId: string; title?: string; pinned?: boolean; deleted?: boolean }
+
+/** Team memory (M3): `<dataDir>/memory/<projectId>.json` (never in the owner's repos). */
+export interface MemoryEntry { id: string; text: string; source: 'owner' | 'pm'; ticketId?: string; at: string }
+export interface TeamMemory { entries: MemoryEntry[] }
+export const MEMORY_MAX_ENTRIES = 60;
+export const MEMORY_MAX_CHARS = 300;
+
+/** Summary board (M3): `GET /api/summary?since=<ISO>`. */
+export interface SummaryUsage { turns: number; costUsd: number; durationMs: number }
+/** A gate open right now (regardless of `since`). */
+export interface SummaryWaiting { ticketId: string; rootId: string; title: string; gate: GateKind }
+export interface SummaryItem { ticketId: string; rootId: string; title: string; kind: 'chat' | 'ticket'; status: TicketStatus; at: string }
+export interface SummaryProject {
+  projectId: string; name: string; finished: number; failed: number; answered: number;
+  waiting: SummaryWaiting[]; items: SummaryItem[]; usage: SummaryUsage;
+}
+export interface SummaryTotals { finished: number; failed: number; answered: number; waiting: number; usage: SummaryUsage }
+export interface Summary { since: string; projects: SummaryProject[]; totals: SummaryTotals }

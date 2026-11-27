@@ -10,6 +10,7 @@ import { AddProjectDialog } from './ui/AddProjectDialog';
 import { Drawer, DRAWER_WIDTH } from './ui/Drawer';
 import { CorkTooltip } from './ui/CorkTooltip';
 import { useRevealSelected } from './ui/useRevealSelected';
+import { startNotifications } from './ui/notifications';
 import './ui/theme.css';
 
 export function App() {
@@ -35,6 +36,7 @@ function DemoOffice({ n }: { n: number }) {
 /** Projects and tickets from the server: snapshot + events over the socket, driven by the ticket director. */
 function LiveOffice() {
   useEffect(() => startOffice(), []);
+  useEffect(() => startNotifications(), []);
   // dev-only hook so tools/e2e.mjs can select a room / read the feed without pixel-hunting
   if (import.meta.env.DEV) (window as unknown as { __store?: typeof useOffice }).__store = useOffice;
   const synced = useOffice(s => s.synced);
@@ -66,7 +68,7 @@ function LiveOffice() {
     <div className="po-app">
       <OfficeCanvas projects={projects} live onRoomClick={onRoomClick} onBotClick={onBotClick} onCorkHover={setCork}
         onReady={s => { scene.current = s; }} />
-      <Toolbar onAdd={() => setAdding(true)} onFit={() => fitBuilding(scene.current, drawer)} />
+      <Toolbar onAdd={() => setAdding(true)} onFit={() => fitBuilding(scene.current, drawer)} notify />
       {drawer && <Drawer key={selected} projectId={selected!} />}
       {cork && <CorkTooltip x={cork.x} y={cork.y} />}
       {adding && <AddProjectDialog onClose={() => setAdding(false)} />}
