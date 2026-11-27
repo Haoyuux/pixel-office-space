@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { roleDef, type RoleId, type Ticket, type TicketMode } from '@office/shared';
 import { useOffice } from '../state/store';
 import { api, paths } from './api';
-import { accentCss, canResume, isActive, isFinished, relativeDate, roleEmoji, roleShort, STATUS_ICON } from './format';
+import { accentCss, kindIcon, kindStatus, kindTitle, ticketKind, canResume, isActive, isFinished, relativeDate, roleEmoji, roleShort, STATUS_ICON } from './format';
 import { ClaudeBanner } from './claudeStatus';
 import { Feed } from './Feed';
 import { RawLog } from './RawLog';
@@ -122,10 +122,10 @@ export function Drawer({ projectId }: { projectId: string }) {
 
       <div className="po-ticketbar">
         <div className="po-ticket-row">
-          <span aria-hidden>🎫</span>
-          {shown ? <span className="po-ticket-title" title={shown.title}>{shown.title}</span>
-            : <span className="po-dim po-grow">no tickets yet — describe one below</span>}
-          {shown && <span className={`po-chip ${shown.status}`}>{shown.status === 'waiting' ? '⏸ waiting for you' : shown.status}</span>}
+          <span aria-hidden>{kindIcon(shown)}</span>
+          {shown ? <span className="po-ticket-title" title={kindTitle(shown)}>{kindTitle(shown)}</span>
+            : <span className="po-dim po-grow">no conversations yet — ask below</span>}
+          {shown && <span className={`po-chip ${shown.status}`}>{shown.status === 'waiting' ? '⏸ waiting for you' : kindStatus(shown)}</span>}
           {queued.length > 0 && <span className="po-chip queued" title={queued.map(t => t.title).join('\n')}>+{queued.length} queued</span>}
           {tickets.length > 0 && (
             <button type="button" className={`po-hbtn${past ? ' on' : ''}`} aria-expanded={past} onClick={() => setPast(o => !o)}>
@@ -140,11 +140,10 @@ export function Drawer({ projectId }: { projectId: string }) {
               return (
                 <li key={t.id}>
                   <button type="button" className={`po-past-item${t.id === shown?.id ? ' on' : ''}`} onClick={() => { setChosen(t.id); setPast(false); }}>
-                    <span className="po-past-title">{STATUS_ICON[t.status]} {t.title}</span>
+                    <span className="po-past-title">{kindIcon(t)} {kindTitle(t)}</span>
                     <span className="po-past-meta">
                       <span className="po-dim">{relativeDate(t.createdAt)}</span>
-                      <span className={`po-chip ${t.status}`}>{t.status}</span>
-                      {t.answered && <span className="po-chip answered" title="The PM answered; nothing was changed">✓ answered</span>}
+                      <span className={`po-chip ${t.status}`}>{kindStatus(t)}</span>
                       {roles.length > 0 && <span title={roles.map(roleShort).join(', ')}>{roles.map(roleEmoji).join('')}</span>}
                       {t.usage && <span className="po-dim" title="Uses your Claude plan — not charged">{t.usage.turns} turns</span>}
                     </span>
@@ -154,7 +153,7 @@ export function Drawer({ projectId }: { projectId: string }) {
             })}
           </ul>
         )}
-        <PipelineBar team={project.team} ticket={shown} />
+        {(!shown || ticketKind(shown) === 'ticket') && <PipelineBar team={project.team} ticket={shown} />}
         {shown?.status === 'failed' && shown.reason && (
           <div className="po-fail-row">
             <div className="po-error">failed: {shown.reason}</div>
@@ -180,7 +179,7 @@ export function Drawer({ projectId }: { projectId: string }) {
       <div className="po-body">
         {!shown ? <div className="po-scroll"><div className="po-empty po-welcome">
             <div className="po-welcome-title">{project.name} is ready.</div>
-            <div>Type a ticket below — the PM plans it, you approve, the team builds it.</div>
+            <div>Ask a question, or describe a change — the PM answers, or plans it for your approval.</div>
           </div></div>
           : tab === 'feed' ? <Feed ticketId={shown.id} onShow={setTab} />
           : tab === 'raw' ? <RawLog ticketId={shown.id} />
@@ -212,11 +211,11 @@ function ResumeButton({ ticketId }: { ticketId: string }) {
 
 const MODES: { id: TicketMode; label: string; hint: string }[] = [
   { id: 'auto', label: 'Auto', hint: 'The PM decides: answers a question, plans a change' },
-  { id: 'ask', label: 'Ask', hint: 'Just an answer — nothing is changed' },
-  { id: 'ticket', label: 'Ticket', hint: 'Always plan and build (plan gate, team, final review)' },
+  { id: 'ask', label: 'Chat', hint: 'Just an answer — nothing is changed' },
+  { id: 'ticket', label: 'Change', hint: 'Always plan and build (plan gate, team, final review)' },
 ];
 
-/** Auto · Ask · Ticket: how the PM treats a new request. */
+/** Auto · Chat · Change: how the PM treats a new request. */
 function ModeSwitch({ mode, onChange }: { mode: TicketMode; onChange: (m: TicketMode) => void }) {
   return (
     <div className="po-mode" role="radiogroup" aria-label="Mode">
@@ -256,7 +255,7 @@ function Composer({ projectId, active, continueFrom, onCreated }: { projectId: s
   const key = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); }
   };
-  const hint = continuing ? 'Continue this conversation…' : !active ? (mode === 'ask' ? 'ask a question…' : 'describe a new ticket…')
+  const hint = continuing ? 'Continue this conversation…' : !active ? (mode === 'ask' ? 'Ask a question…' : mode === 'ticket' ? 'Describe a change…' : 'Ask anything, or describe a change…')
     : asTicket ? 'queue a new ticket…' : 'message the team…';
   const rows = Math.min(6, Math.max(1, text.split('\n').length));
 
@@ -268,7 +267,7 @@ function Composer({ projectId, active, continueFrom, onCreated }: { projectId: s
         <textarea ref={box} aria-label="Message" rows={rows} style={{ overflowY: rows >= 6 ? 'auto' : 'hidden' }} value={text} placeholder={hint}
           spellCheck={false} onChange={e => setText(e.target.value)} onKeyDown={key} />
         <button type="button" className="po-btn primary po-send" disabled={busy || !text.trim()} onClick={() => void send()}>
-          {continuing && !active ? 'Continue' : creating ? (active ? 'Queue' : 'Create') : 'Send'}
+          {continuing && !active ? 'Continue' : creating && active ? 'Queue' : 'Send'}
         </button>
       </div>
       <div className="po-composer-foot">
@@ -277,7 +276,7 @@ function Composer({ projectId, active, continueFrom, onCreated }: { projectId: s
             <input type="checkbox" checked={asTicket} onChange={e => setAsTicket(e.target.checked)} />
             <span>New ticket instead</span>
           </label>
-        ) : <span className="po-dim">creates a ticket</span>}
+        ) : <span className="po-dim">Auto decides: questions get an answer, changes become a ticket</span>}
         {continuing && <span className="po-dim po-follow-of">follow-up of “{continueFrom!.title}”</span>}
         <span className="po-grow" />
         {creating && <ModeSwitch mode={mode} onChange={setMode} />}

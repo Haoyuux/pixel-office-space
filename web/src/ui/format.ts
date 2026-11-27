@@ -67,3 +67,17 @@ export function usageLine(u: { turns: number; costUsd: number; durationMs: numbe
 export const isFinished = (t: Ticket) => t.status === 'done' || t.status === 'failed' || t.status === 'cancelled';
 /** A failed claude ticket the server may pick up again (POST resume; the server has the last word). */
 export const canResume = (t: Ticket) => t.status === 'failed' && t.reason !== 'not-a-git-repo' && (t.agentsMode === 'claude' || (!t.agentsMode && !!t.sessions));
+
+/** chat = answered / Ask; ticket = a change request (plan, gate or Change mode, or from before modes); conversation = Auto still deciding. */
+export type Kind = 'chat' | 'ticket' | 'conversation';
+export function ticketKind(t: Ticket | undefined): Kind {
+  if (!t) return 'conversation';
+  if (t.answered || t.mode === 'ask') return 'chat';
+  if (t.plan || t.openGate || t.mode !== 'auto') return 'ticket';
+  return t.status === 'done' ? 'ticket' : 'conversation';
+}
+export const kindIcon = (t: Ticket | undefined) => (ticketKind(t) === 'ticket' ? '🎫' : '💬');
+/** Chats are titled by the first line of the question. */
+export const kindTitle = (t: Ticket) => (ticketKind(t) === 'chat' ? (t.text.trim().split(String.fromCharCode(10))[0].trim() || t.title) : t.title);
+/** Status chip text: a finished chat is "answered". */
+export const kindStatus = (t: Ticket) => (ticketKind(t) === 'chat' && t.status === 'done' ? 'answered' : t.status);
