@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   applyTicketEvent, type AgentState, type GateDecision, type GateKind, type Plan, type PlanTask, type Project, type RoleId,
-  type RepoDetection, type RepoRef, type ServerEvent, type Stage, type Ticket, type Workspace,
+  type RepoDetection, type RepoRef, type ServerEvent, type Stage, type Ticket, type TicketMode, type Workspace,
 } from '@office/shared';
 import { ConflictError, ValidationError, type Orchestrator, type StartOptions } from './types';
 import { titleOf } from './fakeContent';
@@ -16,7 +16,7 @@ import {
   bouncePrompt, CONTINUE, deliverNotesPrompt, diffSummary, fixJsonPrompt, followUpPrompt, planPrompt, previousContext,
   repoContext, reviewPrompt, SHARED_MODULES_RULE, stagePrompt, testPrompt, withOwnerNotes,
 } from '../claude/prompts';
-import { extractJson, planValidator, reviewValidator, testValidator, type PlanWithMap } from '../claude/parse';
+import { extractJson, isProse, pmValidator, reviewValidator, testValidator, type PmReply } from '../claude/parse';
 
 export { ConflictError };
 
@@ -152,6 +152,7 @@ export class ClaudeOrchestrator implements Orchestrator {
       id: randomUUID(), projectId: project.id, title: titleOf(text), text, status: 'queued', stage: null,
       agentStates: {}, createdAt: this.now().toISOString(), agentsMode: 'claude',
       ...(opts.parentTicketId ? { parentTicketId: opts.parentTicketId } : {}),
+      ...(opts.mode ? { mode: opts.mode } : {}),
     };
     const run = this.newRun(project, ticket, 0);
     this.emit(run, { type: 'ticket.created', ticket });
@@ -305,7 +306,9 @@ export class ClaudeOrchestrator implements Orchestrator {
     try { this.opts.onDetect?.(run.project.id, found); } catch { /* storing it is best effort */ }
     if (found.kind === 'multi') run.repos = found.repos;
     else run.repos = undefined;
-    if (found.kind === 'none' || (found.kind === 'single' && !(await this.git.hasCommit(folder)))) {
+    // an Ask only reads the owner's folder: it needs no git
+    const needsGit = run.ticket.mode !== 'ask';
+    if (needsGit && (found.kind === 'none' || (found.kind === 'single' && !(await this.git.hasCommit(folder))))) {
       this.alive(run);
       this.message(run, 'pm', `"${folder}" is not a git repository with at least one commit. ` +
         'Pixel Office works on a git branch so your files stay safe. Use "Initialize git" and try again.');
@@ -374,13 +377,16 @@ export class ClaudeOrchestrator implements Orchestrator {
     let fresh: string | undefined;
     const mapFile = path.join(folder, MAP_FILE);
     const readMap = () => fs.existsSync(mapFile) ? fs.readFileSync(mapFile, 'utf8') : undefined;
+    // an owner note on the plan means a plan is wanted; tickets from before modes existed are tickets
+    const mode: TicketMode = note ? 'ticket' : (run.ticket.mode ?? 'ticket');
     if (!note && run.continuing.has('pm') && run.sessions.pm) {
       resume = run.sessions.pm;
-      prompt = 'As the project manager, reply with the full plan as one fenced ```json block in the required shape.';
-      fresh = (run.fallback ?? '') + planPrompt(run.ticket, run.project, readMap());
+      prompt = `As the project manager, reply with the full ${mode === 'ask' ? 'answer' : mode === 'auto' ? 'answer or plan' : 'plan'} ` +
+        'as one fenced ```json block in the required shape.';
+      fresh = (run.fallback ?? '') + planPrompt(run.ticket, run.project, readMap(), mode);
     } else if (!note && run.parent && !run.plan) {
-      fresh = (run.fallback ?? '') + planPrompt(run.ticket, run.project, readMap());
-      if (run.inherited.has('pm') && run.sessions.pm) { resume = run.sessions.pm; prompt = followUpPrompt(run.ticket, run.project); }
+      fresh = (run.fallback ?? '') + planPrompt(run.ticket, run.project, readMap(), mode);
+      if (run.inherited.has('pm') && run.sessions.pm) { resume = run.sessions.pm; prompt = followUpPrompt(run.ticket, run.project, mode); }
       else prompt = fresh;
     } else if (note && run.sessions.pm) {
       this.message(run, 'pm', `Re-planning with your note: "${titleOf(note)}"`);
@@ -389,19 +395,31 @@ export class ClaudeOrchestrator implements Orchestrator {
         `Revise the plan and reply with the full corrected plan as one fenced \`\`\`json block in the same shape as before.`;
     } else {
       if (note) this.message(run, 'pm', `Re-planning with your note: "${titleOf(note)}"`);
-      prompt = planPrompt(run.ticket, run.project, readMap());
+      prompt = planPrompt(run.ticket, run.project, readMap(), mode);
       if (note) prompt += `\n\nOwner note on the previous plan:\n<owner-note>\n${note}\n</owner-note>`;
     }
     prompt = this.withNotes(run, 'pm', this.ctx(run, prompt));
     if (fresh) fresh = this.ctx(run, fresh);
-    const plan = await this.structured(run, 'pm', 'plan', folder, prompt, resume, planValidator(run.project.team), 'plan', fresh);
-    const { projectMap, ...clean } = plan;
+    const what = mode === 'ask' ? 'answer' : mode === 'auto' ? 'answer or plan' : 'plan';
+    // outside ticket mode a reply that is clearly prose (no JSON at all) is the answer, not a failure
+    const prose = mode === 'ticket' ? undefined : (text: string): PmReply => ({ kind: 'answer', answer: text.trim() });
+    const reply = await this.structured(run, 'pm', 'plan', folder, prompt, resume, pmValidator(run.project.team, mode), what, fresh, prose);
+    if (reply.kind === 'answer') return this.answer(run, reply.answer);
+    const { projectMap, ...clean } = reply.plan;
     run.plan = clean;
     if (projectMap) run.projectMap = projectMap;
     this.emit(run, { type: 'ticket.plan', plan: clean });
     this.message(run, 'pm', `Plan ready: ${clean.tasks.length} tasks. Waiting for your approval.`);
     this.state(run, 'pm', 'waiting');
     this.emit(run, { type: 'gate.open', gate: 'plan', payload: clean });
+  }
+
+  /** Ask: the PM answered. No gate, no worktree, no other roles; the ticket is done (usage is emitted by finish). */
+  private answer(run: Run, text: string) {
+    this.alive(run);
+    this.message(run, 'pm', text);
+    this.emit(run, { type: 'ticket.answered' });
+    this.finish(run, 'done');
   }
 
   private async prepareWorktree(run: Run) {
@@ -816,11 +834,12 @@ export class ClaudeOrchestrator implements Orchestrator {
   /** A run whose final text must parse; one fixJson resume, then fail showing the role's text. */
   private async structured<T>(
     run: Run, role: RoleId, stage: Exclude<Stage, 'done'>, cwd: string, prompt: string, resume: string | undefined,
-    validate: (v: unknown) => T | null, what: string, fresh?: string,
+    validate: (v: unknown) => T | null, what: string, fresh?: string, prose?: (text: string) => T,
   ): Promise<T> {
     const r1 = await this.exec(run, role, stage, cwd, prompt, resume, fresh);
     const v1 = extractJson(r1.result, validate);
     if (v1) return v1;
+    if (prose && isProse(r1.result)) return prose(r1.result);
     this.log(run, role, `[${role}] reply had no valid JSON ${what}; asking again`);
     const r2 = await this.exec(run, role, stage, cwd, fixJsonPrompt(), run.sessions[role] ?? r1.sessionId);
     const v2 = extractJson(r2.result, validate);

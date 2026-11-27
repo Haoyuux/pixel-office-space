@@ -804,6 +804,127 @@ describe('ClaudeOrchestrator: follow-ups, resume, messages', () => {
   });
 });
 
+describe('ClaudeOrchestrator: ask vs ticket', () => {
+  let repo: string;
+  beforeEach(() => { repo = mkRepo(); });
+  const ANSWER = { kind: 'answer', answer: '## Buttons\n- Save\n- Cancel' };
+  const ask = async (o: ClaudeOrchestrator, mode: 'auto' | 'ask' | 'ticket', text = 'List all the buttons in Leave') => {
+    const t = o.startTicket(project(repo), text, { mode });
+    await o.idle();
+    return t;
+  };
+  const expectAnswered = (o: ClaudeOrchestrator, id: string, text: string) => {
+    const t = o.find(id)!;
+    expect(t.status).toBe('done');
+    expect(t.answered).toBe(true);
+    expect(pmText()).toContain(text);
+    const types = events.map(e => e.type);
+    expect(types.indexOf('ticket.answered')).toBeGreaterThan(-1);
+    expect(types.indexOf('ticket.answered')).toBeLessThan(types.indexOf('ticket.done'));
+    expect(types).toContain('ticket.usage');
+    expect(types).not.toContain('gate.open');
+    expect(types).not.toContain('ticket.plan');
+    expect(types).not.toContain('ticket.workspace');
+    expect(runner.calls.every(c => c.o.role === 'pm')).toBe(true);
+    expect(fs.existsSync(workspacePath(dataDir, 'p1', id))).toBe(false);
+    expect(states('pm').slice(-2)).toEqual(['done', 'idle']);
+    expect(o.current('p1')).toBeUndefined();
+  };
+
+  it('auto: the PM may answer → answer message, ticket.answered, done (no gate, worktree or other roles)', async () => {
+    const o = make();
+    runner.script = c => c.o.role === 'pm' ? { result: fence(ANSWER) } : undefined;
+    const t = await ask(o, 'auto');
+    expect(t.mode).toBe('auto');
+    expect(o.find(t.id)!.mode).toBe('auto');
+    const p = runner.of('pm')[0].o.prompt;
+    expect(p).toContain('"kind": "answer"');
+    expect(p).toContain('"kind": "plan"');
+    expect(runner.of('pm')).toHaveLength(1);
+    expectAnswered(o, t.id, '- Save\n- Cancel');
+  });
+
+  it('auto: a plan reply still goes to the plan gate', async () => {
+    const o = make();
+    runner.script = c => c.o.role === 'pm' ? { result: fence({ kind: 'plan', ...PLAN }) } : undefined;
+    const t = await ask(o, 'auto', 'Add a forgot password link');
+    expect(o.find(t.id)!.openGate).toBe('plan');
+    expect(o.find(t.id)!.answered).toBeUndefined();
+  });
+
+  it('auto: prose without any JSON is treated as the answer (no fixJson retry)', async () => {
+    const o = make();
+    runner.script = c => c.o.role === 'pm' ? { result: 'There are two buttons: Save and Cancel.' } : undefined;
+    const t = await ask(o, 'auto');
+    expect(runner.of('pm').map(c => c.kind)).toEqual(['plan']);
+    expectAnswered(o, t.id, 'There are two buttons: Save and Cancel.');
+  });
+
+  it('auto: broken JSON still gets the one fixJson retry', async () => {
+    const o = make();
+    runner.script = (c, n) => c.o.role !== 'pm' ? undefined
+      : c.kind === 'plan' && n === 1 ? { result: '```json\n{ "kind": "answer", \n```' } : { result: fence(ANSWER) };
+    const t = await ask(o, 'auto');
+    expect(runner.of('pm').map(c => c.kind)).toEqual(['plan', 'fixjson']);
+    expectAnswered(o, t.id, '- Save');
+  });
+
+  it('ask: the prompt requires an answer and never a plan; a plan reply is refused', async () => {
+    const o = make();
+    runner.script = (c) => c.o.role !== 'pm' ? undefined
+      : c.kind === 'plan' ? { result: fence(PLAN) } : { result: fence(ANSWER) };
+    const t = await ask(o, 'ask');
+    const p = runner.of('pm')[0].o.prompt;
+    expect(p).toContain('"kind": "answer"');
+    expect(p).not.toContain('"tasks"');
+    expect(runner.of('pm').map(c => c.kind)).toEqual(['plan', 'fixjson']);
+    expectAnswered(o, t.id, '- Save');
+  });
+
+  it('ask: prose is the answer', async () => {
+    const o = make();
+    runner.script = c => c.o.role === 'pm' ? { result: 'Save and Cancel.' } : undefined;
+    const t = await ask(o, 'ask');
+    expectAnswered(o, t.id, 'Save and Cancel.');
+  });
+
+  it('ask needs no git: a plain folder is answered (auto/ticket still require a repo)', async () => {
+    const o = make();
+    runner.script = c => c.o.role === 'pm' ? { result: fence(ANSWER) } : undefined;
+    const plain = tmp('po-plain-');
+    const t = o.startTicket(project(plain), 'What is in here?', { mode: 'ask' });
+    await o.idle();
+    expect(o.find(t.id)).toMatchObject({ status: 'done', answered: true });
+    expect(runner.of('pm')[0].o.cwd).toBe(plain);
+  });
+
+  it('ticket: the prompt only offers a plan; an answer reply is not accepted', async () => {
+    const o = make();
+    runner.script = (c) => c.o.role !== 'pm' ? undefined : c.kind === 'plan' ? { result: fence(ANSWER) } : { result: fence(PLAN) };
+    const t = await ask(o, 'ticket');
+    const p = runner.of('pm')[0].o.prompt;
+    expect(p).not.toContain('"kind": "answer"');
+    expect(runner.of('pm').map(c => c.kind)).toEqual(['plan', 'fixjson']);
+    expect(o.find(t.id)!.openGate).toBe('plan');
+    expect(o.find(t.id)!.answered).toBeUndefined();
+  });
+
+  it('a follow-up on an answered ticket resumes the PM session (and can become a plan)', async () => {
+    const o = make();
+    runner.script = c => c.o.role === 'pm' && c.kind === 'plan' && runner.of('pm').length === 1 ? { result: fence(ANSWER) } : undefined;
+    const t1 = await ask(o, 'auto');
+    expect(o.find(t1.id)!.answered).toBe(true);
+    events = [];
+    const t2 = o.startTicket(project(repo), 'ok, now write that to docs/buttons.md', { parentTicketId: t1.id, mode: 'auto' });
+    await o.idle();
+    const pm = runner.of('pm').at(-1)!.o;
+    expect(pm.resume).toBe('pm-s1');
+    expect(pm.prompt).toContain('follow-up');
+    expect(pm.prompt).toContain('"kind": "answer"');
+    expect(o.find(t2.id)!.openGate).toBe('plan');
+  });
+});
+
 // real git in two repos per test: slower than the single-repo cases, especially when the suites run in parallel
 describe('ClaudeOrchestrator: multi-repo projects', { timeout: 30_000 }, () => {
   let parent: string;

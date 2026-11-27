@@ -1,4 +1,4 @@
-import { ROLE_IDS, type Plan, type PlanTask, type RoleId } from '@office/shared';
+import { ROLE_IDS, type Plan, type PlanTask, type RoleId, type TicketMode } from '@office/shared';
 
 export interface ReviewIssue { role: RoleId; file: string; note: string }
 export interface TestFailure { role: RoleId; note: string }
@@ -53,6 +53,25 @@ export const testValidator = (team: RoleId[]) => (v: unknown): TestVerdict | nul
     (isRole(f.role) && team.includes(f.role) ? failures : unassigned).push({ role: f.role as RoleId, note: f.note });
   }
   return { passed: v.passed, failures, unassigned };
+};
+
+/** The PM's first reply: a plan (today's shape, `"kind": "plan"` optional) or, outside ticket mode, an answer. */
+export type PmReply = { kind: 'plan'; plan: PlanWithMap } | { kind: 'answer'; answer: string };
+
+export const pmValidator = (team: RoleId[], mode: TicketMode) => (v: unknown): PmReply | null => {
+  if (mode !== 'ticket' && isObj(v) && v.kind === 'answer') {
+    return typeof v.answer === 'string' && v.answer.trim() ? { kind: 'answer', answer: v.answer.trim() } : null;
+  }
+  if (mode === 'ask') return null;
+  if (isObj(v) && v.kind !== undefined && v.kind !== 'plan') return null;
+  const plan = planValidator(team)(v);
+  return plan ? { kind: 'plan', plan } : null;
+};
+
+/** Clearly prose: some text, no fenced json block, and not a bare JSON value either. */
+export const isProse = (text: string): boolean => {
+  const t = text.trim();
+  return !!t && !/```json/i.test(t) && !/^[[{]/.test(t);
 };
 
 export const validateReview = reviewValidator(ROLE_IDS);

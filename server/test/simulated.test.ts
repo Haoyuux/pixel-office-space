@@ -150,3 +150,27 @@ describe('SimulatedOrchestrator', () => {
     expect(rec.find(x => x.id === b.id)!.status).toBe('queued');
   });
 });
+
+describe('SimulatedOrchestrator: ask mode', () => {
+  it('ask → a short canned answer, ticket.answered, done (no plan or gate)', () => {
+    const o = make();
+    const t = o.startTicket(project(CORE), 'What does the login page do?', { mode: 'ask' });
+    expect(t.mode).toBe('ask');
+    sched.flush();
+    expect(types()).not.toContain('ticket.plan');
+    expect(gates()).toEqual([]);
+    expect(types().indexOf('ticket.answered')).toBeGreaterThan(-1);
+    expect(types().indexOf('ticket.answered')).toBeLessThan(types().indexOf('ticket.done'));
+    expect(events.some(e => e.type === 'agent.message' && e.role === 'pm')).toBe(true);
+    expect(o.find(t.id)).toMatchObject({ status: 'done', answered: true });
+    expect(states('pm').slice(-2)).toEqual(['done', 'idle']);
+    expect(o.current('p1')).toBeUndefined();
+  });
+
+  it('auto still plans', () => {
+    const o = make();
+    o.startTicket(project(CORE), 'Add a link', { mode: 'auto' });
+    sched.flush();
+    expect(gates()).toEqual(['plan']);
+  });
+});

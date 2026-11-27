@@ -53,6 +53,7 @@ export class SimulatedOrchestrator implements Orchestrator {
       id: randomUUID(), projectId: project.id, title: titleOf(text), text, status: 'queued', stage: null,
       agentStates: {}, createdAt: new Date().toISOString(), agentsMode: 'simulated',
       ...(opts.parentTicketId ? { parentTicketId: opts.parentTicketId } : {}),
+      ...(opts.mode ? { mode: opts.mode } : {}),
     };
     const run: Run = { ticket, project, seq: 0, cancels: [], bounces: { review: 0, test: 0 } };
     this.runs.set(ticket.id, run);
@@ -136,6 +137,14 @@ export class SimulatedOrchestrator implements Orchestrator {
     if (!run.ticket.agentStates.pm) this.state(run, 'pm', 'summoned');
     this.state(run, 'pm', 'planning');
     if (note) this.message(run, 'pm', `Re-planning with your note: "${titleOf(note)}"`);
+    if (!note && run.ticket.mode === 'ask') {
+      return this.work(run, 'plan', ['pm'], () => {
+        this.message(run, 'pm', `Here is a quick answer to "${run.ticket.title}": everything you asked about looks fine. ` +
+          '(Simulated agents give canned answers; switch the project to Claude agents for a real one.)');
+        this.emit(run, { type: 'ticket.answered' });
+        this.finish(run, 'done');
+      });
+    }
     this.work(run, 'plan', ['pm'], () => {
       run.plan = makePlan(run.project, run.ticket.text);
       this.emit(run, { type: 'ticket.plan', plan: run.plan });

@@ -1,4 +1,4 @@
-import { roleDef, type DiffFile, type Plan, type PlanTask, type Project, type RoleId } from '@office/shared';
+import { roleDef, type DiffFile, type Plan, type PlanTask, type Project, type RoleId, type TicketMode } from '@office/shared';
 
 const fence = (o: unknown) => '```json\n' + JSON.stringify(o, null, 2) + '\n```';
 const GIT_RULE = 'Work only inside this folder; never run git commit, git push, or change git config/branches.';
@@ -7,23 +7,51 @@ const block = (tag: string, body: string) =>
   `<${tag}>\n${body.replace(new RegExp(`</(?=${tag})`, 'gi'), '<\\/')}\n</${tag}>`;
 const OUTPUT_RULE = 'End your final message with exactly one fenced ```json block in this shape, and nothing after it:';
 
-export function planPrompt(ticket: { title: string; text: string }, project: Pick<Project, 'name' | 'team'>, map?: string): string {
-  const team = project.team.map(r => `${r} (${roleDef(r).label})`).join(', ');
+const ANSWER_EXAMPLE = { kind: 'answer', answer: '## Short heading\nThe answer in markdown (lists, `code`, file paths).' };
+const DECIDE = `First decide what the request needs:
+- ANSWER it when it only asks for information (a question, a list, an explanation, a review of existing code) and no file has to change: read what you need, then reply with the answer.
+- PLAN it when files must change (code, config, tests, or writing a document into the repo).`;
+const BOTH_RULE = 'End your final message with exactly one fenced ```json block in ONE of these two shapes, and nothing after it.';
+
+function planExample(team: RoleId[], map: string | undefined) {
   const example: Record<string, unknown> = {
-    summary: 'One-sentence outcome', acceptance: ['Checkable criterion'], areas: ['src/api'],
-    tasks: [],
+    summary: 'One-sentence outcome', acceptance: ['Checkable criterion'], areas: ['src/api'], tasks: [],
   };
-  const first = project.team.find(r => r !== 'pm');
+  const first = team.find(r => r !== 'pm');
   if (first) example.tasks = [{ role: first, text: 'What this role does', files: ['src/api/users.ts'] }];
   if (!map) example.projectMap = '# Project map\n- short markdown overview of structure, stack, commands';
-  return `You are the project manager for "${project.name}". Read the codebase (read-only) and plan this ticket. ${GIT_RULE} ${DATA_RULE}
+  return example;
+}
 
-${block('ticket', `Title: ${ticket.title}\n${ticket.text}`)}
+/** The output section of the PM's first run for a mode: answer only (ask), plan only (ticket), or either (auto). */
+function pmOutput(mode: TicketMode, plan: Record<string, unknown>): string {
+  if (mode === 'ask') return `${OUTPUT_RULE}\n${fence(ANSWER_EXAMPLE)}`;
+  if (mode === 'ticket') return `${OUTPUT_RULE}\n${fence(plan)}`;
+  return `${BOTH_RULE}\nAnswer:\n${fence(ANSWER_EXAMPLE)}\nPlan:\n${fence({ kind: 'plan', ...plan })}`;
+}
 
+export function planPrompt(
+  ticket: { title: string; text: string }, project: Pick<Project, 'name' | 'team'>, map?: string, mode: TicketMode = 'ticket',
+): string {
+  const team = project.team.map(r => `${r} (${roleDef(r).label})`).join(', ');
+  const req = block('ticket', `Title: ${ticket.title}\n${ticket.text}`);
+  if (mode === 'ask') {
+    return `You are the project manager for "${project.name}". Answer this question from the codebase (read-only). ` +
+      `Do not plan work or change anything; only answer. ${GIT_RULE} ${DATA_RULE}
+
+${req}
+${map ? `\nExisting project map:\n${map}\n` : ''}
+${pmOutput(mode, {})}`;
+  }
+  const example = planExample(project.team, map);
+  const intro = mode === 'auto' ? 'Read the codebase (read-only) and handle this request.' : 'Read the codebase (read-only) and plan this ticket.';
+  return `You are the project manager for "${project.name}". ${intro} ${GIT_RULE} ${DATA_RULE}
+
+${req}
+${mode === 'auto' ? `\n${DECIDE}\n` : ''}
 Team (assign tasks ONLY to these roles): ${team}
 ${map ? `\nExisting project map:\n${map}\n` : '\nNo project map exists yet: include a concise markdown "projectMap" in your JSON.\n'}
-${OUTPUT_RULE}
-${fence(example)}`;
+${pmOutput(mode, example)}`;
 }
 
 export function stagePrompt(stage: string, role: RoleId, task: PlanTask, plan: Plan, notes: string[] = []): string {
@@ -86,15 +114,26 @@ export function deliverNotesPrompt(notes: string[]): string {
 export const CONTINUE = 'Continue where you left off.';
 
 /** The PM's resumed session gets the follow-up; it already knows the previous ticket. */
-export function followUpPrompt(ticket: { title: string; text: string }, project: Pick<Project, 'name' | 'team'>): string {
+export function followUpPrompt(
+  ticket: { title: string; text: string }, project: Pick<Project, 'name' | 'team'>, mode: TicketMode = 'ticket',
+): string {
   const team = project.team.map(r => `${r} (${roleDef(r).label})`).join(', ');
-  return `As the project manager, plan this follow-up to the previous ticket in this conversation. ${GIT_RULE} ${DATA_RULE}
+  const req = block('ticket', `Title: ${ticket.title}\n${ticket.text}`);
+  const plan = { summary: 'One-sentence outcome', acceptance: ['Checkable criterion'], areas: ['src'], tasks: [] };
+  if (mode === 'ask') {
+    return `As the project manager, answer this follow-up to the previous request in this conversation (read-only; do not plan or change anything). ${GIT_RULE} ${DATA_RULE}
 
-${block('ticket', `Title: ${ticket.title}\n${ticket.text}`)}
+${req}
 
+${pmOutput(mode, plan)}`;
+  }
+  const intro = mode === 'auto' ? 'handle this follow-up to the previous request' : 'plan this follow-up to the previous ticket';
+  return `As the project manager, ${intro} in this conversation. ${GIT_RULE} ${DATA_RULE}
+
+${req}
+${mode === 'auto' ? `\n${DECIDE}\n` : ''}
 Team (assign tasks ONLY to these roles): ${team}
-${OUTPUT_RULE}
-${fence({ summary: 'One-sentence outcome', acceptance: ['Checkable criterion'], areas: ['src'], tasks: [] })}`;
+${pmOutput(mode, plan)}`;
 }
 
 /** Context for a fresh session when the previous one can't be resumed (expired): the earlier plan and diff. */

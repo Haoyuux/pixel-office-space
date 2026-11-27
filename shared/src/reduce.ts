@@ -11,6 +11,7 @@ export function applyTicketEvent(t: Ticket | undefined, e: ServerEvent): Ticket 
     case 'ticket.plan': return { ...t, plan: e.plan };
     case 'gate.open': return { ...t, openGate: e.gate, status: 'waiting' };
     case 'gate.closed': { const { openGate: _g, ...rest } = t; return { ...rest, status: 'running' }; }
+    case 'ticket.answered': return { ...t, answered: true };
     case 'ticket.done': { const { openGate: _g, ...rest } = t; return { ...rest, status: 'done', stage: 'done' }; }
     case 'ticket.failed': { const { openGate: _g, ...rest } = t; return { ...rest, status: 'failed', reason: e.reason }; }
     case 'ticket.cancelled': { const { openGate: _g, ...rest } = t; return { ...rest, status: 'cancelled' }; }

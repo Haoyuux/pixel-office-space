@@ -14,6 +14,9 @@ export interface Project {
 export interface RepoRef { name: string; path: string }
 export type RepoDetection = { kind: 'single' } | { kind: 'multi'; repos: RepoRef[] } | { kind: 'none' };
 export type AgentsMode = 'claude' | 'simulated';
+/** auto = the PM decides (answer or plan); ask = answer only, never a plan; ticket = always a plan. */
+export type TicketMode = 'auto' | 'ask' | 'ticket';
+export const TICKET_MODES: TicketMode[] = ['auto', 'ask', 'ticket'];
 /** Where a claude ticket works (persisted in the log so Resume / follow-ups can rebuild it). */
 export interface Workspace {
   branch: string; worktree: string; base: { branch: string; head: string }; merged?: boolean;
@@ -46,4 +49,8 @@ export interface Ticket {
   parentTicketId?: string;
   agentsMode?: AgentsMode;
   workspace?: Workspace;
+  /** How the PM treats the request (missing = ticket: tickets from before modes existed). */
+  mode?: TicketMode;
+  /** The PM answered instead of planning (no gate, no changes). */
+  answered?: boolean;
 }

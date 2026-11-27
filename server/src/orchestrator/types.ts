@@ -1,4 +1,4 @@
-import type { GateDecision, GateKind, Project, RoleId, ServerEvent, Ticket } from '@office/shared';
+import type { GateDecision, GateKind, Project, RoleId, ServerEvent, Ticket, TicketMode } from '@office/shared';
 
 export { ConflictError, ValidationError } from '../errors';
 
@@ -8,7 +8,8 @@ export const realScheduler: Scheduler = {
   after(ms, fn) { const h = setTimeout(fn, ms); return () => clearTimeout(h); },
 };
 
-export interface StartOptions { parentTicketId?: string }
+/** mode: how the PM treats the request (missing = 'ticket', the pre-mode behaviour; the API defaults to 'auto'). */
+export interface StartOptions { parentTicketId?: string; mode?: TicketMode }
 
 export interface Orchestrator {
   startTicket(project: Project, text: string, opts?: StartOptions): Ticket;
