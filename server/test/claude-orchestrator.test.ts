@@ -49,7 +49,8 @@ const kindOf = (p: string): Kind =>
             : p.includes('You are QA') ? 'test' : 'stage';
 
 interface Call { o: RunOptions; kind: Kind; started: number; ended?: number }
-type Reply = { result?: string; write?: Record<string, string>; hang?: boolean; delay?: number; isError?: boolean; subtype?: string };
+/** stream: text deltas sent (as one streaming text block) before the result, or before hanging. */
+type Reply = { result?: string; write?: Record<string, string>; hang?: boolean; delay?: number; isError?: boolean; subtype?: string; stream?: string[] };
 
 class FakeRunner {
   calls: Call[] = [];
@@ -67,13 +68,18 @@ class FakeRunner {
       if (o.signal?.aborted) return abort();
       o.signal?.addEventListener('abort', abort);
       o.onEvent({ kind: 'init', sessionId, model: 'm' });
+      const apiId = `msg_${this.tick}`;
+      if (reply.stream) {
+        o.onEvent({ kind: 'block_start', messageId: apiId, index: 0, blockType: 'text' });
+        for (const text of reply.stream) o.onEvent({ kind: 'text_delta', messageId: apiId, index: 0, text });
+      }
       if (reply.hang) return;
       setTimeout(() => {
         if (o.signal?.aborted) return;
         o.onEvent({ kind: 'tool_use', id: `t${this.tick}`, name: 'Read', input: { file_path: 'a.txt' } });
         o.onEvent({ kind: 'tool_result', id: `t${this.tick}`, isError: false, content: 'ok' });
         for (const [f, body] of Object.entries(reply.write ?? {})) fs.writeFileSync(path.join(o.cwd, f), body);
-        if (reply.result) o.onEvent({ kind: 'text', text: reply.result });
+        if (reply.result) o.onEvent({ kind: 'text', text: reply.result, ...(reply.stream ? { messageId: apiId } : {}) });
         c.ended = ++this.tick;
         resolve({
           sessionId, result: reply.result ?? '', isError: !!reply.isError, subtype: reply.subtype ?? 'success',
@@ -98,9 +104,9 @@ class FakeRunner {
 let runner: FakeRunner;
 let events: ServerEvent[];
 let dataDir: string;
-const make = (git?: GitApi) => {
+const make = (git?: GitApi, extra: { deltaIntervalMs?: number } = {}) => {
   runner = new FakeRunner(); events = []; dataDir = tmp('po-data-');
-  const o = new ClaudeOrchestrator({ log: new TicketLog(path.join(dataDir, 'tickets')), runner, dataDir, git });
+  const o = new ClaudeOrchestrator({ log: new TicketLog(path.join(dataDir, 'tickets')), runner, dataDir, git, ...extra });
   o.onEvent(e => events.push(e));
   return o;
 };
@@ -1399,6 +1405,107 @@ describe('ClaudeOrchestrator: multi-repo projects', { timeout: 30_000 }, () => {
   });
 });
 
+
+describe('ClaudeOrchestrator: chat experience (streaming, effort, stop, attachments)', () => {
+  let repo: string;
+  beforeEach(() => { repo = mkRepo(); });
+  const msgs = () => of('agent.message');
+
+  it('streams the PM answer: deltas (streaming) then the final text with the same messageId', async () => {
+    const o = make(undefined, { deltaIntervalMs: 0 });
+    runner.script = c => c.o.role === 'pm' ? { stream: ['Save', ' and Cancel.'], result: 'Save and Cancel.' } : undefined;
+    const t = o.startTicket(project(repo), 'Which buttons?', { mode: 'ask' });
+    await o.idle();
+    const m = msgs().filter(x => x.role === 'pm');
+    const live = m.filter(x => x.streaming);
+    expect(live.map(x => x.text)).toEqual(['Save', ' and Cancel.']);
+    const fin = m.find(x => !x.streaming && x.messageId === live[0].messageId)!;
+    expect(fin.text).toBe('Save and Cancel.');
+    expect(new Set(live.map(x => x.messageId)).size).toBe(1);
+    expect(o.find(t.id)).toMatchObject({ status: 'done', answered: true });
+  });
+
+  it('effort: medium for an ask and for an auto follow-up in an answered thread; default for planning and the team', async () => {
+    const o = make();
+    runner.script = c => c.o.role !== 'pm' || c.kind !== 'plan' ? undefined
+      : c.o.prompt.includes('Which') ? { result: 'Two.' } : { result: fence({ kind: 'plan', ...PLAN }) };
+    const a = o.startTicket(project(repo), 'Which buttons?', { mode: 'ask' });
+    await o.idle();
+    expect(runner.of('pm').at(-1)!.o.effort).toBe('medium');
+    o.startTicket(project(repo), 'Which pages?', { mode: 'auto', parentTicketId: a.id });
+    await o.idle();
+    expect(runner.of('pm').at(-1)!.o.effort).toBe('medium');
+    const t = o.startTicket(project(repo), 'Add a link', { mode: 'auto' });
+    await o.idle();
+    expect(runner.of('pm').at(-1)!.o.effort).toBeUndefined();
+    o.decide(t.id, 'plan', 'approved');
+    await o.idle();
+    expect(runner.calls.filter(c => c.o.role !== 'pm').every(c => c.o.effort === undefined)).toBe(true);
+  });
+
+  it('stop while the PM answers: run aborted, ticket done (stopped) keeping the streamed text', async () => {
+    const o = make(undefined, { deltaIntervalMs: 0 });
+    runner.script = c => c.o.role === 'pm' ? { stream: ['Partial', ' answer'], hang: true } : undefined;
+    const t = o.startTicket(project(repo), 'Explain the app', { mode: 'ask' });
+    await new Promise(r => setTimeout(r, 50));
+    const call = runner.of('pm')[0];
+    expect(o.stop(t.id)).toBe('stopped');
+    await o.idle();
+    expect(call.o.signal!.aborted).toBe(true);
+    const live = msgs().find(x => x.streaming)!;
+    const fin = msgs().find(x => !x.streaming && x.messageId === live.messageId)!;
+    expect(fin.text).toBe('Partial answer');
+    expect(pmText()).toContain('Stopped by you.');
+    expect(o.find(t.id)).toMatchObject({ status: 'done', stopped: true });
+    expect(of('ticket.done').at(-1)).toMatchObject({ stopped: true });
+    expect(events.map(e => e.type)).not.toContain('ticket.failed');
+    expect(o.current('p1')).toBeUndefined();
+    expect(() => o.stop(t.id)).toThrow(/not active/);
+  });
+
+  it('stop in a work stage cancels (like Cancel); a queued ticket is cancelled', async () => {
+    const o = make();
+    const t = await toPlanGate(o, repo);
+    const q = o.startTicket(project(repo), 'Another one');
+    expect(o.stop(q.id)).toBe('cancelled');
+    expect(o.find(q.id)!.status).toBe('cancelled');
+    runner.script = c => c.kind === 'stage' ? { hang: true } : undefined;
+    o.decide(t.id, 'plan', 'approved');
+    for (let i = 0; i < 100 && !runner.calls.some(c => c.kind === 'stage'); i++) await new Promise(r => setTimeout(r, 20));
+    expect(o.stop(t.id)).toBe('cancelled');
+    await o.idle();
+    expect(o.find(t.id)!.status).toBe('cancelled');
+  });
+
+  it('attachments: listed in the prompt, the attachments folder is an --add-dir, messages carry them too', async () => {
+    const o = make();
+    const dir = path.join(dataDir, 'attachments', 'p1');
+    fs.mkdirSync(dir, { recursive: true });
+    const a = { id: '11111111-1111-1111-1111-111111111111', name: 'shot.png', path: path.join(dir, '11111111-1111-1111-1111-111111111111-shot.png') };
+    fs.writeFileSync(a.path, 'png');
+    runner.script = c => c.o.role === 'pm' && c.kind === 'plan' ? { hang: true } : undefined;
+    const t = o.startTicket(project(repo), 'What is wrong here?', { mode: 'ask', attachments: [a] });
+    expect(t.attachments).toEqual([a]);
+    await new Promise(r => setTimeout(r, 50));
+    const pm = runner.of('pm')[0].o;
+    expect(pm.prompt).toContain('Attached files — read them with the Read tool');
+    expect(pm.prompt).toContain(a.path);
+    expect(pm.addDirs).toEqual([dir]);
+    const b = { ...a, id: '22222222-2222-2222-2222-222222222222', name: 'log.txt', path: path.join(dir, '22222222-2222-2222-2222-222222222222-log.txt') };
+    o.sendMessage(t.id, 'and this log', [b]);
+    expect(of('user.message').at(-1)).toMatchObject({ text: 'and this log', attachments: [b] });
+    o.stop(t.id);
+    await o.idle();
+  });
+
+  it('no attachments folder → no --add-dir', async () => {
+    const o = make();
+    runner.script = c => c.o.role === 'pm' ? { result: 'Hi.' } : undefined;
+    o.startTicket(project(repo), 'Hello?', { mode: 'ask' });
+    await o.idle();
+    expect(runner.of('pm')[0].o.addDirs).toBeUndefined();
+  });
+});
 
 describe('short worktree paths (Windows 260-char limit)', () => {
   it('keeps the workspace path short: <dataDir>/wt/<8>/<8>', () => {

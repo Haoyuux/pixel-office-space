@@ -12,7 +12,7 @@ export function applyTicketEvent(t: Ticket | undefined, e: ServerEvent): Ticket 
     case 'gate.open': return { ...t, openGate: e.gate, status: 'waiting' };
     case 'gate.closed': { const { openGate: _g, ...rest } = t; return { ...rest, status: 'running' }; }
     case 'ticket.answered': return { ...t, answered: true };
-    case 'ticket.done': { const { openGate: _g, ...rest } = t; return { ...rest, status: 'done', stage: 'done' }; }
+    case 'ticket.done': { const { openGate: _g, ...rest } = t; return { ...rest, status: 'done', stage: 'done', ...(e.stopped ? { stopped: true } : {}) }; }
     case 'ticket.failed': { const { openGate: _g, ...rest } = t; return { ...rest, status: 'failed', reason: e.reason }; }
     case 'ticket.cancelled': { const { openGate: _g, ...rest } = t; return { ...rest, status: 'cancelled' }; }
     case 'agent.session': return { ...t, sessions: { ...t.sessions, [e.role]: e.sessionId } };
