@@ -14,7 +14,7 @@ import { newTranslateContext, translate } from '../claude/translate';
 import { MAX_TURNS, ROLE_TOOLS } from '../claude/roles';
 import {
   bouncePrompt, CONTINUE, deliverNotesPrompt, diffSummary, fixJsonPrompt, followUpPrompt, planPrompt, previousContext,
-  repoContext, reviewPrompt, SHARED_MODULES_RULE, stagePrompt, testPrompt, withOwnerNotes,
+  projectDocsRule, repoContext, reviewPrompt, SHARED_MODULES_RULE, stagePrompt, testPrompt, withOwnerNotes,
 } from '../claude/prompts';
 import { extractJson, isProse, pmValidator, reviewValidator, testValidator, type PmReply } from '../claude/parse';
 
@@ -70,7 +70,11 @@ interface Unit {
   sharedModules?: boolean;
 }
 /** Where the non-PM roles work: the one worktree (single repo) or a plain folder holding one worktree per repo. */
-interface Ws { path: string; multi: boolean; units: Unit[] }
+interface Ws {
+  path: string; multi: boolean; units: Unit[];
+  /** Multi-repo: the parent folder's CLAUDE.md / docs were copied into `<path>/_project/`. */
+  docs?: boolean;
+}
 
 interface Run {
   ticket: Ticket; project: Project; seq: number;
@@ -581,10 +585,12 @@ export class ClaudeOrchestrator implements Orchestrator {
   }
 
   /** Multi-repo projects: tell the agent which subfolders are repos. */
-  private ctx(run: Run, prompt: string): string {
+  private ctx(run: Run, prompt: string, role: RoleId = 'pm'): string {
     const names = run.ws?.multi ? run.ws.units.map(u => u.name) : (run.repos ?? []).map(r => r.name);
     const parts = [prompt];
     if (names.length) parts.push(repoContext(names));
+    // the PM works in the owner's folder and reads the parent docs there; the others get the workspace copy
+    if (role !== 'pm' && run.ws?.docs) parts.push(projectDocsRule(run.project.folder, PROJECT_DOCS_DIR));
     if (run.ws?.units.some(u => u.sharedModules)) parts.push(SHARED_MODULES_RULE);
     return parts.join('\n\n');
   }
@@ -607,6 +613,39 @@ export class ClaudeOrchestrator implements Orchestrator {
     // a multi-repo workspace root is not a repo: nothing to exclude there
     if (!run.ws.multi) await this.git.excludePath(run.ws.path, '/.claude/agents/');
     this.alive(run);
+    this.provisionDocs(run);
+  }
+
+  /**
+   * Multi-repo: project rules and docs live in the owner's parent folder, outside every repo (so outside the
+   * workspace). Copy `CLAUDE.md` + `docs/**\/*.md` (≤ 2 MB in total) into `<workspace>/_project/` for the non-PM roles
+   * to read. A copy rather than `--add-dir`: that is not confirmed read-only under acceptEdits, and the owner's files
+   * must stay untouched. The workspace root is not a repo, so the copy is never committed.
+   */
+  private provisionDocs(run: Run) {
+    const ws = run.ws;
+    if (!ws?.multi || ws.units.some(u => u.name.toLowerCase() === PROJECT_DOCS_DIR)) return;
+    const parent = run.project.folder;
+    const files: string[] = [];
+    if (isFile(path.join(parent, 'CLAUDE.md'))) files.push('CLAUDE.md');
+    files.push(...markdownUnder(parent, 'docs'));
+    let budget = PROJECT_DOCS_MAX;
+    const skipped: string[] = [];
+    let copied = 0;
+    for (const rel of files) {
+      const src = path.join(parent, rel);
+      const size = fs.statSync(src).size;
+      if (size > budget) { skipped.push(rel); continue; }
+      const dst = path.join(ws.path, PROJECT_DOCS_DIR, rel);
+      try {
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        fs.copyFileSync(src, dst);
+        budget -= size;
+        copied++;
+      } catch { skipped.push(rel); }
+    }
+    ws.docs = copied > 0;
+    if (skipped.length) this.log(run, 'pm', `Project docs: not copied (over the 2 MB budget or unreadable): ${skipped.join(', ')}`);
   }
 
   /**
@@ -682,12 +721,12 @@ export class ClaudeOrchestrator implements Orchestrator {
       };
       await Promise.all(roles.map(async role => {
         if (stage === 'review') {
-          const v = await this.structured(run, role, 'review', cwd, this.withNotes(run, role, this.ctx(run, reviewPrompt(run.plan!, summary))), run.sessions[role], reviewValidator(team), 'review');
+          const v = await this.structured(run, role, 'review', cwd, this.withNotes(run, role, this.ctx(run, reviewPrompt(run.plan!, summary), role)), run.sessions[role], reviewValidator(team), 'review');
           if (!v.approved || v.issues.length || v.unassigned.length) approved = false;
           issues.push(...v.issues); unassigned.push(...v.unassigned);
           remarks(role, v.notes);
         } else {
-          const v = await this.structured(run, role, 'test', cwd, this.withNotes(run, role, this.ctx(run, testPrompt(run.plan!))), run.sessions[role], testValidator(team), 'test results');
+          const v = await this.structured(run, role, 'test', cwd, this.withNotes(run, role, this.ctx(run, testPrompt(run.plan!), role)), run.sessions[role], testValidator(team), 'test results');
           if (!v.passed || v.failures.length || v.unassigned.length) approved = false;
           issues.push(...v.failures); unassigned.push(...v.unassigned);
           remarks(role, v.notes);
@@ -739,7 +778,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     await Promise.all(roles.map(role => {
       const task = run.plan!.tasks.filter(t => t.role === role);
       const merged: PlanTask = { role, text: task.map(t => t.text).join('\n'), files: task.flatMap(t => t.files) };
-      const prompt = this.ctx(run, stagePrompt(stage, role, merged, run.plan!, this.takeNotes(run, role)));
+      const prompt = this.ctx(run, stagePrompt(stage, role, merged, run.plan!, this.takeNotes(run, role)), role);
       return this.exec(run, role, stage, cwd, prompt, run.sessions[role]);
     }));
     this.alive(run);
@@ -1052,6 +1091,21 @@ export class ClaudeOrchestrator implements Orchestrator {
 }
 
 const isLink = (p: string) => { try { return fs.lstatSync(p).isSymbolicLink(); } catch { return false; } };
+const isFile = (p: string) => { try { return fs.statSync(p).isFile(); } catch { return false; } };
+const PROJECT_DOCS_DIR = '_project';
+const PROJECT_DOCS_MAX = 2 * 1024 * 1024;
+/** `<dir>/**\/*.md` under root (relative paths, sorted; dot-folders, node_modules and links skipped). */
+function markdownUnder(root: string, dir: string): string[] {
+  const out: string[] = [];
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(path.join(root, dir), { withFileTypes: true }); } catch { return out; }
+  for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    const rel = path.join(dir, e.name);
+    if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules') out.push(...markdownUnder(root, rel));
+    else if (e.isFile() && /\.md$/i.test(e.name)) out.push(rel);
+  }
+  return out;
+}
 /** Remove a junction/symlink itself (never its target's contents). */
 function unlinkDir(p: string) {
   try { fs.unlinkSync(p); } catch { fs.rmdirSync(p); }

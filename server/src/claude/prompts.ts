@@ -179,6 +179,14 @@ export function repoContext(names: string[]): string {
     `cd <dotnet-repo> && dotnet build, cd <dotnet-repo> && dotnet test.`;
 }
 
+/** Multi-repo: the parent folder's CLAUDE.md and docs/ copied (read-only reference) into `<workspace>/_project/`. */
+export function projectDocsRule(parent: string, dir: string): string {
+  const sep = parent.includes('\\') ? '\\' : '/';
+  return `Project rules and docs live in ${parent}${sep}CLAUDE.md and ${parent}${sep}docs — a copy is in ${dir}/ in the working folder ` +
+    `(${dir}/CLAUDE.md, ${dir}/docs/). Read them and follow them; you cannot change those files (the copy is reference only ` +
+    'and is discarded). Never report the parent folder\'s files as something the team must change.';
+}
+
 /** The worktree's node_modules is a link to the owner's checkout. */
 export const SHARED_MODULES_RULE = "node_modules is shared with the owner's checkout — never run npm install/ci/uninstall/update; " +
   'if a new dependency is needed, say so in your report.';

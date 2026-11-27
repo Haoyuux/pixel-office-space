@@ -1173,6 +1173,45 @@ describe('ClaudeOrchestrator: multi-repo projects', { timeout: 30_000 }, () => {
     expect(diff.files.map(f => f.path).sort()).toEqual(['angular/ui.txt', 'aspnet-core/api.txt']);
   });
 
+  it('parent docs: CLAUDE.md + docs/**/*.md (≤ 2 MB) copied into <workspace>/_project for non-PM roles; owner files untouched', async () => {
+    const o = make();
+    fs.writeFileSync(path.join(parent, 'CLAUDE.md'), '# rules\n');
+    fs.mkdirSync(path.join(parent, 'docs', 'tickets'), { recursive: true });
+    fs.writeFileSync(path.join(parent, 'docs', 'tickets', 'ticket-register.md'), '| id |\n');
+    fs.writeFileSync(path.join(parent, 'docs', 'logo.png'), 'png');
+    fs.writeFileSync(path.join(parent, 'docs', 'x-big.md'), 'a'.repeat(1_500_000));
+    fs.writeFileSync(path.join(parent, 'docs', 'y-big.md'), 'b'.repeat(1_000_000));
+    const t = await toPlanGate(o, parent);
+    writes();
+    o.decide(t.id, 'plan', 'approved');
+    await o.idle();
+    const proj = path.join(wsOf(t.id), '_project');
+    expect(fs.readFileSync(path.join(proj, 'CLAUDE.md'), 'utf8')).toBe('# rules\n');
+    expect(fs.readFileSync(path.join(proj, 'docs', 'tickets', 'ticket-register.md'), 'utf8')).toBe('| id |\n');
+    expect(fs.existsSync(path.join(proj, 'docs', 'logo.png'))).toBe(false);
+    expect(fs.existsSync(path.join(proj, 'docs', 'x-big.md'))).toBe(true);
+    expect(fs.existsSync(path.join(proj, 'docs', 'y-big.md'))).toBe(false); // over the 2 MB budget
+    for (const role of ['frontend', 'backend', 'techlead', 'qa'] as RoleId[]) {
+      const first = runner.of(role).find(c => c.kind !== 'bounce')!.o;
+      expect(first.prompt).toContain('_project/');
+      expect(first.prompt).toContain(path.join(parent, 'CLAUDE.md'));
+      expect(first.addDirs).toBeUndefined(); // read-only copies, not --add-dir (which acceptEdits could write to)
+    }
+    expect(runner.of('pm')[0].o.prompt).not.toContain('_project');
+    expect(fs.readFileSync(path.join(parent, 'docs', 'tickets', 'ticket-register.md'), 'utf8')).toBe('| id |\n');
+    expect(of('ticket.diff').at(-1)!.files.map(f => f.path).some(p => p.includes('_project'))).toBe(false);
+  });
+
+  it('parent docs: none in the parent → no _project folder and no prompt line', async () => {
+    const o = make();
+    const t = await toPlanGate(o, parent);
+    writes();
+    o.decide(t.id, 'plan', 'approved');
+    await o.idle();
+    expect(fs.existsSync(path.join(wsOf(t.id), '_project'))).toBe(false);
+    expect(runner.of('frontend', 'stage')[0].o.prompt).not.toContain('_project');
+  });
+
   it('follow-up of an unmerged multi-repo parent continues on the same branch in every repo', async () => {
     const o = make();
     const t1 = await toPlanGate(o, parent);
