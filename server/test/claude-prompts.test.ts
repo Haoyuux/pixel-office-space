@@ -12,10 +12,10 @@ const plan = { summary: 's', acceptance: ['a'], areas: ['x'], tasks: [{ role: 'b
 describe('extractJson', () => {
   it('takes the last fenced json block from prose', () => {
     const t = 'Here:\n```json\n{"approved":false,"issues":[]}\n```\nrevised:\n```json\n{"approved":true,"issues":[]}\n```\nbye';
-    expect(extractJson(t, validateReview)).toEqual({ approved: true, issues: [], unassigned: [] });
+    expect(extractJson(t, validateReview)).toEqual({ approved: true, issues: [], unassigned: [], notes: [] });
   });
   it('falls back to whole text', () => {
-    expect(extractJson('{"passed":true,"failures":[]}', validateTest)).toEqual({ passed: true, failures: [], unassigned: [] });
+    expect(extractJson('{"passed":true,"failures":[]}', validateTest)).toEqual({ passed: true, failures: [], unassigned: [], notes: [] });
   });
   it('returns null for invalid json or wrong shape', () => {
     expect(extractJson('```json\n{oops\n```', validateReview)).toBeNull();
@@ -87,6 +87,25 @@ describe('prompts', () => {
     expect(testPrompt(plan as any)).toContain('passed');
     expect(bouncePrompt([{ role: 'backend', file: 'a.ts', note: 'bad' }])).toContain('bad');
     expect(fixJsonPrompt()).toContain('json');
+  });
+});
+
+describe('fair review and QA', () => {
+  it('review judges only the diff; QA-not-done and outside-the-repo rules go under notes', () => {
+    const r = reviewPrompt(plan as any);
+    expect(r).toMatch(/only the changes in the diff/i);
+    expect(r).toMatch(/QA or testing not done yet/);
+    expect(r).toMatch(/outside the repos/);
+    expect(r).toContain('"notes"');
+    const q = testPrompt(plan as any);
+    expect(q).toMatch(/only report failures the builders can fix in the workspace/i);
+    expect(q).toContain('"notes"');
+  });
+  it('verdicts accept optional notes (bad notes are ignored, never a parse failure)', () => {
+    const t = (o: unknown) => '```json\n' + JSON.stringify(o) + '\n```';
+    expect(extractJson(t({ approved: true, issues: [], notes: ['QA later'] }), reviewValidator(['backend']))!.notes).toEqual(['QA later']);
+    expect(extractJson(t({ approved: true, issues: [], notes: 5 }), reviewValidator(['backend']))!.notes).toEqual([]);
+    expect(extractJson(t({ passed: true, failures: [], notes: ['flaky env'] }), testValidator(['backend']))!.notes).toEqual(['flaky env']);
   });
 });
 

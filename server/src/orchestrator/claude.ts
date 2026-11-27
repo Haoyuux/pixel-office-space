@@ -559,6 +559,27 @@ export class ClaudeOrchestrator implements Orchestrator {
     return out;
   }
 
+  /**
+   * Is a review/test item's file inside one of the workspace's repos (where the devs can fix it)? Absolute paths are
+   * taken relative to the workspace (or the owner's folder). Single repo: anything not climbing out of it, including no
+   * file at all. Multi-repo: the path must start with a repo's folder, so no file / a parent-folder file is outside.
+   */
+  private inRepos(run: Run, file: string): boolean {
+    const ws = run.ws;
+    if (!ws) return true;
+    let f = file.trim().replace(/\\/g, '/');
+    if (path.isAbsolute(f) || /^[a-z]:\//i.test(f)) {
+      const under = [ws.path, run.project.folder].map(b => path.relative(b, f)).find(r => r && !r.startsWith('..') && !path.isAbsolute(r));
+      if (under === undefined) return false;
+      f = under.replace(/\\/g, '/');
+    }
+    f = f ? path.posix.normalize(f) : '';
+    if (f === '..' || f.startsWith('../')) return false;
+    if (!ws.multi) return true;
+    const first = f.replace(/^\.\//, '').split('/')[0].toLowerCase();
+    return !!first && first !== '.' && ws.units.some(u => u.name.toLowerCase() === first);
+  }
+
   /** Multi-repo projects: tell the agent which subfolders are repos. */
   private ctx(run: Run, prompt: string): string {
     const names = run.ws?.multi ? run.ws.units.map(u => u.name) : (run.repos ?? []).map(r => r.name);
@@ -656,25 +677,40 @@ export class ClaudeOrchestrator implements Orchestrator {
       let approved = true;
       const summary = stage === 'review' ? diffSummary(await this.diffAll(run)) : '';
       this.alive(run);
+      const remarks = (role: RoleId, notes: string[]) => {
+        if (notes.length) this.message(run, role, `Notes (not blocking):\n${notes.map(n => `- ${n}`).join('\n')}`);
+      };
       await Promise.all(roles.map(async role => {
         if (stage === 'review') {
           const v = await this.structured(run, role, 'review', cwd, this.withNotes(run, role, this.ctx(run, reviewPrompt(run.plan!, summary))), run.sessions[role], reviewValidator(team), 'review');
           if (!v.approved || v.issues.length || v.unassigned.length) approved = false;
           issues.push(...v.issues); unassigned.push(...v.unassigned);
+          remarks(role, v.notes);
         } else {
           const v = await this.structured(run, role, 'test', cwd, this.withNotes(run, role, this.ctx(run, testPrompt(run.plan!))), run.sessions[role], testValidator(team), 'test results');
           if (!v.passed || v.failures.length || v.unassigned.length) approved = false;
           issues.push(...v.failures); unassigned.push(...v.unassigned);
+          remarks(role, v.notes);
         }
       }));
       this.alive(run);
       if (stage === 'test') await this.commit(run, 'office: test (qa)');
       for (const r of roles) this.state(run, r, 'waiting');
+      // fair review: an item on a file outside every repo can't be fixed by the devs → a PM note, never a bounce
+      const outside = [...issues, ...unassigned].filter(i => i.file !== undefined && !this.inRepos(run, i.file));
+      const drop = (list: Issue[]) => list.splice(0, list.length, ...list.filter(i => !outside.includes(i)));
+      drop(issues); drop(unassigned);
+      if (outside.length) {
+        this.message(run, 'pm', `Noted, not sent back (outside the repos, so the team can't change it here):\n` +
+          outside.map(i => `- [${i.role}] ${i.file ? i.file + ': ' : ''}${i.note}`).join('\n'));
+      }
       if (unassigned.length) {
         this.message(run, 'pm', `Some ${stage} findings are for roles not on this team; passing them to the builders:\n` +
           unassigned.map(i => `- [${i.role}] ${i.file ? i.file + ': ' : ''}${i.note}`).join('\n'));
       }
       const all: Issue[] = [...issues, ...unassigned];
+      // only outside-the-repo items: nothing the team can fix, so it passes
+      if (!all.length && outside.length) approved = true;
       // a bare "not approved" with no items still goes to the builders
       if (!approved && !all.length) all.push({ role: 'pm', note: `The ${stage === 'review' ? 'review' : 'tests'} did not pass.` });
       issues.splice(0, issues.length, ...this.route(run, stage, all));

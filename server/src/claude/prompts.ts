@@ -67,8 +67,17 @@ ${notes.length ? `\n${block('owner-notes', notes.map(n => `- ${n}`).join('\n'))}
 When done, reply with a short plain summary of what you changed.`;
 }
 
+/** What reviewers must not block on (addendum §2): the devs can only change files in the workspace's repos. */
+const FAIR_REVIEW = `Judge only the changes in the diff against the plan and the acceptance criteria. Do NOT block on (never put these under "issues"):
+- QA or testing not done yet: QA runs after review.
+- Process rules about files outside the repos (e.g. a ticket register or docs in the parent folder).
+- Anything the developers cannot change in the workspace.
+Put such remarks under "notes" instead; "issues" are only for changes the developers must make to files in the repos.`;
+
 export function reviewPrompt(plan: Plan, changes = ''): string {
   return `Review the changes in this worktree against the plan (use git diff). Read-only; do not edit. ${GIT_RULE}
+
+${FAIR_REVIEW}
 
 Summary: ${plan.summary}
 Acceptance:
@@ -76,19 +85,22 @@ ${plan.acceptance.map(a => `- ${a}`).join('\n')}
 ${changes ? `\nChanged files (from the server):\n${changes}\n` : ''}
 
 ${OUTPUT_RULE}
-${fence({ approved: false, issues: [{ role: 'backend', file: 'src/a.ts', note: 'What must change' }] })}
-Set approved true with empty issues when the work is acceptable. "role" is the dev who owns the file.`;
+${fence({ approved: false, issues: [{ role: 'backend', file: 'src/a.ts', note: 'What must change' }], notes: ['Optional remark that does not block'] })}
+Set approved true with empty issues when the work is acceptable. "role" is the dev who owns the file; "file" is its path in the workspace.`;
 }
 
 export function testPrompt(plan: Plan): string {
   return `You are QA. Write or update test files only (no production code), run the project's test command, and judge against the plan. ${GIT_RULE}
+
+Only report failures the builders can fix in the workspace (code and tests in the repos). Problems outside it (environment, ` +
+    `files outside the repos, process rules) go under "notes", not "failures".
 
 Summary: ${plan.summary}
 Acceptance:
 ${plan.acceptance.map(a => `- ${a}`).join('\n')}
 
 ${OUTPUT_RULE}
-${fence({ passed: false, failures: [{ role: 'backend', note: 'What failed and why' }] })}
+${fence({ passed: false, failures: [{ role: 'backend', note: 'What failed and why' }], notes: ['Optional remark that does not block'] })}
 Set passed true with empty failures when everything passes. "role" is the dev who should fix it.`;
 }
 

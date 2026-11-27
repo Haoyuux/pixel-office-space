@@ -2,12 +2,14 @@ import { ROLE_IDS, type Plan, type PlanTask, type RoleId, type TicketMode } from
 
 export interface ReviewIssue { role: RoleId; file: string; note: string }
 export interface TestFailure { role: RoleId; note: string }
-export interface ReviewVerdict { approved: boolean; issues: ReviewIssue[]; unassigned: ReviewIssue[] }
-export interface TestVerdict { passed: boolean; failures: TestFailure[]; unassigned: TestFailure[] }
+export interface ReviewVerdict { approved: boolean; issues: ReviewIssue[]; unassigned: ReviewIssue[]; notes: string[] }
+export interface TestVerdict { passed: boolean; failures: TestFailure[]; unassigned: TestFailure[]; notes: string[] }
 export type PlanWithMap = Plan & { projectMap?: string };
 
 const isObj = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const strs = (v: unknown): v is string[] => Array.isArray(v) && v.every(x => typeof x === 'string');
+/** Optional non-blocking remarks: anything malformed is dropped, never a parse failure. */
+const notesOf = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && !!x.trim()) : [];
 const isRole = (v: unknown): v is RoleId => typeof v === 'string' && (ROLE_IDS as string[]).includes(v);
 
 /** Last fenced ```json block, else the whole text. Returns null when nothing parses/validates. */
@@ -42,7 +44,7 @@ export const reviewValidator = (team: RoleId[]) => (v: unknown): ReviewVerdict |
     if (!isObj(i) || typeof i.role !== 'string' || typeof i.file !== 'string' || typeof i.note !== 'string') return null;
     (isRole(i.role) && team.includes(i.role) ? issues : unassigned).push({ role: i.role as RoleId, file: i.file, note: i.note });
   }
-  return { approved: v.approved, issues, unassigned };
+  return { approved: v.approved, issues, unassigned, notes: notesOf(v.notes) };
 };
 
 export const testValidator = (team: RoleId[]) => (v: unknown): TestVerdict | null => {
@@ -52,7 +54,7 @@ export const testValidator = (team: RoleId[]) => (v: unknown): TestVerdict | nul
     if (!isObj(f) || typeof f.role !== 'string' || typeof f.note !== 'string') return null;
     (isRole(f.role) && team.includes(f.role) ? failures : unassigned).push({ role: f.role as RoleId, note: f.note });
   }
-  return { passed: v.passed, failures, unassigned };
+  return { passed: v.passed, failures, unassigned, notes: notesOf(v.notes) };
 };
 
 /** The PM's first reply: a plan (today's shape, `"kind": "plan"` optional) or, outside ticket mode, an answer. */

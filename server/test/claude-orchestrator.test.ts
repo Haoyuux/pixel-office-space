@@ -301,6 +301,23 @@ describe('ClaudeOrchestrator', () => {
     expect(gates()).toEqual(['plan', 'final']);
   });
 
+  it('fair review: an issue on a file outside the repo is a PM note, never a bounce; reviewer notes are shown', async () => {
+    const o = make();
+    const outside = path.join(path.dirname(repo), 'elsewhere', 'RULES.md');
+    runner.script = (c, n) => c.kind === 'review' && n === 1
+      ? { result: fence({ approved: false, notes: ['QA has not run yet'], issues: [
+        { role: 'frontend', file: '../docs/tickets/ticket-register.md', note: 'register not updated' },
+        { role: 'backend', file: outside, note: 'rules file' }] }) }
+      : undefined;
+    await toFinal(o, repo);
+    expect(runner.calls.filter(c => c.kind === 'bounce')).toHaveLength(0);
+    expect(runner.of('techlead', 'review')).toHaveLength(1);
+    expect(gates()).toEqual(['plan', 'final']);
+    expect(pmText()).toContain('../docs/tickets/ticket-register.md');
+    expect(pmText()).toContain('register not updated');
+    expect(of('agent.message').some(m => m.role === 'techlead' && m.text.startsWith('Notes') && m.text.includes('QA has not run yet'))).toBe(true);
+  });
+
   it('final approve → merged into the base when clean (base advanced); usage emitted', async () => {
     const o = make();
     const t = await toFinal(o, repo);
@@ -994,6 +1011,42 @@ describe('ClaudeOrchestrator: multi-repo projects', { timeout: 30_000 }, () => {
     expect(o.find(t.id)!.openGate).toBe('final');
     // owner's repos untouched before approval
     expect(fs.existsSync(path.join(fe, 'ui.txt'))).toBe(false);
+  });
+
+  it('fair review: the ticket register in the parent folder (outside every repo) is a note, not a bounce', async () => {
+    const o = make();
+    writes();
+    const base = runner.script;
+    runner.script = (c, n) => c.kind === 'review'
+      ? { result: fence({ approved: false, issues: [{ role: 'frontend', file: 'docs/tickets/ticket-register.md', note: 'add the ticket to the register' }] }) }
+      : base(c, n);
+    const t = await toPlanGate(o, parent);
+    o.decide(t.id, 'plan', 'approved');
+    await o.idle();
+    expect(runner.calls.filter(c => c.kind === 'bounce')).toHaveLength(0);
+    expect(runner.of('techlead', 'review')).toHaveLength(1);
+    expect(o.find(t.id)!.openGate).toBe('final');
+    expect(pmText()).toContain('docs/tickets/ticket-register.md');
+  });
+
+  it('fair review: an issue with no file inside a repo is a note; one inside a repo still bounces', async () => {
+    const o = make();
+    writes();
+    const base = runner.script;
+    runner.script = (c, n) => c.kind === 'review' && n === 1
+      ? { result: fence({ approved: false, issues: [
+        { role: 'techlead', file: '', note: 'QA has not checked it yet' },
+        { role: 'frontend', file: 'angular/ui.txt', note: 'typo in the label' }] }) }
+      : base(c, n);
+    const t = await toPlanGate(o, parent);
+    o.decide(t.id, 'plan', 'approved');
+    await o.idle();
+    const b = runner.calls.filter(c => c.kind === 'bounce');
+    expect(b.map(c => c.o.role)).toEqual(['frontend']);
+    expect(b[0].o.prompt).toContain('typo in the label');
+    expect(b[0].o.prompt).not.toContain('QA has not checked');
+    expect(pmText()).toContain('QA has not checked it yet');
+    expect(o.find(t.id)!.openGate).toBe('final');
   });
 
   it('re-detects repos at ticket start (project record without repos still works as multi-repo)', async () => {
