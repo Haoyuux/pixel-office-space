@@ -106,10 +106,10 @@
 .po-drawer {
   position: absolute; top: 0; right: 0; bottom: 0; z-index: 30; max-width: 100vw; display: flex; flex-direction: column;
   background: var(--po-bg); border-left: 1px solid var(--po-line-2); font-size: 13px; line-height: 1.45;
-  box-shadow: -18px 0 48px rgba(0, 0, 0, 0.45); animation: po-slide .18s ease-out;
+  box-shadow: -18px 0 48px rgba(0, 0, 0, 0.45); animation: po-slide .18s ease-out; overflow: hidden;
 }
 .po-dh {
-  position: relative; padding: 0 10px 0 16px; background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 16%, var(--po-panel)), var(--po-panel));
+  flex: none;   position: relative; padding: 0 10px 0 16px; background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 16%, var(--po-panel)), var(--po-panel));
   border-bottom: 1px solid color-mix(in srgb, var(--accent) 45%, var(--po-line));
 }
 .po-dh::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 2px; background: var(--accent); box-shadow: 0 0 12px var(--accent); }
@@ -132,7 +132,7 @@
 .po-menu > button.danger { color: var(--po-red); }
 .po-confirm { padding: 6px; font-size: 12px; line-height: 1.5; }
 
-.po-ticketbar { padding: 10px 16px 8px; border-bottom: 1px solid var(--po-line); background: var(--po-panel); display: flex; flex-direction: column; gap: 8px; }
+.po-ticketbar { flex: none; max-height: 38%; overflow-y: auto; padding: 10px 16px 8px; border-bottom: 1px solid var(--po-line); background: var(--po-panel); display: flex; flex-direction: column; gap: 8px; }
 .po-ticket-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .po-ticket-pick {
   flex: 1; min-width: 0; height: 28px; padding: 0 6px; background: var(--po-bg); border: 1px solid var(--po-line-2);
@@ -158,7 +158,7 @@
 .po-pipe-step.waiting { color: var(--po-amber); }
 .po-pipe-step.failed { color: var(--po-red); }
 
-.po-tabs { display: flex; align-items: stretch; gap: 2px; padding: 0 10px; height: 36px; border-bottom: 1px solid var(--po-line); background: var(--po-panel); }
+.po-tabs { flex: none; display: flex; align-items: stretch; gap: 2px; padding: 0 10px; height: 36px; border-bottom: 1px solid var(--po-line); background: var(--po-panel); }
 .po-tabs [role="tab"] { border: 0; background: transparent; padding: 0 10px; cursor: pointer; color: var(--po-dim); font-size: 12px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .po-tabs [role="tab"]:hover { color: var(--po-text); }
 .po-tabs [role="tab"].on { color: var(--po-text); border-bottom-color: var(--accent); }
@@ -284,7 +284,7 @@
 .po-task-files { grid-column: 2; font-size: 11px; }
 
 /* composer */
-.po-composer { border-top: 1px solid var(--po-line); background: var(--po-panel); padding: 10px 12px 8px; }
+.po-composer { flex: none; border-top: 1px solid var(--po-line); background: var(--po-panel); padding: 10px 12px 8px; }
 .po-input {
   display: flex; align-items: flex-end; gap: 8px; padding: 6px 6px 6px 10px; border: 1px solid var(--po-line-2); border-radius: 7px;
   background: var(--po-bg); transition: border-color .12s, box-shadow .12s;
@@ -310,12 +310,17 @@
 .po-chip.answered { color: var(--po-green); border-color: #2c5a3c; }
 .po-pipe-step.answer { gap: 4px; }
 /* an Ask's answer: markdown-ish, wrapped inside the drawer */
+.po-you { align-self: flex-end; margin: 8px 0 8px auto !important; max-width: 85%; padding: 6px 10px; border: 1px solid var(--accent); border-radius: 10px 10px 2px 10px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--po-panel)); text-align: left; }
+.po-you-head { display: flex; justify-content: flex-end; gap: 8px; font-size: 11px; }
+.po-you-who { color: var(--accent); font-weight: 700; }
+.po-you-text { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
 .po-answer { white-space: normal; min-width: 0; }
 .po-answer > * { margin: 0 0 6px; }
 .po-answer h4 { font-size: 13px; color: var(--accent); }
 .po-answer ul, .po-answer ol { padding-left: 18px; }
-.po-answer p, .po-answer li { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
-.po-answer code { font-family: inherit; padding: 0 3px; border-radius: 3px; background: color-mix(in srgb, var(--po-line-2) 60%, transparent); }
+.po-answer p, .po-answer li { white-space: normal; word-break: break-word; overflow-wrap: anywhere; }
+.po-answer code, .po-md code { font-family: inherit; padding: 0 3px; border-radius: 3px; background: color-mix(in srgb, var(--po-line-2) 60%, transparent); }
 .po-answer pre { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; max-width: 100%; padding: 6px 8px; border-radius: 4px;
   background: color-mix(in srgb, var(--po-line-2) 40%, transparent); }
 
@@ -374,12 +379,12 @@
 .po-past-meta .po-chip { height: 16px; line-height: 14px; padding: 0 6px; font-size: 10px; }
 .po-fail-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .po-usage { margin: 10px 0 4px; padding-top: 8px; border-top: 1px dashed var(--po-line-2); color: var(--po-dim); font-size: 12px; text-align: right; }
-.po-mode { display: flex; gap: 6px; margin: 0 0 12px; padding: 0; border: 0; }
-.po-mode legend { font-size: 11px; margin-bottom: 6px; padding: 0; }
-.po-mode-opt {
+fieldset.po-mode { display: flex; gap: 6px; margin: 0 0 12px; padding: 0; border: 0; }
+fieldset.po-mode legend { font-size: 11px; margin-bottom: 6px; padding: 0; }
+fieldset.po-mode .po-mode-opt {
   flex: 1; display: flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid var(--po-line-2);
   border-radius: 5px; cursor: pointer; font-size: 12px;
 }
-.po-mode-opt.on { border-color: var(--accent); color: var(--accent); }
-.po-mode-opt input { accent-color: var(--accent); }
+fieldset.po-mode .po-mode-opt.on { border-color: var(--accent); color: var(--accent); }
+fieldset.po-mode .po-mode-opt input { accent-color: var(--accent); }
 .po-follow-of { margin-left: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

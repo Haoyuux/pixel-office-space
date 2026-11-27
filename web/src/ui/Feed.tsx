@@ -1,4 +1,5 @@
-import { useState, type ReactNode } from 'react';
+import { useState } from 'react';
+import { Markdown } from './Markdown';
 import { useOffice, type FeedItem } from '../state/store';
 import { clock, isFinished, roleColor, roleEmoji, roleShort, STAGE_LABEL, usageLine } from './format';
 import { GateCard } from './GateCard';
@@ -39,45 +40,18 @@ function ToolLine({ item }: { item: FeedItem }) {
   );
 }
 
-/** `code` spans inside a line. */
-function inline(text: string, key: string) {
-  return text.split(/(`[^`\n]+`)/g).map((part, i) =>
-    part.length > 2 && part.startsWith('`') && part.endsWith('`') ? <code key={`${key}:${i}`}>{part.slice(1, -1)}</code> : part);
+/** Markdown answer text. */
+export function Answer({ text }: { text: string }) {
+  return <Markdown text={text} className="po-msg-text po-answer" />;
 }
 
-/** Markdown-ish answer text: # headings, - / 1. lists, ``` code blocks and `code`; everything else as wrapped paragraphs. */
-export function Answer({ text }: { text: string }) {
-  const out: ReactNode[] = [];
-  const lines = text.split('\n');
-  let list: { ordered: boolean; items: string[] } | null = null;
-  const flush = () => {
-    if (!list) return;
-    const k = `l${out.length}`;
-    const items = list.items.map((t, i) => <li key={i}>{inline(t, `${k}:${i}`)}</li>);
-    out.push(list.ordered ? <ol key={k}>{items}</ol> : <ul key={k}>{items}</ul>);
-    list = null;
-  };
-  for (let i = 0; i < lines.length; i++) {
-    const l = lines[i];
-    if (/^\s*```/.test(l)) {
-      flush();
-      const code: string[] = [];
-      while (++i < lines.length && !/^\s*```/.test(lines[i])) code.push(lines[i]);
-      out.push(<pre key={`c${out.length}`}>{code.join('\n')}</pre>);
-      continue;
-    }
-    const h = /^(#{1,6})\s+(.*)$/.exec(l);
-    const li = /^\s*(?:([-*+])|(\d+)[.)])\s+(.*)$/.exec(l);
-    if (h) { flush(); out.push(<h4 key={`h${out.length}`} className={`po-h${h[1].length}`}>{inline(h[2], `h${i}`)}</h4>); }
-    else if (li) {
-      const ordered = !li[1];
-      if (list && list.ordered !== ordered) flush();
-      (list ??= { ordered, items: [] }).items.push(li[3]);
-    } else if (!l.trim()) flush();
-    else { flush(); out.push(<p key={`p${out.length}`}>{inline(l, `p${i}`)}</p>); }
-  }
-  flush();
-  return <div className="po-msg-text po-answer">{out}</div>;
+function YouBubble({ text, ts }: { text: string; ts: string }) {
+  return (
+    <div className="po-you">
+      <div className="po-you-head"><span className="po-you-who">You</span><span className="po-dim po-time">{ts ? clock(ts) : ''}</span></div>
+      <div className="po-you-text">{text}</div>
+    </div>
+  );
 }
 
 function Who({ item }: { item: FeedItem }) {
@@ -102,13 +76,13 @@ function Row({ item, ticketId, onShow }: { item: FeedItem; ticketId: string; onS
         <div className="po-msg">
           <div className="po-msg-head"><Who item={item} /><span className="po-dim po-time">{clock(item.ts)}</span></div>
           {item.answer ? <Answer text={item.text} />
-            : <div className="po-msg-text">{item.text}{item.status === 'streaming' && <span className="po-cursor" aria-hidden>▍</span>}</div>}
+            : <div className="po-msg-text po-answer"><Markdown text={item.text} />{item.status === 'streaming' && <span className="po-cursor" aria-hidden>▍</span>}</div>}
         </div>
       );
     case 'tool':
       return <ToolLine item={item} />;
     case 'user':
-      return <div className="po-user"><span className="po-prompt" aria-hidden>›</span><span>{item.text}</span><span className="po-dim po-time">{clock(item.ts)}</span></div>;
+      return <YouBubble text={item.text} ts={item.ts} />;
     case 'gate':
       return <GateCard ticketId={ticketId} item={item} onShow={onShow} />;
   }
@@ -122,11 +96,13 @@ export function Feed({ ticketId, onShow }: { ticketId: string; onShow?: (tab: 'p
   const usage = ticket && isFinished(ticket) ? ticket.usage : undefined;
   const items = filter === 'all' ? all : all.filter(i => !i.role || i.role === filter);
   const last = all[all.length - 1];
+  const own = ticket?.text.trim() && !(all[0]?.kind === 'user' && all[0].text.trim() === ticket.text.trim()) ? ticket : undefined;
   const { ref, paused, onScroll, follow } = useFollow<HTMLDivElement>(`${all.length}:${last?.text.length ?? 0}:${last?.status ?? ''}`);
   return (
     <div className="po-scroll-wrap">
       <div className="po-scroll po-feed" ref={ref} onScroll={onScroll}>
-        {items.length === 0 && <div className="po-empty">No activity yet.</div>}
+        {own && <YouBubble text={own.text} ts={own.createdAt} />}
+        {items.length === 0 && !own && <div className="po-empty">No activity yet.</div>}
         {items.map(i => <Row key={`${i.kind}:${i.id}`} item={i} ticketId={ticketId} onShow={onShow} />)}
         {usage && <div className="po-usage">{usageLine(usage)}</div>}
       </div>
