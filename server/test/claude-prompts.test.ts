@@ -36,7 +36,7 @@ describe('extractJson', () => {
 
 describe('roles', () => {
   it('has Bash and PowerShell forms and turn limits', () => {
-    expect(ROLE_TOOLS.pm).toEqual(['Read', 'Glob', 'Grep']);
+    expect(ROLE_TOOLS.pm.slice(0, 3)).toEqual(['Read', 'Glob', 'Grep']);
     expect(ROLE_TOOLS.techlead).toContain('Bash(git diff *)');
     expect(ROLE_TOOLS.techlead).toContain('PowerShell(git diff *)');
     expect(ROLE_TOOLS.backend).toContain('PowerShell(npm *)');
@@ -56,7 +56,19 @@ describe('roles', () => {
         for (const c of ['dotnet *', 'git -C * status *', 'git -C * diff *', 'cd *']) expect(ROLE_TOOLS[r]).toContain(`${sh}(${c})`);
       }
     }
-    expect(ROLE_TOOLS.pm).toEqual(['Read', 'Glob', 'Grep']);
+  });
+
+  it('pm: read-only git (status/log/diff/branch, plain and -C) in both shells, nothing else', () => {
+    const want = ['Read', 'Glob', 'Grep'];
+    for (const sh of ['Bash', 'PowerShell']) {
+      for (const c of ['status', 'log', 'diff', 'branch']) {
+        expect(ROLE_TOOLS.pm).toContain(`${sh}(git ${c} *)`);
+        expect(ROLE_TOOLS.pm).toContain(`${sh}(git -C * ${c} *)`);
+        want.push(`${sh}(git ${c} *)`, `${sh}(git -C * ${c} *)`);
+      }
+    }
+    expect([...ROLE_TOOLS.pm].sort()).toEqual([...want].sort());
+    expect(ROLE_TOOLS.pm.some(t => /Edit|Write|npm|cd \*|commit|push|checkout/.test(t))).toBe(false);
   });
 });
 
@@ -157,7 +169,7 @@ describe('agent files', () => {
     expect(f).toContain(MANAGED_MARKER);
     expect(f).toMatch(/^---\nname: backend\n/);
     expect(/^tools: (.*)$/m.exec(f)![1]).toBe('Read, Glob, Grep, Edit, Write, MultiEdit, Bash, PowerShell');
-    expect(/^tools: (.*)$/m.exec(agentFileFor('pm'))![1]).toBe('Read, Glob, Grep');
+    expect(/^tools: (.*)$/m.exec(agentFileFor('pm'))![1]).toBe('Read, Glob, Grep, Bash, PowerShell');
   });
   it('upgrades marker and M1 files, never user-edited ones', () => {
     const d = projectDir();
