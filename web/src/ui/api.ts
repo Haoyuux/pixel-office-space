@@ -38,6 +38,7 @@ export const paths = {
   devServer: (projectId: string) => `/api/projects/${enc(projectId)}/devserver`,
   devServerStart: (projectId: string) => `/api/projects/${enc(projectId)}/devserver/start`,
   devServerStop: (projectId: string) => `/api/projects/${enc(projectId)}/devserver/stop`,
+  push: (projectId: string) => `/api/projects/${enc(projectId)}/push`,
   memory: (projectId: string) => `/api/projects/${enc(projectId)}/memory`,
   memoryEntry: (projectId: string, entryId: string) => `/api/projects/${enc(projectId)}/memory/${enc(entryId)}`,
 };

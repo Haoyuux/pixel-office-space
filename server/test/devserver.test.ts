@@ -8,6 +8,7 @@ import { SimulatedOrchestrator } from '../src/orchestrator/simulated';
 import { TicketLog } from '../src/ticketLog';
 import { DevServers, runTarget, urlsIn, stripAnsi } from '../src/devserver';
 import { tmp, projectDir, ManualScheduler } from './helpers';
+import * as realGit from '../src/claude/git';
 
 const until = async (ok: () => boolean, ms = 20000) => {
   const end = Date.now() + ms;
@@ -121,4 +122,26 @@ describe('dev server API', () => {
     expect(live.state(p.id).status).toBe('idle');
     expect((await request(office.server).post(`/api/projects/${p.id}/devserver/start`).send({})).status).toBe(404);
   }, 40000);
+});
+
+describe('push API', () => {
+  let office: Office | undefined;
+  afterEach(() => { office?.close(); office = undefined; });
+
+  it('pushes the project folder with the server\'s git, reports per repo, 404 for unknown', async () => {
+    const dataDir = tmp();
+    const log = new TicketLog(join(dataDir, 'projects'));
+    const calls: string[] = [];
+    office = createOffice({
+      dataDir, log, orchestrator: new SimulatedOrchestrator({ log, scheduler: new ManualScheduler() }),
+      git: { ...realGit, pushBranch: async (repo: string) => { calls.push(repo); return { ok: true as const, branch: 'main', remote: 'origin', output: '', upToDate: false }; } },
+    });
+    const folder = projectDir('Folio');
+    const p = (await request(office.server).post('/api/projects').send({ name: 'Folio', folder, accent: 'cyan', team: ['pm', 'frontend'] })).body as Project;
+    const r = await request(office.server).post(`/api/projects/${p.id}/push`).send({});
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ ok: true, results: [{ repo: 'Folio', ok: true, branch: 'main', remote: 'origin', output: '', upToDate: false }] });
+    expect(calls).toEqual([p.folder]);
+    expect((await request(office.server).post('/api/projects/nope/push').send({})).status).toBe(404);
+  });
 });

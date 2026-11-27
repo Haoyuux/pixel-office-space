@@ -29,7 +29,7 @@ export interface OfficeOptions {
   dataDir: string; orchestrator: Orchestrator; log: TicketLog; assetsDir?: string;
   /** `GET /api/system/claude` source (tests inject a fake; never the real CLI). */
   claudeSystem?: { status(): Promise<ClaudeStatus> };
-  git?: Pick<typeof realGit, 'isRepo' | 'hasCommit' | 'gitInit'> & Partial<Pick<typeof realGit, 'detectRepos' | 'lsFiles'>>;
+  git?: Pick<typeof realGit, 'isRepo' | 'hasCommit' | 'gitInit'> & Partial<Pick<typeof realGit, 'detectRepos' | 'lsFiles' | 'pushBranch'>>;
   /** Team memory (shared with the claude orchestrator, which reads it into prompts and adds the PM's lessons). */
   memory?: MemoryStore;
   devServers?: DevServers;
@@ -247,6 +247,23 @@ export function createOffice(opts: OfficeOptions): Office {
   });
   app.post('/api/projects/:id/devserver/stop', (req, res) => {
     res.json(devServers.stop(mustProject(req.params.id).id));
+  });
+
+  /** ⬆ Push: the server pushes each of the project's repos (its checked-out branch) with the owner's git login. */
+  const pushing = new Set<string>();
+  app.post('/api/projects/:id/push', async (req, res, next) => {
+    try {
+      const p = mustProject(req.params.id);
+      if (pushing.has(p.id)) throw new ConflictError('A push is already running for this project');
+      pushing.add(p.id);
+      try {
+        const push = git.pushBranch ?? realGit.pushBranch;
+        const targets = p.repos?.length ? p.repos.map(r => ({ name: r.name, path: r.path })) : [{ name: p.name, path: p.folder }];
+        const results = [];
+        for (const t of targets) results.push({ repo: t.name, ...(await push(t.path)) });
+        res.json({ ok: results.every(r => r.ok), results });
+      } finally { pushing.delete(p.id); }
+    } catch (e) { next(e); }
   });
 
   const conversationRoot = (id: string) => {

@@ -18,6 +18,7 @@ import { PastConversations, threadTitle, visibleThreads } from './PastConversati
 import { loadHistory } from '../state/socket';
 import { MemoryPanel } from './MemoryPanel';
 import { DevServerPanel, RunButton, isLive, runIntent, startDevServer, stopDevServer } from './DevServer';
+import { PushButton, pushIntent, pushProject } from './Push';
 
 export const DRAWER_WIDTH = 560;
 /** Full-screen chat: most of the window, a strip of the office stays visible on the left. */
@@ -209,6 +210,7 @@ export function Drawer({ projectId }: { projectId: string }) {
         if (!isLive(useOffice.getState().devServers[project.id])) return 'The dev server is not running';
         return (await stopDevServer(project.id)) ?? 'Stopping the dev server';
       }
+      case 'push': return (await pushProject(project.id)).text;
       case 'model': {
         const m = arg.toLowerCase();
         if (!isModel(m)) return `Unknown model — pick ${Object.keys(MODEL_DESC).join(', ')}`;
@@ -241,6 +243,7 @@ export function Drawer({ projectId }: { projectId: string }) {
           )}
           <span className={`po-badge ${mode}`} title="Who works this project's tickets (change it in Team)">{mode === 'claude' ? 'Claude Code' : 'Simulated'}</span>
           <RunButton projectId={project.id} onOpen={() => setTab('run')} />
+          <PushButton projectId={project.id} />
           <button type="button" className="po-hbtn" aria-label="New conversation" aria-keyshortcuts="Control+K" title="New conversation (/new · Ctrl+K)" onClick={startFresh}>＋ New</button>
           <button type="button" className="po-hbtn" onClick={() => setTeam(true)} title="Edit team">Team · {project.team.length}</button>
           <button type="button" className={`po-hbtn${menu ? ' on' : ''}`} aria-label="Project menu" aria-expanded={!!menu} onClick={() => { setMenu(m => (m ? null : 'open')); setMenuError(null); }}>⋯</button>
@@ -331,7 +334,10 @@ export function Drawer({ projectId }: { projectId: string }) {
           // a follow-up stays in this conversation; a new conversation opens once its ticket arrives
           refocus.current = true; setFresh(false); setChosen(followUp ? openRoot ?? null : created?.id ?? null);
         }} onCommand={command}
-        intercept={t => { const i = runIntent(t, project.name); return i ? command(i, '').then(out => out ?? '') : null; }} />
+        intercept={t => {
+          const i = pushIntent(t, project.name.split(/[^a-zA-Z0-9-]+/)) ? 'push' : runIntent(t, project.name);
+          return i ? command(i, '').then(out => out ?? '') : null;
+        }} />
       {team && <TeamDialog project={project} onClose={() => setTeam(false)} />}
     </aside>
   );
