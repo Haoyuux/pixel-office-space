@@ -115,16 +115,16 @@ describe('Ask vs Ticket UI', () => {
   const box = () => screen.getByRole('textbox', { name: /message/i }) as HTMLTextAreaElement;
   const send = (text: string) => { fireEvent.change(box(), { target: { value: text } }); fireEvent.keyDown(box(), { key: 'Enter' }); };
 
-  it('composer: Auto · Ask · Ticket switch (default Auto) is sent as mode', async () => {
+  it('composer: Auto · Chat · Change switch (default Auto) is sent as mode', async () => {
     openDrawer();
     const group = screen.getByRole('radiogroup', { name: /mode/i });
     const radios = within(group).getAllByRole('radio') as HTMLInputElement[];
-    expect(radios.map(r => r.labels![0].textContent)).toEqual(['Auto', 'Ask', 'Ticket']);
+    expect(radios.map(r => r.labels![0].textContent)).toEqual(['Auto', 'Chat', 'Change']);
     expect(radios[0].checked).toBe(true);
     send('What does login do?');
     await waitFor(() => expect(posts()).toHaveLength(1));
     expect(posts()[0].body).toEqual({ text: 'What does login do?', mode: 'auto' });
-    fireEvent.click(within(group).getByRole('radio', { name: 'Ask' }));
+    fireEvent.click(within(group).getByRole('radio', { name: 'Chat' }));
     await waitFor(() => expect(box().value).toBe(''));
     send('List the buttons');
     await waitFor(() => expect(posts()).toHaveLength(2));
@@ -132,10 +132,10 @@ describe('Ask vs Ticket UI', () => {
   });
 
   it('a follow-up carries the mode too; messages to a running ticket have no switch', async () => {
-    openDrawer([ticket({ id: 'a', title: 'Buttons', status: 'done', stage: 'done', answered: true, mode: 'ask' })]);
+    openDrawer([ticket({ id: 'a', title: 'Buttons', text: 'Buttons', status: 'done', stage: 'done', answered: true, mode: 'ask' })]);
     fireEvent.click(screen.getByRole('button', { name: /past conversations/i }));
     fireEvent.click(within(screen.getByRole('list', { name: /past conversations/i })).getByRole('button', { name: /Buttons/ }));
-    fireEvent.click(screen.getByRole('radio', { name: 'Ticket' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Change' }));
     send('Now write that to docs/buttons.md');
     await waitFor(() => expect(posts()).toHaveLength(1));
     expect(posts()[0].body).toEqual({ text: 'Now write that to docs/buttons.md', parentTicketId: 'a', mode: 'ticket' });
@@ -144,14 +144,38 @@ describe('Ask vs Ticket UI', () => {
     expect(screen.queryByRole('radiogroup', { name: /mode/i })).toBeNull();
   });
 
-  it('Past conversations shows "✓ answered"; the pipeline shows only "Answer ✓"', () => {
-    openDrawer([ticket({ id: 'a', title: 'Buttons', status: 'done', stage: 'done', answered: true }), ticket({ id: 'b', title: 'Other', status: 'done', stage: 'done', createdAt: '2026-11-25T10:00:00Z' })]);
+  it('chats: 💬, "answered" chip, first line of the question, no pipeline; tickets: 🎫 + pipeline', () => {
+    openDrawer([ticket({ id: 'a', title: 'Buttons', text: 'What buttons exist?\nbe brief', status: 'done', stage: 'done', answered: true }), ticket({ id: 'b', title: 'Other', status: 'done', stage: 'done', createdAt: '2026-11-25T10:00:00Z' })]);
+    expect(screen.queryByRole('list', { name: 'Pipeline' })).toBeNull();
+    const head = document.querySelector('.po-ticket-row')!;
+    expect(head.textContent).toContain('💬');
+    expect(head.querySelector('.po-ticket-title')!.textContent).toBe('What buttons exist?');
+    expect(head.querySelector('.po-chip')!.textContent).toBe('answered');
     fireEvent.click(screen.getByRole('button', { name: /past conversations/i }));
     const list = screen.getByRole('list', { name: /past conversations/i });
-    expect(within(list).getByRole('button', { name: /Buttons/ }).textContent).toContain('✓ answered');
-    expect(within(list).getByRole('button', { name: /Other/ }).textContent).not.toContain('answered');
-    const pipe = screen.getByRole('list', { name: 'Pipeline' });
-    expect(pipe.textContent).toBe('Answer ✓');
+    expect(within(list).getByRole('button', { name: /What buttons exist/ }).textContent).toContain('💬');
+    expect(within(list).getByRole('button', { name: /Other/ }).textContent).toContain('🎫');
+    fireEvent.click(within(list).getByRole('button', { name: /Other/ }));
+    expect(screen.getByRole('list', { name: 'Pipeline' })).toBeTruthy();
+    expect(document.querySelector('.po-ticket-row')!.textContent).toContain('🎫');
+  });
+
+  it('Auto still deciding (no plan) is a conversation: 💬, no pipeline; a plan makes it a ticket', () => {
+    openDrawer([ticket({ mode: 'auto', stage: 'plan' })]);
+    expect(document.querySelector('.po-ticket-row')!.textContent).toContain('💬');
+    expect(screen.queryByRole('list', { name: 'Pipeline' })).toBeNull();
+    cleanup();
+    openDrawer([ticket({ mode: 'auto', stage: 'plan', plan: { summary: 's', acceptance: [], areas: [], tasks: [] } })]);
+    expect(document.querySelector('.po-ticket-row')!.textContent).toContain('🎫');
+    expect(screen.getByRole('list', { name: 'Pipeline' })).toBeTruthy();
+  });
+
+  it('composer wording: placeholder, Send, hint', () => {
+    openDrawer();
+    expect(box().placeholder).toBe('Ask anything, or describe a change…');
+    expect(screen.getByRole('button', { name: 'Send' })).toBeTruthy();
+    expect(screen.getByText('Auto decides: questions get an answer, changes become a ticket')).toBeTruthy();
+    expect(document.body.textContent).not.toContain('Type a ticket');
   });
 
   it('an answer renders markdown-ish (headings, lists, code) and wraps', () => {
