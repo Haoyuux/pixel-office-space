@@ -10,7 +10,11 @@ export interface Project {
   repos?: RepoRef[];
   /** What git detection found at the last add/update: 'none' = not a git repo (Initialize git is offered). */
   gitKind?: RepoDetection['kind'];
+  /** Claude model for this project's runs (`--model`); missing / 'default' = Claude Code's default. */
+  model?: ModelChoice;
 }
+export type ModelChoice = 'default' | 'opus' | 'sonnet' | 'haiku' | 'fable';
+export const MODEL_CHOICES: ModelChoice[] = ['default', 'opus', 'sonnet', 'haiku', 'fable'];
 export interface RepoRef { name: string; path: string }
 export type RepoDetection = { kind: 'single' } | { kind: 'multi'; repos: RepoRef[] } | { kind: 'none' };
 export type AgentsMode = 'claude' | 'simulated';

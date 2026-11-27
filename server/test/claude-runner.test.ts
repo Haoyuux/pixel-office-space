@@ -107,6 +107,15 @@ describe('env, args, binary', () => {
     expect(buildArgs(base)).not.toContain('do it'); // the prompt goes via stdin
   });
 
+  it('--model only when a model is set (not for default)', () => {
+    const base = { cwd: '.', role: 'pm' as const, prompt: 'x', allowedTools: ['Read'], maxTurns: 5, onEvent: () => {} };
+    expect(buildArgs(base)).not.toContain('--model');
+    expect(buildArgs({ ...base, model: 'default' })).not.toContain('--model');
+    const a = buildArgs({ ...base, model: 'sonnet', resume: 's1' });
+    expect(a[a.indexOf('--model') + 1]).toBe('sonnet');
+    expect(a.indexOf('--model')).toBeLessThan(a.indexOf('--allowedTools'));
+  });
+
   it('resolves the binary: CLAUDE_BIN → ~/.local/bin/claude(.exe) → claude', () => {
     expect(resolveClaudeBin({ CLAUDE_BIN: 'X:/c.exe', USERPROFILE: 'U', HOME: 'U' }, () => true)).toBe('X:/c.exe');
     const local = path.join('U', '.local', 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude');

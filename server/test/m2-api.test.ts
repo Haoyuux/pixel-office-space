@@ -65,6 +65,19 @@ describe('agents mode + routing', () => {
     expect((await request(b.office.server).patch(`/api/projects/${p.id}`).send({ agentsMode: 'claude' })).status).toBe(200);
   });
 
+  it('PATCH model: validated, saved, even while a ticket runs (applies to the next run)', async () => {
+    const b = bootFake();
+    const p = (await add(b.office, { agentsMode: 'simulated' })).body as Project;
+    expect(p.model).toBeUndefined();
+    expect((await request(b.office.server).patch(`/api/projects/${p.id}`).send({ model: 'gpt-4' })).status).toBe(400);
+    await request(b.office.server).post(`/api/projects/${p.id}/tickets`).send({ text: 'x' });
+    const r = await request(b.office.server).patch(`/api/projects/${p.id}`).send({ model: 'sonnet' });
+    expect(r.status).toBe(200);
+    expect(r.body.model).toBe('sonnet');
+    expect(b.office.store.get(p.id)!.model).toBe('sonnet');
+    expect((await request(b.office.server).patch(`/api/projects/${p.id}`).send({ model: 'default' })).body.model).toBe('default');
+  });
+
   it('projects saved before agentsMode existed are treated as claude', async () => {
     const dataDir = tmp();
     const { ProjectStore } = await import('../src/store');
