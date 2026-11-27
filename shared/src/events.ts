@@ -1,11 +1,14 @@
 import type {
   Project, Ticket, Stage, RoleId, AgentState, GateKind, GateDecision, Plan, DiffFile, Workspace, Attachment, ConversationMeta,
+  DevServerState,
 } from './types';
 
 export interface Snapshot {
   projects: Project[]; tickets: Ticket[];
   /** Conversation meta by root ticket id (all projects, deleted ones included with deleted: true). */
   conversations?: Record<string, ConversationMeta>;
+  /** Dev servers that were started (any status but idle). */
+  devServers?: DevServerState[];
 }
 
 interface Base { projectId: string; ts: string }
@@ -40,6 +43,10 @@ export type ServerEvent =
   | ({ type: 'conversation.updated'; rootId: string; meta: ConversationMeta } & Base)
   /** The project's team memory changed (owner edit or PM lessons): refetch GET /api/projects/:id/memory. */
   | ({ type: 'memory.updated' } & Base)
+  /** The project's dev server changed status/URL (▶ Run). */
+  | ({ type: 'devserver.updated'; state: DevServerState } & Base)
+  /** New dev server output lines (ANSI stripped); reset: a new start cleared the log first. */
+  | ({ type: 'devserver.log'; lines: string[]; reset?: boolean } & Base)
   | ({ type: 'agent.session'; role: RoleId; sessionId: string } & TBase)
   /** Per-ticket totals across all runs (cost is an estimate). */
   | ({ type: 'ticket.usage'; turns: number; costUsd: number; durationMs: number } & TBase)

@@ -87,3 +87,20 @@ export interface ProjectSummary {
 }
 export interface SummaryTotals { finished: number; failed: number; answered: number; waiting: number; usage: SummaryUsage }
 export interface Summary { since: string; projects: ProjectSummary[]; totals: SummaryTotals }
+
+/**
+ * The project's dev server (▶ Run): an npm script the office server starts and owns in the project folder, so it
+ * keeps running after any agent run ends. starting = spawned, no URL seen yet; running = a URL was printed;
+ * stopped = the owner stopped it; exited = it ended by itself (exitCode); failed = it could not start.
+ */
+export type DevServerStatus = 'idle' | 'starting' | 'running' | 'stopped' | 'exited' | 'failed';
+export interface DevServerState {
+  projectId: string; status: DevServerStatus;
+  /** The npm script (`npm run <script>`) and the folder it runs in. */
+  script?: string; cwd?: string;
+  /** First local URL the server printed (0.0.0.0 shown as localhost). */
+  url?: string;
+  startedAt?: string; endedAt?: string; exitCode?: number | null; error?: string;
+}
+/** Dev server log lines kept per project (oldest dropped). */
+export const DEV_LOG_MAX = 500;

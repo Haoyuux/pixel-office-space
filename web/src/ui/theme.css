@@ -517,3 +517,17 @@ fieldset.po-mode .po-mode-opt input { accent-color: var(--accent); }
 .po-memory textarea { width: 100%; resize: vertical; padding: 7px 9px; background: var(--po-bg); border: 1px solid var(--po-line-2); border-radius: 5px; outline: none; font-size: 12px; }
 .po-memory textarea:focus { border-color: var(--accent); }
 .po-memory-count { margin-right: auto; align-self: center; font-size: 11px; }
+
+/* ▶ Run: the project's dev server */
+.po-run.on { color: var(--po-red); }
+.po-run-url { display: inline-flex; align-items: center; color: #7ee787; text-decoration: none; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.po-run-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.po-run-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 14px; border-bottom: 1px solid var(--po-line); font-size: 12px; }
+.po-run-bar a { color: #7ee787; overflow-wrap: anywhere; }
+.po-run-dot { color: var(--po-dim); }
+.po-run-dot.starting { color: #f5c26b; }
+.po-run-dot.running { color: #7ee787; text-shadow: 0 0 8px #7ee787; }
+.po-run-dot.exited, .po-run-dot.failed { color: var(--po-red); }
+.po-run-note { padding: 4px 14px; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.po-run-panel > .po-error { margin: 6px 14px 0; }
+.po-run-hint { color: #f5c26b; }

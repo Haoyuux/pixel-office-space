@@ -16,9 +16,12 @@ import { ConversationStore } from './conversations';
 import { ProjectFiles } from './files';
 import { MemoryStore } from './memory';
 import { buildSummary } from './summary';
+import { DevServers, runTarget } from './devserver';
 
 export interface Office {
   server: Server; store: ProjectStore; hub: Hub; close(): void;
+  /** ▶ Run: the projects' dev servers (main.ts stops them on shutdown). */
+  devServers: DevServers;
   /** Ticket-start git re-detection: store it and tell the clients when it changed. */
   setGit(projectId: string, d: RepoDetection): void;
 }
@@ -29,6 +32,7 @@ export interface OfficeOptions {
   git?: Pick<typeof realGit, 'isRepo' | 'hasCommit' | 'gitInit'> & Partial<Pick<typeof realGit, 'detectRepos' | 'lsFiles'>>;
   /** Team memory (shared with the claude orchestrator, which reads it into prompts and adds the PM's lessons). */
   memory?: MemoryStore;
+  devServers?: DevServers;
 }
 
 const GATES: GateKind[] = ['plan', 'final', 'stuck'];
@@ -55,6 +59,7 @@ export function createOffice(opts: OfficeOptions): Office {
   const conversations = new ConversationStore(join(opts.dataDir, 'conversations.json'));
   const files = new ProjectFiles(git.lsFiles ?? realGit.lsFiles);
   const memory = opts.memory ?? new MemoryStore(opts.dataDir);
+  const devServers = opts.devServers ?? new DevServers();
   const app = express();
   app.use(guardRequests);
   // uploads are JSON base64 (≤ 10 MB decoded): only this route accepts a large body
@@ -66,9 +71,11 @@ export function createOffice(opts: OfficeOptions): Office {
     projects: store.list(),
     tickets: store.list().flatMap(p => [orch.current(p.id), ...orch.queue(p.id)].filter((t): t is Ticket => !!t)),
     conversations: conversations.all(),
+    devServers: devServers.all(),
   });
   const hub = new Hub(server, snapshot);
   orch.onEvent(e => hub.broadcast(e));
+  devServers.onEvent(e => hub.broadcast(e));
   const now = () => new Date().toISOString();
   memory.onChange(projectId => hub.broadcast({ type: 'memory.updated', projectId, ts: now() }));
   const projectEvent = (type: 'project.added' | 'project.updated', p: Project): ServerEvent => ({ type, project: p, projectId: p.id, ts: now() });
@@ -159,6 +166,7 @@ export function createOffice(opts: OfficeOptions): Office {
   app.delete('/api/projects/:id', (req, res) => {
     const p = mustProject(req.params.id);
     for (const t of [...orch.queue(p.id), orch.current(p.id)]) if (t) orch.cancel(t.id);
+    devServers.remove(p.id);
     store.remove(p.id);
     attachments.removeProject(p.id);
     memory.removeProject(p.id);
@@ -224,6 +232,19 @@ export function createOffice(opts: OfficeOptions): Office {
   app.delete('/api/projects/:id/memory/:entryId', (req, res) => {
     memory.remove(mustProject(req.params.id).id, req.params.entryId);
     res.json({ ok: true });
+  });
+
+  /** ▶ Run: state, recent log and the runnable scripts of the project's dev server. */
+  app.get('/api/projects/:id/devserver', (req, res) => {
+    const p = mustProject(req.params.id);
+    const t = runTarget(p);
+    res.json({ state: devServers.state(p.id), log: devServers.log(p.id), scripts: t?.scripts ?? [], defaultScript: t?.script ?? null, cwd: t?.cwd ?? null });
+  });
+  app.post('/api/projects/:id/devserver/start', (req, res) => {
+    res.json(devServers.start(mustProject(req.params.id), req.body?.script, req.body?.install === true));
+  });
+  app.post('/api/projects/:id/devserver/stop', (req, res) => {
+    res.json(devServers.stop(mustProject(req.params.id).id));
   });
 
   const conversationRoot = (id: string) => {
@@ -331,5 +352,5 @@ export function createOffice(opts: OfficeOptions): Office {
     if (p) hub.broadcast(projectEvent('project.updated', p));
   };
 
-  return { server, store, hub, setGit, close() { hub.close(); server.close(); } };
+  return { server, store, hub, setGit, devServers, close() { hub.close(); server.close(); } };
 }

@@ -66,6 +66,11 @@ interface Props {
   onEscape?: () => void;
   /** The owner's earlier messages in this conversation, oldest first (↑ recall). */
   history?: string[];
+  /**
+   * A plain message the office handles itself instead of the agents ("run my portfolio" → ▶ Run): returns the note
+   * to show, or null to send the message as usual.
+   */
+  intercept?: (text: string) => Promise<string> | null;
 }
 
 interface Row { key: string; label: string; desc?: string }
@@ -76,7 +81,7 @@ interface Row { key: string; label: string; desc?: string }
  * Paste / drop files → attachment chips; `@` → file search; ↑ on an empty box recalls the previous message.
  */
 export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
-  { projectId, active, latest, refocus, onCreated, onCommand, onEscape, history = [] }, ref,
+  { projectId, active, latest, refocus, onCreated, onCommand, onEscape, intercept, history = [] }, ref,
 ) {
   const [text, setText] = useState('');
   const [mode, setMode] = useState<TicketMode>('auto');
@@ -200,6 +205,16 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
     const t = text.trim();
     if (t.startsWith('/') && !chips.length) { void runCommand(t); return; }
     if (!t || busy || uploading) return;
+    // "run my portfolio": the office starts the dev server (never while talking to a running team)
+    const handled = !toTeam && !chips.length ? intercept?.(t) : null;
+    if (handled) {
+      setText(''); setRecall(null); setError(null);
+      sessionSent.set(projectId, [...(sessionSent.get(projectId) ?? []), t].slice(-50));
+      const out = await handled;
+      if (out) setNote(out);
+      box.current?.focus();
+      return;
+    }
     const ids = chips.filter(c => c.status === 'ready' && c.id).map(c => c.id!);
     const att = ids.length ? { attachments: ids } : {};
     setBusy(true); setError(null);

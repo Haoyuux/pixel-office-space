@@ -28,11 +28,16 @@ export const MEMORY_RULE = 'Optionally add "memory": ["short lesson"] to that JS
   'facts or rules about this project you learned (stack, commands, conventions, the owner\'s preferences), never details ' +
   'of this request. Leave it out when there is nothing new; never repeat what the team memory already says.';
 
+/** The office starts dev servers itself (▶ Run); the PM can't run commands, so it points the owner there. */
+export const RUN_RULE = 'If the owner asks to run, start, serve or preview the project, answer briefly: the office starts it for them ' +
+  'with the ▶ Run button in the console header (or the /run command), which runs the npm dev/start script and shows its log ' +
+  'and local URL. Name the script and port you see in the project if useful. Do not tell them to open a terminal.';
+
 /** The output section of the PM's first run for a mode: answer only (ask), plan only (ticket), or either (auto). */
 function pmOutput(mode: TicketMode, plan: Record<string, unknown>): string {
-  if (mode === 'ask') return `${OUTPUT_RULE}\n${fence(ANSWER_EXAMPLE)}\n${MEMORY_RULE}`;
+  if (mode === 'ask') return `${OUTPUT_RULE}\n${fence(ANSWER_EXAMPLE)}\n${MEMORY_RULE}\n${RUN_RULE}`;
   if (mode === 'ticket') return `${OUTPUT_RULE}\n${fence(plan)}\n${MEMORY_RULE}`;
-  return `${BOTH_RULE}\nAnswer:\n${fence(ANSWER_EXAMPLE)}\nPlan:\n${fence({ kind: 'plan', ...plan })}\n${MEMORY_RULE}`;
+  return `${BOTH_RULE}\nAnswer:\n${fence(ANSWER_EXAMPLE)}\nPlan:\n${fence({ kind: 'plan', ...plan })}\n${MEMORY_RULE}\n${RUN_RULE}`;
 }
 
 /** The project's team memory as data (added to every agent prompt); nothing when it is empty. */

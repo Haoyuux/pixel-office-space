@@ -300,7 +300,7 @@ export class ClaudeRunner {
  * children), so the graceful attempt is a non-forced `taskkill /T`; after the grace period `taskkill /T /F`.
  * POSIX: the child leads its own process group (detached) → SIGINT to the group, then SIGKILL.
  */
-function killTree(child: ChildProcess, graceMs: number, onForced: () => void): void {
+export function killTree(child: ChildProcess, graceMs: number, onForced: () => void): void {
   const pid = child.pid;
   if (pid == null) { onForced(); return; }
   const exited = () => child.exitCode !== null || child.signalCode !== null;

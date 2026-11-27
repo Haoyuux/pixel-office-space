@@ -1,7 +1,8 @@
 import { MODEL_CHOICES, type ModelChoice } from '@office/shared';
 
 /** Console slash commands (run locally, never sent to the agents). */
-export type CommandName = 'resume' | 'model' | 'new' | 'clear' | 'chat' | 'change' | 'auto' | 'cancel' | 'status' | 'team' | 'memory' | 'help';
+export type CommandName = 'resume' | 'model' | 'new' | 'clear' | 'chat' | 'change' | 'auto' | 'cancel' | 'status' | 'team' | 'memory'
+  | 'run' | 'stop' | 'help';
 export interface CommandDef { name: CommandName; args?: string; desc: string }
 
 export const COMMANDS: CommandDef[] = [
@@ -16,6 +17,8 @@ export const COMMANDS: CommandDef[] = [
   { name: 'status', desc: 'Claude Code and project status' },
   { name: 'team', desc: 'Edit the team' },
   { name: 'memory', desc: 'Open the team memory (what every agent knows about this project)' },
+  { name: 'run', args: '[script]', desc: 'Run the dev server (npm run dev / start) and show its log' },
+  { name: 'stop', desc: 'Stop the dev server' },
   { name: 'help', desc: 'List the commands' },
 ];
 

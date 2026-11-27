@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { applyTicketEvent, type Attachment, type ConversationMeta, type DiffFile, type Project, type RoleId, type ServerEvent, type Ticket, type TicketEvent } from '@office/shared';
+import { applyTicketEvent, DEV_LOG_MAX, type Attachment, type ConversationMeta, type DevServerState, type DiffFile, type Project, type RoleId, type ServerEvent, type Ticket, type TicketEvent } from '@office/shared';
 
 export interface FeedItem {
   kind: 'message' | 'tool' | 'gate' | 'user' | 'stage';
@@ -61,6 +61,11 @@ export interface OfficeState {
   clearUnseen(rootId: string): void;
   /** Bumped on every `memory.updated` (the Memory tab refetches). */
   memoryRev: Record<string, number>;
+  /** ▶ Run: each project's dev server (missing = idle) and its recent output lines. */
+  devServers: Record<string, DevServerState>;
+  devLogs: Record<string, string[]>;
+  /** GET /api/projects/:id/devserver reply (state + log) replaces what the client has. */
+  setDevServer(projectId: string, state: DevServerState, log: string[]): void;
 }
 
 /** Every applied ticket event, by ticket, ordered by seq (the source the feed is rebuilt from on history replay). */
@@ -130,6 +135,7 @@ const initial = () => ({
   selectedProjectId: null as string | null, roleFilter: 'all' as RoleId | 'all', night: initialNight(), synced: false,
   soundOn: initialSound(), openConv: null as OfficeState['openConv'], openRequest: null as OfficeState['openRequest'],
   unseen: [] as OfficeState['unseen'], memoryRev: {} as Record<string, number>,
+  devServers: {} as Record<string, DevServerState>, devLogs: {} as Record<string, string[]>,
 });
 
 const NIGHT_KEY = 'pixel-office.night';
@@ -156,17 +162,25 @@ export const useOffice = create<OfficeState>()((set, get) => ({
       const projects = Object.fromEntries(e.snapshot.projects.map(p => [p.id, p]));
       const tickets = { ...s.tickets };
       for (const t of e.snapshot.tickets) tickets[t.id] = t;
-      set({ projects, tickets, synced: true, ...(e.snapshot.conversations ? { conversations: { ...e.snapshot.conversations } } : {}), selectedProjectId: s.selectedProjectId && projects[s.selectedProjectId] ? s.selectedProjectId : null });
+      const devServers = e.snapshot.devServers ? Object.fromEntries(e.snapshot.devServers.map(d => [d.projectId, d])) : s.devServers;
+      set({ projects, tickets, synced: true, devServers, ...(e.snapshot.conversations ? { conversations: { ...e.snapshot.conversations } } : {}), selectedProjectId: s.selectedProjectId && projects[s.selectedProjectId] ? s.selectedProjectId : null });
       return true;
     }
     if (e.type === 'project.added' || e.type === 'project.updated') { set({ projects: { ...s.projects, [e.project.id]: e.project } }); return true; }
     if (e.type === 'project.removed') {
       const { [e.projectId]: _gone, ...projects } = s.projects;
-      set({ projects, selectedProjectId: s.selectedProjectId === e.projectId ? null : s.selectedProjectId });
+      const { [e.projectId]: _ds, ...devServers } = s.devServers;
+      set({ projects, devServers, selectedProjectId: s.selectedProjectId === e.projectId ? null : s.selectedProjectId });
       return true;
     }
     if (e.type === 'conversation.updated') { set({ conversations: { ...s.conversations, [e.rootId]: e.meta } }); return true; }
     if (e.type === 'memory.updated') { set({ memoryRev: { ...s.memoryRev, [e.projectId]: (s.memoryRev[e.projectId] ?? 0) + 1 } }); return true; }
+    if (e.type === 'devserver.updated') { set({ devServers: { ...s.devServers, [e.projectId]: e.state } }); return true; }
+    if (e.type === 'devserver.log') {
+      const lines = [...(e.reset ? [] : s.devLogs[e.projectId] ?? []), ...e.lines].slice(-DEV_LOG_MAX);
+      set({ devLogs: { ...s.devLogs, [e.projectId]: lines } });
+      return true;
+    }
     if (!isTicketEvent(e)) return false;
     const id = e.ticketId;
     if (e.seq <= (s.lastSeq[id] ?? 0)) return false;
@@ -211,6 +225,9 @@ export const useOffice = create<OfficeState>()((set, get) => ({
   },
 
   setConversations(meta) { set(s => ({ conversations: { ...s.conversations, ...meta } })); },
+  setDevServer(projectId, state, log) {
+    set(s => ({ devServers: { ...s.devServers, [projectId]: state }, devLogs: { ...s.devLogs, [projectId]: log.slice(-DEV_LOG_MAX) } }));
+  },
   select(projectId) { set({ selectedProjectId: projectId }); },
   setRoleFilter(f) { set({ roleFilter: f }); },
   setNight(on) {

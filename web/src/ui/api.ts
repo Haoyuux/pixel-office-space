@@ -35,6 +35,9 @@ export const paths = {
   files: (projectId: string, q: string) => `/api/projects/${enc(projectId)}/files?q=${enc(q)}`,
   conversation: (rootId: string) => `/api/conversations/${enc(rootId)}`,
   summary: (since: string) => `/api/summary?since=${enc(since)}`,
+  devServer: (projectId: string) => `/api/projects/${enc(projectId)}/devserver`,
+  devServerStart: (projectId: string) => `/api/projects/${enc(projectId)}/devserver/start`,
+  devServerStop: (projectId: string) => `/api/projects/${enc(projectId)}/devserver/stop`,
   memory: (projectId: string) => `/api/projects/${enc(projectId)}/memory`,
   memoryEntry: (projectId: string, entryId: string) => `/api/projects/${enc(projectId)}/memory/${enc(entryId)}`,
 };

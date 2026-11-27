@@ -17,13 +17,15 @@ import { rootOf, threadOf, threadsOf } from './threads';
 import { PastConversations, threadTitle, visibleThreads } from './PastConversations';
 import { loadHistory } from '../state/socket';
 import { MemoryPanel } from './MemoryPanel';
+import { DevServerPanel, RunButton, isLive, runIntent, startDevServer, stopDevServer } from './DevServer';
 
 export const DRAWER_WIDTH = 560;
 /** Full-screen chat: most of the window, a strip of the office stays visible on the left. */
 export const FULL_WIDTH = `max(${DRAWER_WIDTH}px, calc(100vw - 96px))`;
-type Tab = 'feed' | 'raw' | 'changes' | 'plan' | 'memory';
+type Tab = 'feed' | 'raw' | 'changes' | 'plan' | 'memory' | 'run';
 const TABS: { id: Tab; label: string }[] = [
   { id: 'feed', label: 'Feed' }, { id: 'raw', label: 'Raw log' }, { id: 'changes', label: 'Changes' }, { id: 'plan', label: 'Plan' }, { id: 'memory', label: 'Memory' },
+  { id: 'run', label: 'Run' },
 ];
 
 /** Newest first. */
@@ -192,6 +194,17 @@ export function Drawer({ projectId }: { projectId: string }) {
       case 'status': case 'help': setCard(name); return;
       case 'team': setTeam(true); return;
       case 'memory': setTab('memory'); return;
+      case 'run': {
+        setTab('run');
+        const cur = useOffice.getState().devServers[project.id];
+        if (isLive(cur)) return `Already running${cur?.url ? ` at ${cur.url}` : ''} — /stop first to restart`;
+        const err = await startDevServer(project.id, arg || undefined);
+        return err ?? `Starting the dev server${arg ? ` (npm run ${arg})` : ''} — its output is in the Run tab`;
+      }
+      case 'stop': {
+        if (!isLive(useOffice.getState().devServers[project.id])) return 'The dev server is not running';
+        return (await stopDevServer(project.id)) ?? 'Stopping the dev server';
+      }
       case 'model': {
         const m = arg.toLowerCase();
         if (!isModel(m)) return `Unknown model — pick ${Object.keys(MODEL_DESC).join(', ')}`;
@@ -223,6 +236,7 @@ export function Drawer({ projectId }: { projectId: string }) {
             <span className="po-badge po-model" title="Claude model for this project's runs (change it with /model)">{project.model}</span>
           )}
           <span className={`po-badge ${mode}`} title="Who works this project's tickets (change it in Team)">{mode === 'claude' ? 'Claude Code' : 'Simulated'}</span>
+          <RunButton projectId={project.id} onOpen={() => setTab('run')} />
           <button type="button" className="po-hbtn" aria-label="New conversation" aria-keyshortcuts="Control+K" title="New conversation (/new · Ctrl+K)" onClick={startFresh}>＋ New</button>
           <button type="button" className="po-hbtn" onClick={() => setTeam(true)} title="Edit team">Team · {project.team.length}</button>
           <button type="button" className={`po-hbtn${menu ? ' on' : ''}`} aria-label="Project menu" aria-expanded={!!menu} onClick={() => { setMenu(m => (m ? null : 'open')); setMenuError(null); }}>⋯</button>
@@ -296,6 +310,7 @@ export function Drawer({ projectId }: { projectId: string }) {
       {card && <CommandCard kind={card} project={project} onClose={() => setCard(null)} />}
       <div className="po-body">
         {tab === 'memory' ? <MemoryPanel projectId={project.id} />
+          : tab === 'run' ? <DevServerPanel projectId={project.id} />
           : !shown ? <div className="po-scroll"><div className="po-empty po-welcome">
             <div className="po-welcome-title">{project.name} is ready.</div>
             <div>Ask a question, or describe a change — the PM answers, or plans it for your approval.</div>
@@ -311,7 +326,8 @@ export function Drawer({ projectId }: { projectId: string }) {
         onCreated={(created, followUp) => {
           // a follow-up stays in this conversation; a new conversation opens once its ticket arrives
           refocus.current = true; setFresh(false); setChosen(followUp ? openRoot ?? null : created?.id ?? null);
-        }} onCommand={command} />
+        }} onCommand={command}
+        intercept={t => { const i = runIntent(t, project.name); return i ? command(i, '').then(out => out ?? '') : null; }} />
       {team && <TeamDialog project={project} onClose={() => setTeam(false)} />}
     </aside>
   );
