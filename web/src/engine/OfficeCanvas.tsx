@@ -29,11 +29,13 @@ interface Props {
   onBotClick?: (projectId: string, role: RoleId) => void;
   /** Pointer over the cafeteria cork board (client coords), or null when it leaves. */
   onCorkHover?: (at: { x: number; y: number } | null) => void;
+  /** Click on the cafeteria cork board (the summary board). */
+  onCorkClick?: () => void;
   onReady?: (scene: OfficeScene) => void;
 }
 
 /** Mounts a Pixi Application with the office scene and the camera. */
-export function OfficeCanvas({ projects, live = false, onRoomClick, onBotClick, onCorkHover, onReady }: Props) {
+export function OfficeCanvas({ projects, live = false, onRoomClick, onBotClick, onCorkHover, onCorkClick, onReady }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<OfficeScene | null>(null);
   const botsRef = useRef<Population | null>(null);
@@ -44,6 +46,8 @@ export function OfficeCanvas({ projects, live = false, onRoomClick, onBotClick, 
   botClickRef.current = onBotClick;
   const corkRef = useRef(onCorkHover);
   corkRef.current = onCorkHover;
+  const corkClickRef = useRef(onCorkClick);
+  corkClickRef.current = onCorkClick;
   const projectsRef = useRef(projects);
   projectsRef.current = projects;
 
@@ -87,6 +91,7 @@ export function OfficeCanvas({ projects, live = false, onRoomClick, onBotClick, 
         if (camera.dragged || e.button !== 0) return;
         const bot = botClickRef.current ? botAt(...local(e)) : null;
         if (bot && isProject(bot.projectId)) { botClickRef.current!(bot.projectId, bot.role); return; }
+        if (corkClickRef.current && scene.corkboardAt(...local(e))) { corkClickRef.current(); return; }
         const raw = scene.roomAt(...local(e)), id = isProject(raw) ? raw : null;
         if (clickRef.current) clickRef.current(id);
         else scene.setSelected(id);

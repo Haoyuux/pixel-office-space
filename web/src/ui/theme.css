@@ -479,3 +479,27 @@ fieldset.po-mode .po-mode-opt input { accent-color: var(--accent); }
 /* ---------- tool activity groups ---------- */
 .po-toolgroup-items { margin-left: 18px; border-left: 1px solid var(--po-line); }
 .po-toolgroup-items .po-tool { padding-left: 14px; }
+
+/* ---------- summary board ---------- */
+.po-tb-ask { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--po-amber) 55%, transparent); }
+.po-modal:has(.po-sum) { width: min(720px, calc(100vw - 32px)); }
+.po-sum { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 10px; }
+.po-sum-range { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.po-sum-empty { padding: 18px 0; text-align: center; }
+.po-sum-card { border: 1px solid var(--po-line); border-left: 2px solid var(--accent); border-radius: 6px; background: var(--po-panel-2); padding: 8px 10px; }
+.po-sum-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; font-size: 12px; }
+.po-sum-name { color: var(--accent); text-transform: uppercase; letter-spacing: 0.1em; font-size: 12px; }
+.po-sum-list { list-style: none; margin: 0; padding: 0; }
+.po-sum-list.waiting { margin-bottom: 4px; }
+.po-sum-row { width: 100%; display: grid; grid-template-columns: 18px 1fr auto; gap: 8px; align-items: center; padding: 4px 6px; border: 0; border-radius: 4px;
+  background: none; cursor: pointer; text-align: left; font-size: 12px; }
+.po-sum-row:hover, .po-sum-row:focus-visible { background: color-mix(in srgb, var(--accent) 10%, transparent); outline: none; }
+.po-sum-list.waiting .po-sum-row { background: color-mix(in srgb, var(--po-amber) 9%, transparent); }
+.po-sum-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.po-sum-meta { font-size: 11px; white-space: nowrap; }
+.po-sum-list.waiting .po-sum-meta { color: var(--po-amber); }
+.po-sum-ico.waiting { color: var(--po-amber); }
+.po-sum-ico.done { color: var(--po-green); }
+.po-sum-ico.running { color: var(--po-blue); }
+.po-sum-ico.failed, .po-sum-ico.cancelled { color: var(--po-red); }
+.po-sum-usage { margin-top: 4px; font-size: 11px; padding-left: 6px; }
