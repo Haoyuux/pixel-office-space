@@ -12,6 +12,8 @@ export type ServerEvent =
   | ({ type: 'ticket.created'; ticket: Ticket } & TBase)
   | ({ type: 'ticket.stage'; stage: Stage; roles: RoleId[] } & TBase)
   | ({ type: 'ticket.done' } & TBase)
+  /** The PM answered the request (Ask) instead of planning; ticket.done follows. */
+  | ({ type: 'ticket.answered' } & TBase)
   | ({ type: 'ticket.failed'; reason: string } & TBase)
   | ({ type: 'ticket.cancelled' } & TBase)
   | ({ type: 'agent.state'; role: RoleId; state: AgentState } & TBase)

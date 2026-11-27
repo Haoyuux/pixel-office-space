@@ -126,6 +126,23 @@ describe('follow-ups + resume REST', () => {
     expect((await request(b.office.server).post(`/api/projects/${p.id}/tickets`).send({ text: 'x', parentTicketId: 'nope' })).status).toBe(404);
   });
 
+  it('POST tickets takes mode (default auto, validated); a simulated ask is answered and done', async () => {
+    const b = bootFake();
+    const p = (await add(b.office, { agentsMode: 'simulated' })).body as Project;
+    const post = (body: Record<string, unknown>) => request(b.office.server).post(`/api/projects/${p.id}/tickets`).send(body);
+    expect((await post({ text: 'x', mode: 'chat' })).status).toBe(400);
+    expect((await post({ text: 'x', mode: 3 })).status).toBe(400);
+    const a = (await post({ text: 'first' })).body as Ticket;
+    expect(a.mode).toBe('auto');
+    await request(b.office.server).post(`/api/tickets/${a.id}/cancel`).send({});
+    const q = (await post({ text: 'what is here?', mode: 'ask' })).body as Ticket;
+    expect(q.mode).toBe('ask');
+    b.sched.flush();
+    expect(b.orchestrator.find(q.id)).toMatchObject({ status: 'done', answered: true });
+    const t = (await post({ text: 'do it', mode: 'ticket', parentTicketId: q.id })).body as Ticket;
+    expect(t).toMatchObject({ mode: 'ticket', parentTicketId: q.id });
+  });
+
   it('POST /api/tickets/:id/resume → 409 for simulated or non-failed, 404 unknown', async () => {
     const b = bootFake();
     const p = (await add(b.office, { agentsMode: 'simulated' })).body as Project;

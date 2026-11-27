@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { useOffice, type FeedItem } from '../state/store';
 import { clock, isFinished, roleColor, roleEmoji, roleShort, STAGE_LABEL, usageLine } from './format';
 import { GateCard } from './GateCard';
@@ -39,6 +39,47 @@ function ToolLine({ item }: { item: FeedItem }) {
   );
 }
 
+/** `code` spans inside a line. */
+function inline(text: string, key: string) {
+  return text.split(/(`[^`\n]+`)/g).map((part, i) =>
+    part.length > 2 && part.startsWith('`') && part.endsWith('`') ? <code key={`${key}:${i}`}>{part.slice(1, -1)}</code> : part);
+}
+
+/** Markdown-ish answer text: # headings, - / 1. lists, ``` code blocks and `code`; everything else as wrapped paragraphs. */
+export function Answer({ text }: { text: string }) {
+  const out: ReactNode[] = [];
+  const lines = text.split('\n');
+  let list: { ordered: boolean; items: string[] } | null = null;
+  const flush = () => {
+    if (!list) return;
+    const k = `l${out.length}`;
+    const items = list.items.map((t, i) => <li key={i}>{inline(t, `${k}:${i}`)}</li>);
+    out.push(list.ordered ? <ol key={k}>{items}</ol> : <ul key={k}>{items}</ul>);
+    list = null;
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (/^\s*```/.test(l)) {
+      flush();
+      const code: string[] = [];
+      while (++i < lines.length && !/^\s*```/.test(lines[i])) code.push(lines[i]);
+      out.push(<pre key={`c${out.length}`}>{code.join('\n')}</pre>);
+      continue;
+    }
+    const h = /^(#{1,6})\s+(.*)$/.exec(l);
+    const li = /^\s*(?:([-*+])|(\d+)[.)])\s+(.*)$/.exec(l);
+    if (h) { flush(); out.push(<h4 key={`h${out.length}`} className={`po-h${h[1].length}`}>{inline(h[2], `h${i}`)}</h4>); }
+    else if (li) {
+      const ordered = !li[1];
+      if (list && list.ordered !== ordered) flush();
+      (list ??= { ordered, items: [] }).items.push(li[3]);
+    } else if (!l.trim()) flush();
+    else { flush(); out.push(<p key={`p${out.length}`}>{inline(l, `p${i}`)}</p>); }
+  }
+  flush();
+  return <div className="po-msg-text po-answer">{out}</div>;
+}
+
 function Who({ item }: { item: FeedItem }) {
   if (!item.role) return null;
   return (
@@ -60,7 +101,8 @@ function Row({ item, ticketId, onShow }: { item: FeedItem; ticketId: string; onS
       return (
         <div className="po-msg">
           <div className="po-msg-head"><Who item={item} /><span className="po-dim po-time">{clock(item.ts)}</span></div>
-          <div className="po-msg-text">{item.text}{item.status === 'streaming' && <span className="po-cursor" aria-hidden>▍</span>}</div>
+          {item.answer ? <Answer text={item.text} />
+            : <div className="po-msg-text">{item.text}{item.status === 'streaming' && <span className="po-cursor" aria-hidden>▍</span>}</div>}
         </div>
       );
     case 'tool':

@@ -9,7 +9,12 @@ export interface FeedItem {
   status?: string;
   id: string;
   ts: string;
+  /** The PM's answer to an Ask (rendered as markdown-ish text). */
+  answer?: boolean;
 }
+
+/** The PM's raw structured reply carrying an answer (shown again, cleanly, as the answer message). */
+const RAW_ANSWER = /```json[\s\S]*"kind"\s*:\s*"answer"/;
 
 export interface OfficeState {
   projects: Record<string, Project>;
@@ -73,6 +78,15 @@ function fold(v: TicketView, e: TicketEvent): TicketView {
     }
     case 'user.message': return push(item({ kind: 'user', text: e.text, id: `user:${e.seq}` }));
     case 'ticket.stage': return push(item({ kind: 'stage', text: e.stage, detail: e.roles.join(', '), id: `stage:${e.seq}` }));
+    case 'ticket.answered': {
+      // the answer is the PM's last message; its raw JSON reply before it is noise
+      let at = -1;
+      for (let i = v.feed.length - 1; i >= 0; i--) if (v.feed[i].kind === 'message' && v.feed[i].role === 'pm') { at = i; break; }
+      if (at < 0) return v;
+      const feed = v.feed.map((f, i) => (i === at ? { ...f, answer: true } : f))
+        .filter((f, i) => i === at || !(f.kind === 'message' && f.role === 'pm' && RAW_ANSWER.test(f.text)));
+      return { ...v, feed };
+    }
     case 'ticket.done': return push(item({ kind: 'stage', text: 'done', id: `end:${e.seq}` }));
     case 'ticket.failed': return push(item({ kind: 'stage', text: 'failed', detail: e.reason, id: `end:${e.seq}` }));
     case 'ticket.cancelled': return push(item({ kind: 'stage', text: 'cancelled', id: `end:${e.seq}` }));

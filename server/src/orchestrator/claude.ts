@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   applyTicketEvent, type AgentState, type GateDecision, type GateKind, type Plan, type PlanTask, type Project, type RoleId,
-  type RepoDetection, type RepoRef, type ServerEvent, type Stage, type Ticket, type Workspace,
+  type RepoDetection, type RepoRef, type ServerEvent, type Stage, type Ticket, type TicketMode, type Workspace,
 } from '@office/shared';
 import { ConflictError, ValidationError, type Orchestrator, type StartOptions } from './types';
 import { titleOf } from './fakeContent';
@@ -14,9 +14,9 @@ import { newTranslateContext, translate } from '../claude/translate';
 import { MAX_TURNS, ROLE_TOOLS } from '../claude/roles';
 import {
   bouncePrompt, CONTINUE, deliverNotesPrompt, diffSummary, fixJsonPrompt, followUpPrompt, planPrompt, previousContext,
-  repoContext, reviewPrompt, SHARED_MODULES_RULE, stagePrompt, testPrompt, withOwnerNotes,
+  projectDocsRule, repoContext, reviewPrompt, SHARED_MODULES_RULE, stagePrompt, testPrompt, withOwnerNotes,
 } from '../claude/prompts';
-import { extractJson, planValidator, reviewValidator, testValidator, type PlanWithMap } from '../claude/parse';
+import { extractJson, isProse, pmValidator, reviewValidator, testValidator, type PmReply } from '../claude/parse';
 
 export { ConflictError };
 
@@ -70,7 +70,11 @@ interface Unit {
   sharedModules?: boolean;
 }
 /** Where the non-PM roles work: the one worktree (single repo) or a plain folder holding one worktree per repo. */
-interface Ws { path: string; multi: boolean; units: Unit[] }
+interface Ws {
+  path: string; multi: boolean; units: Unit[];
+  /** Multi-repo: the parent folder's CLAUDE.md / docs were copied into `<path>/_project/`. */
+  docs?: boolean;
+}
 
 interface Run {
   ticket: Ticket; project: Project; seq: number;
@@ -152,6 +156,7 @@ export class ClaudeOrchestrator implements Orchestrator {
       id: randomUUID(), projectId: project.id, title: titleOf(text), text, status: 'queued', stage: null,
       agentStates: {}, createdAt: this.now().toISOString(), agentsMode: 'claude',
       ...(opts.parentTicketId ? { parentTicketId: opts.parentTicketId } : {}),
+      ...(opts.mode ? { mode: opts.mode } : {}),
     };
     const run = this.newRun(project, ticket, 0);
     this.emit(run, { type: 'ticket.created', ticket });
@@ -305,7 +310,9 @@ export class ClaudeOrchestrator implements Orchestrator {
     try { this.opts.onDetect?.(run.project.id, found); } catch { /* storing it is best effort */ }
     if (found.kind === 'multi') run.repos = found.repos;
     else run.repos = undefined;
-    if (found.kind === 'none' || (found.kind === 'single' && !(await this.git.hasCommit(folder)))) {
+    // an Ask only reads the owner's folder: it needs no git
+    const needsGit = run.ticket.mode !== 'ask';
+    if (needsGit && (found.kind === 'none' || (found.kind === 'single' && !(await this.git.hasCommit(folder))))) {
       this.alive(run);
       this.message(run, 'pm', `"${folder}" is not a git repository with at least one commit. ` +
         'Pixel Office works on a git branch so your files stay safe. Use "Initialize git" and try again.');
@@ -374,13 +381,16 @@ export class ClaudeOrchestrator implements Orchestrator {
     let fresh: string | undefined;
     const mapFile = path.join(folder, MAP_FILE);
     const readMap = () => fs.existsSync(mapFile) ? fs.readFileSync(mapFile, 'utf8') : undefined;
+    // an owner note on the plan means a plan is wanted; tickets from before modes existed are tickets
+    const mode: TicketMode = note ? 'ticket' : (run.ticket.mode ?? 'ticket');
     if (!note && run.continuing.has('pm') && run.sessions.pm) {
       resume = run.sessions.pm;
-      prompt = 'As the project manager, reply with the full plan as one fenced ```json block in the required shape.';
-      fresh = (run.fallback ?? '') + planPrompt(run.ticket, run.project, readMap());
+      prompt = `As the project manager, reply with the full ${mode === 'ask' ? 'answer' : mode === 'auto' ? 'answer or plan' : 'plan'} ` +
+        'as one fenced ```json block in the required shape.';
+      fresh = (run.fallback ?? '') + planPrompt(run.ticket, run.project, readMap(), mode);
     } else if (!note && run.parent && !run.plan) {
-      fresh = (run.fallback ?? '') + planPrompt(run.ticket, run.project, readMap());
-      if (run.inherited.has('pm') && run.sessions.pm) { resume = run.sessions.pm; prompt = followUpPrompt(run.ticket, run.project); }
+      fresh = (run.fallback ?? '') + planPrompt(run.ticket, run.project, readMap(), mode);
+      if (run.inherited.has('pm') && run.sessions.pm) { resume = run.sessions.pm; prompt = followUpPrompt(run.ticket, run.project, mode); }
       else prompt = fresh;
     } else if (note && run.sessions.pm) {
       this.message(run, 'pm', `Re-planning with your note: "${titleOf(note)}"`);
@@ -389,19 +399,31 @@ export class ClaudeOrchestrator implements Orchestrator {
         `Revise the plan and reply with the full corrected plan as one fenced \`\`\`json block in the same shape as before.`;
     } else {
       if (note) this.message(run, 'pm', `Re-planning with your note: "${titleOf(note)}"`);
-      prompt = planPrompt(run.ticket, run.project, readMap());
+      prompt = planPrompt(run.ticket, run.project, readMap(), mode);
       if (note) prompt += `\n\nOwner note on the previous plan:\n<owner-note>\n${note}\n</owner-note>`;
     }
     prompt = this.withNotes(run, 'pm', this.ctx(run, prompt));
     if (fresh) fresh = this.ctx(run, fresh);
-    const plan = await this.structured(run, 'pm', 'plan', folder, prompt, resume, planValidator(run.project.team), 'plan', fresh);
-    const { projectMap, ...clean } = plan;
+    const what = mode === 'ask' ? 'answer' : mode === 'auto' ? 'answer or plan' : 'plan';
+    // outside ticket mode a reply that is clearly prose (no JSON at all) is the answer, not a failure
+    const prose = mode === 'ticket' ? undefined : (text: string): PmReply => ({ kind: 'answer', answer: text.trim() });
+    const reply = await this.structured(run, 'pm', 'plan', folder, prompt, resume, pmValidator(run.project.team, mode), what, fresh, prose);
+    if (reply.kind === 'answer') return this.answer(run, reply.answer);
+    const { projectMap, ...clean } = reply.plan;
     run.plan = clean;
     if (projectMap) run.projectMap = projectMap;
     this.emit(run, { type: 'ticket.plan', plan: clean });
     this.message(run, 'pm', `Plan ready: ${clean.tasks.length} tasks. Waiting for your approval.`);
     this.state(run, 'pm', 'waiting');
     this.emit(run, { type: 'gate.open', gate: 'plan', payload: clean });
+  }
+
+  /** Ask: the PM answered. No gate, no worktree, no other roles; the ticket is done (usage is emitted by finish). */
+  private answer(run: Run, text: string) {
+    this.alive(run);
+    this.message(run, 'pm', text);
+    this.emit(run, { type: 'ticket.answered' });
+    this.finish(run, 'done');
   }
 
   private async prepareWorktree(run: Run) {
@@ -541,11 +563,34 @@ export class ClaudeOrchestrator implements Orchestrator {
     return out;
   }
 
+  /**
+   * Is a review/test item's file inside one of the workspace's repos (where the devs can fix it)? Absolute paths are
+   * taken relative to the workspace (or the owner's folder). Single repo: anything not climbing out of it, including no
+   * file at all. Multi-repo: the path must start with a repo's folder, so no file / a parent-folder file is outside.
+   */
+  private inRepos(run: Run, file: string): boolean {
+    const ws = run.ws;
+    if (!ws) return true;
+    let f = file.trim().replace(/\\/g, '/');
+    if (path.isAbsolute(f) || /^[a-z]:\//i.test(f)) {
+      const under = [ws.path, run.project.folder].map(b => path.relative(b, f)).find(r => r && !r.startsWith('..') && !path.isAbsolute(r));
+      if (under === undefined) return false;
+      f = under.replace(/\\/g, '/');
+    }
+    f = f ? path.posix.normalize(f) : '';
+    if (f === '..' || f.startsWith('../')) return false;
+    if (!ws.multi) return true;
+    const first = f.replace(/^\.\//, '').split('/')[0].toLowerCase();
+    return !!first && first !== '.' && ws.units.some(u => u.name.toLowerCase() === first);
+  }
+
   /** Multi-repo projects: tell the agent which subfolders are repos. */
-  private ctx(run: Run, prompt: string): string {
+  private ctx(run: Run, prompt: string, role: RoleId = 'pm'): string {
     const names = run.ws?.multi ? run.ws.units.map(u => u.name) : (run.repos ?? []).map(r => r.name);
     const parts = [prompt];
     if (names.length) parts.push(repoContext(names));
+    // the PM works in the owner's folder and reads the parent docs there; the others get the workspace copy
+    if (role !== 'pm' && run.ws?.docs) parts.push(projectDocsRule(run.project.folder, PROJECT_DOCS_DIR));
     if (run.ws?.units.some(u => u.sharedModules)) parts.push(SHARED_MODULES_RULE);
     return parts.join('\n\n');
   }
@@ -568,6 +613,39 @@ export class ClaudeOrchestrator implements Orchestrator {
     // a multi-repo workspace root is not a repo: nothing to exclude there
     if (!run.ws.multi) await this.git.excludePath(run.ws.path, '/.claude/agents/');
     this.alive(run);
+    this.provisionDocs(run);
+  }
+
+  /**
+   * Multi-repo: project rules and docs live in the owner's parent folder, outside every repo (so outside the
+   * workspace). Copy `CLAUDE.md` + `docs/**\/*.md` (≤ 2 MB in total) into `<workspace>/_project/` for the non-PM roles
+   * to read. A copy rather than `--add-dir`: that is not confirmed read-only under acceptEdits, and the owner's files
+   * must stay untouched. The workspace root is not a repo, so the copy is never committed.
+   */
+  private provisionDocs(run: Run) {
+    const ws = run.ws;
+    if (!ws?.multi || ws.units.some(u => u.name.toLowerCase() === PROJECT_DOCS_DIR)) return;
+    const parent = run.project.folder;
+    const files: string[] = [];
+    if (isFile(path.join(parent, 'CLAUDE.md'))) files.push('CLAUDE.md');
+    files.push(...markdownUnder(parent, 'docs'));
+    let budget = PROJECT_DOCS_MAX;
+    const skipped: string[] = [];
+    let copied = 0;
+    for (const rel of files) {
+      const src = path.join(parent, rel);
+      const size = fs.statSync(src).size;
+      if (size > budget) { skipped.push(rel); continue; }
+      const dst = path.join(ws.path, PROJECT_DOCS_DIR, rel);
+      try {
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        fs.copyFileSync(src, dst);
+        budget -= size;
+        copied++;
+      } catch { skipped.push(rel); }
+    }
+    ws.docs = copied > 0;
+    if (skipped.length) this.log(run, 'pm', `Project docs: not copied (over the 2 MB budget or unreadable): ${skipped.join(', ')}`);
   }
 
   /**
@@ -638,25 +716,40 @@ export class ClaudeOrchestrator implements Orchestrator {
       let approved = true;
       const summary = stage === 'review' ? diffSummary(await this.diffAll(run)) : '';
       this.alive(run);
+      const remarks = (role: RoleId, notes: string[]) => {
+        if (notes.length) this.message(run, role, `Notes (not blocking):\n${notes.map(n => `- ${n}`).join('\n')}`);
+      };
       await Promise.all(roles.map(async role => {
         if (stage === 'review') {
-          const v = await this.structured(run, role, 'review', cwd, this.withNotes(run, role, this.ctx(run, reviewPrompt(run.plan!, summary))), run.sessions[role], reviewValidator(team), 'review');
+          const v = await this.structured(run, role, 'review', cwd, this.withNotes(run, role, this.ctx(run, reviewPrompt(run.plan!, summary), role)), run.sessions[role], reviewValidator(team), 'review');
           if (!v.approved || v.issues.length || v.unassigned.length) approved = false;
           issues.push(...v.issues); unassigned.push(...v.unassigned);
+          remarks(role, v.notes);
         } else {
-          const v = await this.structured(run, role, 'test', cwd, this.withNotes(run, role, this.ctx(run, testPrompt(run.plan!))), run.sessions[role], testValidator(team), 'test results');
+          const v = await this.structured(run, role, 'test', cwd, this.withNotes(run, role, this.ctx(run, testPrompt(run.plan!), role)), run.sessions[role], testValidator(team), 'test results');
           if (!v.passed || v.failures.length || v.unassigned.length) approved = false;
           issues.push(...v.failures); unassigned.push(...v.unassigned);
+          remarks(role, v.notes);
         }
       }));
       this.alive(run);
       if (stage === 'test') await this.commit(run, 'office: test (qa)');
       for (const r of roles) this.state(run, r, 'waiting');
+      // fair review: an item on a file outside every repo can't be fixed by the devs → a PM note, never a bounce
+      const outside = [...issues, ...unassigned].filter(i => i.file !== undefined && !this.inRepos(run, i.file));
+      const drop = (list: Issue[]) => list.splice(0, list.length, ...list.filter(i => !outside.includes(i)));
+      drop(issues); drop(unassigned);
+      if (outside.length) {
+        this.message(run, 'pm', `Noted, not sent back (outside the repos, so the team can't change it here):\n` +
+          outside.map(i => `- [${i.role}] ${i.file ? i.file + ': ' : ''}${i.note}`).join('\n'));
+      }
       if (unassigned.length) {
         this.message(run, 'pm', `Some ${stage} findings are for roles not on this team; passing them to the builders:\n` +
           unassigned.map(i => `- [${i.role}] ${i.file ? i.file + ': ' : ''}${i.note}`).join('\n'));
       }
       const all: Issue[] = [...issues, ...unassigned];
+      // only outside-the-repo items: nothing the team can fix, so it passes
+      if (!all.length && outside.length) approved = true;
       // a bare "not approved" with no items still goes to the builders
       if (!approved && !all.length) all.push({ role: 'pm', note: `The ${stage === 'review' ? 'review' : 'tests'} did not pass.` });
       issues.splice(0, issues.length, ...this.route(run, stage, all));
@@ -685,7 +778,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     await Promise.all(roles.map(role => {
       const task = run.plan!.tasks.filter(t => t.role === role);
       const merged: PlanTask = { role, text: task.map(t => t.text).join('\n'), files: task.flatMap(t => t.files) };
-      const prompt = this.ctx(run, stagePrompt(stage, role, merged, run.plan!, this.takeNotes(run, role)));
+      const prompt = this.ctx(run, stagePrompt(stage, role, merged, run.plan!, this.takeNotes(run, role)), role);
       return this.exec(run, role, stage, cwd, prompt, run.sessions[role]);
     }));
     this.alive(run);
@@ -816,11 +909,12 @@ export class ClaudeOrchestrator implements Orchestrator {
   /** A run whose final text must parse; one fixJson resume, then fail showing the role's text. */
   private async structured<T>(
     run: Run, role: RoleId, stage: Exclude<Stage, 'done'>, cwd: string, prompt: string, resume: string | undefined,
-    validate: (v: unknown) => T | null, what: string, fresh?: string,
+    validate: (v: unknown) => T | null, what: string, fresh?: string, prose?: (text: string) => T,
   ): Promise<T> {
     const r1 = await this.exec(run, role, stage, cwd, prompt, resume, fresh);
     const v1 = extractJson(r1.result, validate);
     if (v1) return v1;
+    if (prose && isProse(r1.result)) return prose(r1.result);
     this.log(run, role, `[${role}] reply had no valid JSON ${what}; asking again`);
     const r2 = await this.exec(run, role, stage, cwd, fixJsonPrompt(), run.sessions[role] ?? r1.sessionId);
     const v2 = extractJson(r2.result, validate);
@@ -997,6 +1091,21 @@ export class ClaudeOrchestrator implements Orchestrator {
 }
 
 const isLink = (p: string) => { try { return fs.lstatSync(p).isSymbolicLink(); } catch { return false; } };
+const isFile = (p: string) => { try { return fs.statSync(p).isFile(); } catch { return false; } };
+const PROJECT_DOCS_DIR = '_project';
+const PROJECT_DOCS_MAX = 2 * 1024 * 1024;
+/** `<dir>/**\/*.md` under root (relative paths, sorted; dot-folders, node_modules and links skipped). */
+function markdownUnder(root: string, dir: string): string[] {
+  const out: string[] = [];
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(path.join(root, dir), { withFileTypes: true }); } catch { return out; }
+  for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    const rel = path.join(dir, e.name);
+    if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules') out.push(...markdownUnder(root, rel));
+    else if (e.isFile() && /\.md$/i.test(e.name)) out.push(rel);
+  }
+  return out;
+}
 /** Remove a junction/symlink itself (never its target's contents). */
 function unlinkDir(p: string) {
   try { fs.unlinkSync(p); } catch { fs.rmdirSync(p); }

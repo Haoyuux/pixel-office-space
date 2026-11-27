@@ -2,7 +2,7 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
 import { existsSync, readdirSync } from 'node:fs';
-import type { GateDecision, GateKind, Project, RepoDetection, ServerEvent, Snapshot, Ticket } from '@office/shared';
+import { TICKET_MODES, type GateDecision, type GateKind, type Project, type RepoDetection, type ServerEvent, type Snapshot, type Ticket, type TicketMode } from '@office/shared';
 import { ProjectStore, ValidationError, NotFoundError, normalizeFolder, applyGit } from './store';
 import { scaffoldOrExplain } from './scaffold';
 import { guardRequests } from './origin';
@@ -108,14 +108,17 @@ export function createOffice(opts: OfficeOptions): Office {
     const p = mustProject(req.params.id);
     const text = String(req.body.text ?? '').trim();
     if (!text) throw new ValidationError('Ticket text is required');
+    const rawMode = req.body.mode ?? 'auto';
+    if (!TICKET_MODES.includes(rawMode)) throw new ValidationError(`mode must be one of ${TICKET_MODES.join(', ')}`);
+    const mode = rawMode as TicketMode;
     const parentTicketId = req.body.parentTicketId;
     if (parentTicketId !== undefined && parentTicketId !== null) {
       if (typeof parentTicketId !== 'string') throw new ValidationError('parentTicketId must be a ticket id');
       const parent = orch.find(parentTicketId) ?? log.tickets(p.id).find(t => t.id === parentTicketId);
       if (!parent || parent.projectId !== p.id) throw new NotFoundError('Parent ticket not found');
-      return res.status(201).json(orch.startTicket(p, text, { parentTicketId }));
+      return res.status(201).json(orch.startTicket(p, text, { parentTicketId, mode }));
     }
-    res.status(201).json(orch.startTicket(p, text));
+    res.status(201).json(orch.startTicket(p, text, { mode }));
   });
 
   app.get('/api/projects/:id/tickets', (req, res) => {

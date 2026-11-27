@@ -22,6 +22,8 @@ export interface RunOptions {
   role: RoleId;
   prompt: string;
   resume?: string;
+  /** Extra directories (--add-dir). Not confirmed read-only under acceptEdits, so the orchestrator does not use it for owner folders (it copies docs instead). */
+  addDirs?: string[];
   allowedTools: string[];
   maxTurns: number;
   timeoutMs?: number;
@@ -82,13 +84,15 @@ export function childEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  * CLI args. The prompt is NOT among them: a bare `-p` makes the CLI read the prompt from stdin, which avoids the
  * ~32K Windows command-line limit and any quoting issues (newlines, quotes, a leading '-'). Checked with claude 2.1.332.
  */
-export function buildArgs(o: Pick<RunOptions, 'role' | 'maxTurns' | 'resume' | 'allowedTools'>): string[] {
+export function buildArgs(o: Pick<RunOptions, 'role' | 'maxTurns' | 'resume' | 'allowedTools' | 'addDirs'>): string[] {
   // dontAsk denies Edit/Write even when listed in --allowedTools (found by the live run, claude 2.1.x), so roles that
   // edit files use acceptEdits (auto-accepts edits in the cwd; anything not allowed is still denied non-interactively).
   const edits = o.allowedTools.some(t => t === 'Edit' || t === 'Write' || t === 'MultiEdit');
   const args = ['-p', '--agent', o.role, '--output-format', 'stream-json', '--verbose',
     '--permission-mode', edits ? 'acceptEdits' : 'dontAsk', '--max-turns', String(o.maxTurns)];
   if (o.resume) args.push('--resume', o.resume);
+  // extra readable folders; like --allowedTools they are not restored on resume, so every run passes them again
+  for (const d of o.addDirs ?? []) args.push('--add-dir', d);
   // --allowedTools is variadic, so it goes last. Omitted when empty (the CLI rejects a bare flag).
   if (o.allowedTools.length) args.push('--allowedTools', ...o.allowedTools);
   return args;

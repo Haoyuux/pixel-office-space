@@ -11,6 +11,23 @@ const feed = () => useOffice.getState().feed.t ?? [];
 
 beforeEach(() => { resetOffice(); seq = 0; });
 
+describe('ask vs ticket', () => {
+  it('ticket.answered marks the ticket answered and the last PM message as the answer; the raw JSON reply is dropped', () => {
+    apply(ev({ type: 'ticket.created', ticket: { ...T, mode: 'auto' } }));
+    apply(ev({ type: 'ticket.stage', stage: 'plan', roles: ['pm'] }));
+    apply(ev({ type: 'agent.message', role: 'pm', text: 'Looking.', streaming: false, messageId: 'm0' }));
+    apply(ev({ type: 'agent.message', role: 'pm', text: '```json\n{"kind": "answer", "answer": "Save"}\n```', streaming: false, messageId: 'm1' }));
+    apply(ev({ type: 'agent.message', role: 'pm', text: '## Buttons\n- Save', streaming: false, messageId: 'm2' }));
+    apply(ev({ type: 'ticket.answered' }));
+    apply(ev({ type: 'ticket.done' }));
+    expect(useOffice.getState().tickets.t).toMatchObject({ answered: true, mode: 'auto', status: 'done' });
+    const msgs = feed().filter(f => f.kind === 'message');
+    expect(msgs.map(m => m.id)).toEqual(['m0', 'm2']);
+    expect(msgs[1].answer).toBe(true);
+    expect(msgs[0].answer).toBeUndefined();
+  });
+});
+
 describe('office store', () => {
   it('a snapshot and then the same events again do not duplicate feed items', () => {
     const snap: ServerEvent = { type: 'snapshot', snapshot: { projects: [P], tickets: [T] }, ts: '' };

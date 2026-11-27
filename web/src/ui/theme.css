@@ -300,6 +300,24 @@
 .po-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; color: var(--po-dim); }
 .po-toggle input { accent-color: var(--accent); margin: 0; }
 .po-toggle:has(input:checked) { color: var(--accent); }
+/* Auto · Ask · Ticket */
+.po-mode { display: inline-flex; border: 1px solid var(--po-line-2); border-radius: 999px; overflow: hidden; flex: none; }
+.po-mode-opt { position: relative; display: inline-flex; align-items: center; padding: 1px 9px; cursor: pointer; color: var(--po-dim); }
+.po-mode-opt + .po-mode-opt { border-left: 1px solid var(--po-line-2); }
+.po-mode-opt input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; pointer-events: none; }
+.po-mode-opt.on { color: #0b0f17; background: var(--accent); font-weight: 700; }
+.po-mode-opt:has(input:focus-visible) { outline: 1px solid var(--accent); outline-offset: -2px; }
+.po-chip.answered { color: var(--po-green); border-color: #2c5a3c; }
+.po-pipe-step.answer { gap: 4px; }
+/* an Ask's answer: markdown-ish, wrapped inside the drawer */
+.po-answer { white-space: normal; min-width: 0; }
+.po-answer > * { margin: 0 0 6px; }
+.po-answer h4 { font-size: 13px; color: var(--accent); }
+.po-answer ul, .po-answer ol { padding-left: 18px; }
+.po-answer p, .po-answer li { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+.po-answer code { font-family: inherit; padding: 0 3px; border-radius: 3px; background: color-mix(in srgb, var(--po-line-2) 60%, transparent); }
+.po-answer pre { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; max-width: 100%; padding: 6px 8px; border-radius: 4px;
+  background: color-mix(in srgb, var(--po-line-2) 40%, transparent); }
 
 /* cork board tooltip */
 .po-cork {

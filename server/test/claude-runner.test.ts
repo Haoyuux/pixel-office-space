@@ -96,6 +96,13 @@ describe('env, args, binary', () => {
       '--permission-mode', 'dontAsk', '--max-turns', '80', '--resume', 'sess-1', '--allowedTools', 'Read', 'Bash(npm *)',
     ]);
     expect(buildArgs({ ...base, allowedTools: ['Read', 'Edit'] })).toContain('acceptEdits');
+    // --add-dir is not restored on resume: emitted on every run, before the variadic --allowedTools
+    expect(buildArgs({ ...base, resume: 'sess-1', addDirs: ['D:/p', 'E:/q'] })).toEqual([
+      '-p', '--agent', 'backend', '--output-format', 'stream-json', '--verbose',
+      '--permission-mode', 'dontAsk', '--max-turns', '80', '--resume', 'sess-1', '--add-dir', 'D:/p', '--add-dir', 'E:/q',
+      '--allowedTools', 'Read', 'Bash(npm *)',
+    ]);
+    expect(buildArgs({ ...base, addDirs: [] })).not.toContain('--add-dir');
     expect(buildArgs(base)).not.toContain('--bare');
     expect(buildArgs(base)).not.toContain('do it'); // the prompt goes via stdin
   });

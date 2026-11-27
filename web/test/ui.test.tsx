@@ -107,6 +107,68 @@ describe('Drawer input', () => {
   });
 });
 
+describe('Ask vs Ticket UI', () => {
+  const openDrawer = (tickets: Ticket[] = []) => {
+    useOffice.setState({ projects: { p: P }, tickets: Object.fromEntries(tickets.map(t => [t.id, t])), selectedProjectId: 'p', synced: true });
+    return render(<Drawer projectId="p" />);
+  };
+  const box = () => screen.getByRole('textbox', { name: /message/i }) as HTMLTextAreaElement;
+  const send = (text: string) => { fireEvent.change(box(), { target: { value: text } }); fireEvent.keyDown(box(), { key: 'Enter' }); };
+
+  it('composer: Auto · Ask · Ticket switch (default Auto) is sent as mode', async () => {
+    openDrawer();
+    const group = screen.getByRole('radiogroup', { name: /mode/i });
+    const radios = within(group).getAllByRole('radio') as HTMLInputElement[];
+    expect(radios.map(r => r.labels![0].textContent)).toEqual(['Auto', 'Ask', 'Ticket']);
+    expect(radios[0].checked).toBe(true);
+    send('What does login do?');
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(posts()[0].body).toEqual({ text: 'What does login do?', mode: 'auto' });
+    fireEvent.click(within(group).getByRole('radio', { name: 'Ask' }));
+    await waitFor(() => expect(box().value).toBe(''));
+    send('List the buttons');
+    await waitFor(() => expect(posts()).toHaveLength(2));
+    expect(posts()[1].body).toEqual({ text: 'List the buttons', mode: 'ask' });
+  });
+
+  it('a follow-up carries the mode too; messages to a running ticket have no switch', async () => {
+    openDrawer([ticket({ id: 'a', title: 'Buttons', status: 'done', stage: 'done', answered: true, mode: 'ask' })]);
+    fireEvent.click(screen.getByRole('button', { name: /past conversations/i }));
+    fireEvent.click(within(screen.getByRole('list', { name: /past conversations/i })).getByRole('button', { name: /Buttons/ }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Ticket' }));
+    send('Now write that to docs/buttons.md');
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(posts()[0].body).toEqual({ text: 'Now write that to docs/buttons.md', parentTicketId: 'a', mode: 'ticket' });
+    cleanup();
+    openDrawer([ticket()]);
+    expect(screen.queryByRole('radiogroup', { name: /mode/i })).toBeNull();
+  });
+
+  it('Past conversations shows "✓ answered"; the pipeline shows only "Answer ✓"', () => {
+    openDrawer([ticket({ id: 'a', title: 'Buttons', status: 'done', stage: 'done', answered: true }), ticket({ id: 'b', title: 'Other', status: 'done', stage: 'done', createdAt: '2026-11-25T10:00:00Z' })]);
+    fireEvent.click(screen.getByRole('button', { name: /past conversations/i }));
+    const list = screen.getByRole('list', { name: /past conversations/i });
+    expect(within(list).getByRole('button', { name: /Buttons/ }).textContent).toContain('✓ answered');
+    expect(within(list).getByRole('button', { name: /Other/ }).textContent).not.toContain('answered');
+    const pipe = screen.getByRole('list', { name: 'Pipeline' });
+    expect(pipe.textContent).toBe('Answer ✓');
+  });
+
+  it('an answer renders markdown-ish (headings, lists, code) and wraps', () => {
+    useOffice.setState({ tickets: { t: ticket({ status: 'done', stage: 'done', answered: true }) }, feed: { t: [
+      { kind: 'message', role: 'pm', text: '## Buttons\n- Save\n- `Cancel`\n\n```ts\nconst x = 1;\n```\nDone.', id: 'm', ts: '', answer: true },
+    ] } });
+    render(<Feed ticketId="t" />);
+    const a = document.querySelector('.po-answer') as HTMLElement;
+    expect(a).toBeTruthy();
+    expect(within(a).getByRole('heading', { name: 'Buttons' })).toBeTruthy();
+    expect(within(a).getAllByRole('listitem').map(li => li.textContent)).toEqual(['Save', 'Cancel']);
+    expect(a.querySelector('li code')!.textContent).toBe('Cancel');
+    expect(a.querySelector('pre')!.textContent).toBe('const x = 1;');
+    expect(a.textContent).toContain('Done.');
+  });
+});
+
 describe('GateCard', () => {
   const gate = (status = 'open'): FeedItem => ({ kind: 'gate', text: 'stuck', status, id: 'gate:9', ts: '2026-11-26T10:00:00Z', detail: '{"from":"review","bounces":3}' });
 

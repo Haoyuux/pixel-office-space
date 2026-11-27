@@ -18,6 +18,14 @@ export function stageMarks(team: RoleId[], t: Ticket | undefined): { stage: stri
 }
 
 export function PipelineBar({ team, ticket }: { team: RoleId[]; ticket: Ticket | undefined }) {
+  // an answered Ask never went through the pipeline: one step only
+  if (ticket?.answered) {
+    return (
+      <ol className="po-pipe" aria-label="Pipeline">
+        <li className="po-pipe-step done answer"><span>Answer</span> <span className="po-pipe-glyph" aria-hidden>✓</span></li>
+      </ol>
+    );
+  }
   const marks = stageMarks(team, ticket);
   const waiting = ticket?.status === 'waiting';
   return (

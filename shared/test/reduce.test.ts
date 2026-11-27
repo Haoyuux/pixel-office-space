@@ -22,6 +22,13 @@ describe('applyTicketEvent', () => {
     expect(t).toMatchObject({ status: 'failed', reason: 'interrupted' });
   });
 
+  it('ticket.answered marks the ticket answered (mode kept from creation)', () => {
+    let t = applyTicketEvent(undefined, { ...base, type: 'ticket.created', ticket: { ...t0, mode: 'ask' } })!;
+    t = applyTicketEvent(t, { ...base, type: 'ticket.answered' })!;
+    t = applyTicketEvent(t, { ...base, type: 'ticket.done' })!;
+    expect(t).toMatchObject({ mode: 'ask', answered: true, status: 'done', stage: 'done' });
+  });
+
   it('does not mutate its input', () => {
     const t = applyTicketEvent(undefined, { ...base, type: 'ticket.created', ticket: t0 })!;
     applyTicketEvent(t, { ...base, type: 'ticket.stage', stage: 'plan', roles: ['pm'] });
