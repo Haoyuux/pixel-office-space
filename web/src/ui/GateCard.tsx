@@ -28,7 +28,9 @@ export function GateCard({ ticketId, item, onShow }: { ticketId: string; item: F
   const [note, setNote] = useState('');
   const [sent, setSent] = useState<GateDecision | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const open = item.status === 'open';
+  // a ticket that ended (failed/cancelled/done) can't take a decision any more
+  const ended = !!ticket && (ticket.status === 'failed' || ticket.status === 'cancelled' || ticket.status === 'done');
+  const open = item.status === 'open' && !ended;
 
   const decide = async (decision: GateDecision) => {
     if (!open || sent) return;
@@ -36,6 +38,15 @@ export function GateCard({ ticketId, item, onShow }: { ticketId: string; item: F
     const r = await api('POST', paths.gate(ticketId, gate), note.trim() ? { decision, note: note.trim() } : { decision });
     if (!r.ok) { setSent(null); setError(r.error); }
   };
+
+  if (!open && item.status === 'open') {
+    return (
+      <div className="po-gate closed">
+        <span className="po-gate-kind">{gate === 'plan' ? 'plan' : gate === 'final' ? 'final changes' : 'stuck'}</span>
+        <span>the ticket ended before a decision</span>
+      </div>
+    );
+  }
 
   if (!open) {
     const decision = item.status as GateDecision;

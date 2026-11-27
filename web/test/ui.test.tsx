@@ -123,6 +123,13 @@ describe('GateCard', () => {
     expect(posts()).toHaveLength(1);
   });
 
+  it('a gate of a ticket that already ended renders closed, without buttons', () => {
+    useOffice.setState(s => ({ tickets: { ...s.tickets, t: { id: 't', projectId: 'p', title: 'x', text: 'x', status: 'failed', reason: 'interrupted', stage: 'plan', agentStates: {}, createdAt: '' } } }));
+    render(<GateCard ticketId="t" item={{ ...gate(), text: 'plan' }} />);
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
+    expect(screen.getByText(/ended before a decision/)).toBeTruthy();
+  });
+
   it('stuck from QA says "Accept & continue" (not "Accept & test")', () => {
     render(<GateCard ticketId="t" item={{ ...gate(), detail: '{"from":"test","bounces":3}' }} />);
     expect(screen.getByRole('button', { name: 'Accept & continue' })).toBeTruthy();
