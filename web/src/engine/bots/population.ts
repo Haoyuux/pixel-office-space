@@ -7,7 +7,8 @@ import type { BuildingLayout, Spot } from '../layout/types';
 import { WalkGrid } from '../walkgrid';
 import type { OfficeScene } from '../render/scene';
 import { Bot } from './bot';
-import { OfficeLife, diffRoster, type Intent } from './officeLife';
+import { OfficeLife, diffRoster, type ActivityId, type Intent } from './officeLife';
+import { isEmote } from './mood';
 import { SimClock, MAX_DT } from './simClock';
 
 const LIFE_TICK_MS = 250;
@@ -70,7 +71,7 @@ export class Population {
       bot.attach(this.scene);
       this.bots.set(r.id, bot);
       this.keys.set(r.id, r.key);
-      this.life!.register(bot);
+      this.life!.register({ id: bot.id, personality: bot.personality });
       if (this.released.has(r.id)) this.life!.release(r.id);
       this.hooks.onAdded?.(bot, seat);
     });
@@ -110,6 +111,11 @@ export class Population {
     this.life?.resume(botId);
   }
 
+  /** The bot's next idle activity should be one of these (the director: a tired bot wants coffee or the lounge). */
+  urge(botId: string, activities: ActivityId[]): void {
+    this.life?.urge(botId, activities);
+  }
+
   update(dt: number): void {
     dt = this.clock.step(dt);
     for (const b of this.bots.values()) b.update(dt);
@@ -136,7 +142,8 @@ export class Population {
   private start(intent: Intent): void {
     const bot = this.bots.get(intent.botId);
     if (!bot) return;
-    bot.bubble(null);
+    // a mood emote outlives the switch to the next activity (it fades by itself)
+    if (!isEmote(bot.bubbleShown)) bot.bubble(null);
     const plan: Plan = { intent, step: 0, holding: false, left: 0, arrivedAll: false };
     this.plans.set(bot.id, plan);
     this.walk(bot, plan);

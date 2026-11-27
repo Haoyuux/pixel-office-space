@@ -44,6 +44,23 @@ export interface OfficeState {
   select(projectId: string | null): void;
   setRoleFilter(f: RoleId | 'all'): void;
   setNight(on: boolean): void;
+  /** Notification chime on/off (🔔 toolbar button), remembered in this browser. */
+  soundOn: boolean;
+  setSound(on: boolean): void;
+  /** The conversation the open drawer shows (null = no drawer, or the welcome view). */
+  openConv: { projectId: string; rootId: string } | null;
+  setOpenConv(c: { projectId: string; rootId: string } | null): void;
+  /** A request to open a conversation from outside the drawer (notification, summary board); `n` makes repeats distinct. */
+  openRequest: { projectId: string; rootId: string; n: number } | null;
+  /** Selects the project and opens that conversation in its drawer. */
+  openConversation(projectId: string, rootId: string): void;
+  /** Notified items the owner has not looked at yet (tab title count), oldest first. */
+  unseen: { key: string; projectId: string; rootId: string }[];
+  addUnseen(u: { key: string; projectId: string; rootId: string }): void;
+  /** The owner viewed that conversation: its items are seen. */
+  clearUnseen(rootId: string): void;
+  /** Bumped on every `memory.updated` (the Memory tab refetches). */
+  memoryRev: Record<string, number>;
 }
 
 /** Every applied ticket event, by ticket, ordered by seq (the source the feed is rebuilt from on history replay). */
@@ -111,6 +128,8 @@ const initial = () => ({
   raw: {} as Record<string, string[]>, lastSeq: {} as Record<string, number>, diffs: {} as Record<string, DiffFile[]>,
   conversations: {} as Record<string, ConversationMeta>,
   selectedProjectId: null as string | null, roleFilter: 'all' as RoleId | 'all', night: initialNight(), synced: false,
+  soundOn: initialSound(), openConv: null as OfficeState['openConv'], openRequest: null as OfficeState['openRequest'],
+  unseen: [] as OfficeState['unseen'], memoryRev: {} as Record<string, number>,
 });
 
 const NIGHT_KEY = 'pixel-office.night';
@@ -119,6 +138,13 @@ type NightStorage = Pick<Storage, 'getItem'>;
 export function initialNight(storage: NightStorage | undefined = typeof localStorage === 'undefined' ? undefined : localStorage): boolean {
   try { return storage?.getItem(NIGHT_KEY) !== '0'; } catch { return true; }
 }
+
+const SOUND_KEY = 'pixel-office.sound';
+/** Sound on by default; the owner's last choice is remembered in this browser. */
+export function initialSound(storage: NightStorage | undefined = typeof localStorage === 'undefined' ? undefined : localStorage): boolean {
+  try { return storage?.getItem(SOUND_KEY) !== '0'; } catch { return true; }
+}
+let openN = 0;
 
 export const useOffice = create<OfficeState>()((set, get) => ({
   ...initial(),
@@ -140,6 +166,7 @@ export const useOffice = create<OfficeState>()((set, get) => ({
       return true;
     }
     if (e.type === 'conversation.updated') { set({ conversations: { ...s.conversations, [e.rootId]: e.meta } }); return true; }
+    if (e.type === 'memory.updated') { set({ memoryRev: { ...s.memoryRev, [e.projectId]: (s.memoryRev[e.projectId] ?? 0) + 1 } }); return true; }
     if (!isTicketEvent(e)) return false;
     const id = e.ticketId;
     if (e.seq <= (s.lastSeq[id] ?? 0)) return false;
@@ -190,6 +217,20 @@ export const useOffice = create<OfficeState>()((set, get) => ({
     try { localStorage.setItem(NIGHT_KEY, on ? '1' : '0'); } catch { /* storage unavailable: still toggle */ }
     set({ night: on });
   },
+  setSound(on) {
+    try { localStorage.setItem(SOUND_KEY, on ? '1' : '0'); } catch { /* storage unavailable: still toggle */ }
+    set({ soundOn: on });
+  },
+  setOpenConv(c) {
+    const cur = get().openConv;
+    if (c?.projectId === cur?.projectId && c?.rootId === cur?.rootId) return;
+    set({ openConv: c });
+  },
+  openConversation(projectId, rootId) {
+    set({ selectedProjectId: projectId, roleFilter: 'all', openRequest: { projectId, rootId, n: ++openN } });
+  },
+  addUnseen(u) { set(s => (s.unseen.some(x => x.key === u.key) ? s : { unseen: [...s.unseen, u] })); },
+  clearUnseen(rootId) { set(s => (s.unseen.some(x => x.rootId === rootId) ? { unseen: s.unseen.filter(x => x.rootId !== rootId) } : s)); },
 }));
 
 /** Back to an empty office (tests). */

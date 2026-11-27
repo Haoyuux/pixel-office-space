@@ -3,12 +3,16 @@ import type { Clip } from '../assets';
 import type { Dir } from '../iso';
 import type { BuildingLayout, Spot } from '../layout/types';
 import type { BubbleKind } from './bot';
+import type { ActivityId } from './officeLife';
+import { Moods, MOOD_MS, type Emote, type Mood } from './mood';
 
 /**
  * The ticket director (spec §7.3): turns server events into bot behaviour. It takes bots over from office life
  * while they work on a ticket (life.release), walks them to the whiteboard / their seat / a coder's desk, shows the
  * status bubbles and monitors, and hands them back (life.resume) when the ticket ends. It also animates team changes
  * (walk in from the room door, walk out to the hallway end) through the Population hooks onAdded / onRemoved.
+ * Moods (M3 §4): happy after its ticket is done, grumpy after a bounce on its work, tired after a long stint; shown as
+ * emotes once the bot is free (never over a work bubble) and on its hover label.
  */
 
 export interface DirectorBot {
@@ -24,6 +28,10 @@ export interface DirectorBot {
   play(clip: Clip): void;
   face(dir: Dir): void;
   bubble(kind: BubbleKind | null): void;
+  /** A short mood emote; the bot shows it only when no other bubble is up. */
+  emote?(kind: Emote): void;
+  /** Hover label face. */
+  setMood?(mood: Mood): void;
 }
 
 export interface DirectorScene {
@@ -33,7 +41,12 @@ export interface DirectorScene {
   setTrophies(projectId: string, n: number): void;
 }
 
-export interface DirectorLife { release(botId: string): void; resume(botId: string): void }
+export interface DirectorLife {
+  release(botId: string): void;
+  resume(botId: string): void;
+  /** The bot's next idle activity should be one of these (a tired bot: coffee or lounge). */
+  urge?(botId: string, activities: ActivityId[]): void;
+}
 export interface DirectorBots { get(botId: string): DirectorBot | undefined }
 export interface DirectorGrid { walkable(mx: number, my: number): boolean }
 
@@ -42,6 +55,8 @@ export interface DirectorOptions {
   after?: (ms: number, fn: () => void) => void;
   /** Done tickets known for a project (trophies); defaults to counting the ticket.done events seen. */
   doneCount?: (projectId: string) => number;
+  /** Clock for moods (tests inject the fake clock). */
+  now?: () => number;
 }
 
 /** How long the PM stands at the whiteboard before going to its seat. */
@@ -57,6 +72,10 @@ export const FAIL_MS = 2500;
 /** A bot walking out is despawned after this at the latest. */
 const LEAVE_TIMEOUT_MS = 60000;
 export const MAX_TROPHIES = 5;
+/** 😄 after a done ticket: these long after the hand-back to office life (a few times over the next minutes). */
+export const HAPPY_EMOTES_MS = [1200, 90_000, 200_000];
+/** A tired bot heads for one of these first. */
+export const TIRED_URGE: ActivityId[] = ['coffee', 'lounge'];
 
 const WORKING: AgentState[] = ['planning', 'designing', 'coding', 'reviewing', 'testing', 'documenting'];
 /** States in which a role is on duty for the ticket (summoned and not yet released). */
@@ -85,6 +104,9 @@ export class Director {
   private after: (ms: number, fn: () => void) => void;
   private dead = false;
   private timers = new Set<ReturnType<typeof setTimeout>>();
+  private moods: Moods;
+  /** An emote waiting for the bot to be free (grumpy after a bounce: shown once its fix is in, or at the hand-back). */
+  private pendingEmote = new Map<string, Emote>();
 
   constructor(private scene: DirectorScene, private life: DirectorLife, private bots: DirectorBots,
     private grid: DirectorGrid | null = null, private opts: DirectorOptions = {}) {
@@ -93,7 +115,11 @@ export class Director {
       this.timers.add(h);
     });
     this.after = (ms, fn) => raw(ms, () => { if (!this.dead) fn(); });
+    this.moods = new Moods(opts.now ?? (() => Date.now()));
   }
+
+  /** A bot's mood now (hover label). */
+  moodOf(botId: string): Mood { return this.moods.mood(botId); }
 
   /** Teardown: pending timers no longer act. */
   destroy(): void {
@@ -119,6 +145,8 @@ export class Director {
       }
       case 'ticket.stage': {
         const t = this.tickets.get(e.ticketId) ?? this.placeholder(e.ticketId, e.projectId);
+        // back to build from review / test: a bounce on the builders' work
+        if (e.stage === 'build' && (t.stage === 'review' || t.stage === 'test')) for (const r of e.roles) this.grumpy(botId(e.projectId, r));
         t.stage = e.stage;
         if (e.stage === 'build') t.buildRoles = e.roles;
         this.active.set(e.projectId, e.ticketId);
@@ -145,6 +173,7 @@ export class Director {
 
   /** Population hook: a bot was created (initial build, a new team member, or a bot that is on duty). */
   onAdded(bot: DirectorBot, seat: Spot): void {
+    bot.setMood?.(this.moods.mood(bot.id));
     if (this.duty.has(bot.id)) {
       // the page opened (or the layout rebuilt) mid-ticket: the bot is at work at its desk
       this.life.release(bot.id);
@@ -174,6 +203,7 @@ export class Director {
   /** Population hook: a bot is being taken out. A removed team member walks to the hallway end first. */
   onRemoved(bot: DirectorBot): Promise<void> | void {
     this.arriving.delete(bot.id);
+    this.pendingEmote.delete(bot.id);
     if (this.duty.delete(bot.id)) this.off(bot.id);
     const tok = this.move(bot.id);
     const end = this.scene.layout?.hallEnd;
@@ -243,6 +273,7 @@ export class Director {
     const t = this.tickets.get(ticketId) ?? this.placeholder(ticketId, projectId);
     const had = this.duty.get(id);
     const mine = had?.ticketId === ticketId ? had : undefined;
+    if (mine || WORKING.includes(s)) this.moods.working(id, WORKING.includes(s));
     if (s === 'idle') {
       // not working any more, but still on duty until the ticket ends (end() hands it back to office life)
       if (!mine || mine.state === 'done' || mine.state === 'failed') return;
@@ -285,6 +316,9 @@ export class Director {
     const gate = this.tickets.get(d.ticketId)?.gate;
     const owner = d.state !== 'idle' && (gate === 'final' || ((gate === 'plan' || gate === 'stuck') && role === 'pm'));
     bot.bubble(owner ? '!' : null);
+    // free for a moment (its part is done, the others work): a pending emote shows now
+    const pending = this.pendingEmote.get(id);
+    if (!owner && pending && (d.state === 'idle' || d.state === 'waiting')) { this.pendingEmote.delete(id); bot.emote?.(pending); }
   }
 
   private end(projectId: string, ticketId: string, how: 'done' | 'failed'): void {
@@ -299,12 +333,45 @@ export class Director {
       const bot = this.bots.get(id);
       if (how === 'failed') bot?.bubble('✗');
       else if (bot && d.state !== 'done') this.wave(bot);
+      this.moods.working(id, false);
+      const tired = this.moods.endStint(id);
+      if (how === 'done') this.moods.set(id, 'happy');
+      else if (tired) this.moods.set(id, 'tired');
       this.after(how === 'done' ? DONE_MS : FAIL_MS, () => {
         if (this.duty.has(id)) return; // summoned again (next ticket in the queue)
         if (how === 'failed') this.bots.get(id)?.bubble(null);
         this.life.resume(id);
+        this.handedBack(id, tired);
       });
     }
+  }
+
+  /** Back in office life after a ticket: mood face, the tired urge and the emotes. */
+  private handedBack(id: string, tired: boolean): void {
+    const bot = this.bots.get(id);
+    const mood = this.moods.mood(id);
+    bot?.setMood?.(mood);
+    if (tired) { this.life.urge?.(id, TIRED_URGE); bot?.emote?.('😮‍💨'); }
+    const pending = this.pendingEmote.get(id);
+    this.pendingEmote.delete(id);
+    if (mood === 'happy') {
+      for (const ms of HAPPY_EMOTES_MS) this.after(ms + (tired ? 3000 : 0), () => {
+        if (!this.duty.has(id) && this.moods.mood(id) === 'happy') this.bots.get(id)?.emote?.('😄');
+      });
+    } else if (pending && !tired) bot?.emote?.(pending);
+    this.decay(id);
+  }
+
+  private grumpy(id: string): void {
+    this.moods.set(id, 'grumpy');
+    this.bots.get(id)?.setMood?.('grumpy');
+    this.pendingEmote.set(id, '😤');
+    this.decay(id);
+  }
+
+  /** The hover face goes back to neutral when the mood wears off. */
+  private decay(id: string): void {
+    this.after(MOOD_MS + 50, () => this.bots.get(id)?.setMood?.(this.moods.mood(id)));
   }
 
   private off(id: string): void {

@@ -10,6 +10,8 @@ import { AddProjectDialog } from './ui/AddProjectDialog';
 import { Drawer, DRAWER_WIDTH } from './ui/Drawer';
 import { CorkTooltip } from './ui/CorkTooltip';
 import { useRevealSelected } from './ui/useRevealSelected';
+import { startNotifications } from './ui/notifications';
+import { SummaryPanel, checkDailySummary } from './ui/Summary';
 import './ui/theme.css';
 
 export function App() {
@@ -35,6 +37,7 @@ function DemoOffice({ n }: { n: number }) {
 /** Projects and tickets from the server: snapshot + events over the socket, driven by the ticket director. */
 function LiveOffice() {
   useEffect(() => startOffice(), []);
+  useEffect(() => startNotifications(), []);
   // dev-only hook so tools/e2e.mjs can select a room / read the feed without pixel-hunting
   if (import.meta.env.DEV) (window as unknown as { __store?: typeof useOffice }).__store = useOffice;
   const synced = useOffice(s => s.synced);
@@ -44,6 +47,11 @@ function LiveOffice() {
   const scene = useRef<OfficeScene | null>(null);
   const [adding, setAdding] = useState(false);
   const [cork, setCork] = useState<{ x: number; y: number } | null>(null);
+  /** The summary board: open with this `since` (undefined = the panel's default range). */
+  const [summary, setSummary] = useState<{ since?: string } | null>(null);
+  // the day's first visit: the summary opens by itself when anything happened since the last one
+  useEffect(() => { void checkDailySummary(since => setSummary({ since })); }, []);
+  const openSummary = useCallback(() => { setCork(null); setSummary({}); }, []);
 
   const onRoomClick = useCallback((id: string | null) => {
     const s = useOffice.getState();
@@ -64,12 +72,13 @@ function LiveOffice() {
   const drawer = !!selected && !!map[selected];
   return (
     <div className="po-app">
-      <OfficeCanvas projects={projects} live onRoomClick={onRoomClick} onBotClick={onBotClick} onCorkHover={setCork}
+      <OfficeCanvas projects={projects} live onRoomClick={onRoomClick} onBotClick={onBotClick} onCorkHover={setCork} onCorkClick={openSummary}
         onReady={s => { scene.current = s; }} />
-      <Toolbar onAdd={() => setAdding(true)} onFit={() => fitBuilding(scene.current, drawer)} />
+      <Toolbar onAdd={() => setAdding(true)} onFit={() => fitBuilding(scene.current, drawer)} onSummary={openSummary} notify />
       {drawer && <Drawer key={selected} projectId={selected!} />}
       {cork && <CorkTooltip x={cork.x} y={cork.y} />}
       {adding && <AddProjectDialog onClose={() => setAdding(false)} />}
+      {summary && <SummaryPanel since={summary.since} onClose={() => setSummary(null)} />}
     </div>
   );
 }
