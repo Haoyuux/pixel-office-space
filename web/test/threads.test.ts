@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { Ticket } from '@office/shared';
-import { rootOf, threadOf, threadsOf, threadTitle } from '../src/ui/threads';
+import { rootOf, threadOf, threadsOf } from '../src/ui/threads';
 
 const t = (id: string, createdAt: string, o: Partial<Ticket> = {}): Ticket =>
   ({ id, projectId: 'p', title: id, text: id, status: 'done', stage: 'done', agentStates: {}, createdAt, ...o });
@@ -32,11 +32,10 @@ describe('threads', () => {
     expect(threadOf('nope', all)).toEqual([]);
   });
 
-  it('threadsOf: one entry per root, latest activity first; title is the root\'s first line', () => {
+  it('threadsOf: one entry per root, latest activity first',() => {
     const th = threadsOf('p', { ...all, q: t('q', '2026-11-26T11:00:00Z', { projectId: 'other' }) });
     expect(th.map(z => z.root.id)).toEqual(['a', 'x']);
     expect(th[0].latest.id).toBe('c');
     expect(th[0].tickets).toHaveLength(3);
-    expect(threadTitle(th[0].root)).toBe('What is login?');
   });
 });

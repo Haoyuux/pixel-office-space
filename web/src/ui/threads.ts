@@ -42,5 +42,3 @@ export function threadsOf(projectId: string, tickets: Tickets): Thread[] {
   }).sort((a, b) => byOldest(b.latest, a.latest));
 }
 
-/** A thread's title: the root's first line (its title when the text is empty). */
-export const threadTitle = (root: Ticket) => root.text.trim().split('\n')[0].trim() || root.title;

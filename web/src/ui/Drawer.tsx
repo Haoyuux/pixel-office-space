@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { roleDef, type Project, type RoleId, type Ticket, type TicketMode } from '@office/shared';
 import { useOffice } from '../state/store';
 import { api, paths } from './api';
-import { accentCss, kindIcon, kindStatus, kindTitle, ticketKind, canResume, isActive, isFinished, relativeDate, roleEmoji, roleShort, STATUS_ICON } from './format';
+import { accentCss, kindIcon, kindStatus, kindTitle, ticketKind, canResume, isActive, relativeDate, roleEmoji, roleShort, STATUS_ICON } from './format';
 import { ClaudeBanner, useClaudeStatus } from './claudeStatus';
 import { COMMANDS, MODEL_DESC, isModel, parseCommand, suggest, type CommandName } from './slash';
 import { Feed } from './Feed';
@@ -12,6 +12,8 @@ import { GitBanner } from './GitBanner';
 import { PlanView } from './PlanView';
 import { PipelineBar } from './PipelineBar';
 import { TeamDialog } from './TeamDialog';
+import { rootOf, threadOf, threadsOf } from './threads';
+import { loadHistory } from '../state/socket';
 
 export const DRAWER_WIDTH = 560;
 type Tab = 'feed' | 'raw' | 'changes' | 'plan';
@@ -25,13 +27,21 @@ export function Drawer({ projectId }: { projectId: string }) {
   const project = useOffice(s => s.projects[projectId]);
   const all = useOffice(s => s.tickets);
   const roleFilter = useOffice(s => s.roleFilter);
+  const diffs = useOffice(s => s.diffs);
   const tickets = useMemo(() => Object.values(all).filter(t => t.projectId === projectId).sort(byNewest), [all, projectId]);
+  const threads = useMemo(() => threadsOf(projectId, all), [all, projectId]);
   const active = tickets.find(isActive);
   const queued = tickets.filter(t => t.status === 'queued');
+  /** A ticket of the conversation the owner opened (any ticket of the thread: its root is looked up). */
   const [chosen, setChosen] = useState<string | null>(null);
   /** /new or /clear: nothing is shown and the next message starts a fresh conversation. */
   const [fresh, setFresh] = useState(false);
-  const shown = fresh ? undefined : tickets.find(t => t.id === chosen) ?? active ?? tickets[0];
+  // the open conversation: the one picked, else the one running; nothing → welcome + a fresh composer
+  const openRoot = fresh ? undefined : (chosen && all[chosen] ? rootOf(chosen, all) : undefined) ?? (active ? rootOf(active.id, all) : undefined);
+  const thread = useMemo(() => (openRoot ? threadOf(openRoot, all) : []), [openRoot, all]);
+  /** The latest ticket of the conversation: header, pipeline, raw log, and what the composer continues. */
+  const shown = thread[thread.length - 1];
+  const latestWith = (has: (t: Ticket) => boolean) => [...thread].reverse().find(has) ?? shown;
   const [tab, setTab] = useState<Tab>('feed');
   const [team, setTeam] = useState(false);
   const [past, setPast] = useState(false);
@@ -42,9 +52,6 @@ export function Drawer({ projectId }: { projectId: string }) {
   const [card, setCard] = useState<null | 'status' | 'help'>(null);
   /** A command remounts the composer (new key): give the new box the focus. */
   const refocus = useRef(false);
-  // a finished ticket the owner picked from the list: the composer continues it
-  const picked = fresh ? undefined : tickets.find(t => t.id === chosen);
-  const continueFrom = picked && isFinished(picked) ? picked : undefined;
   const [menu, setMenu] = useState<null | 'open' | 'delete' | 'cancel'>(null);
   const [menuError, setMenuError] = useState<string | null>(null);
   /** A menu request (cancel / delete) is in flight: further clicks are ignored. */
@@ -59,6 +66,13 @@ export function Drawer({ projectId }: { projectId: string }) {
   }, [team0, roleFilter]);
 
   useEffect(() => { if (pastFocus) pastBox.current?.focus(); }, [pastFocus]);
+
+  // opening a conversation: fetch the history of any of its tickets the client has no feed for yet
+  useEffect(() => {
+    if (!openRoot) return;
+    const feed = useOffice.getState().feed;
+    if (threadOf(openRoot, useOffice.getState().tickets).some(t => !feed[t.id])) void loadHistory(projectId);
+  }, [openRoot, projectId]);
 
   useEffect(() => {
     // Escape closes the menu, then the drawer; never while a dialog is open (it handles its own Escape) or while typing
@@ -88,17 +102,20 @@ export function Drawer({ projectId }: { projectId: string }) {
   const remove = () => once(() => api('DELETE', paths.project(project.id)), close);
   const target = active;
   const cancelTicket = () => { if (target) void once(() => api('POST', paths.cancel(target.id)), () => setMenu(null)); };
-  const pastShown = pastFilter.trim() ? tickets.filter(t => kindTitle(t).toLowerCase().includes(pastFilter.trim().toLowerCase())) : tickets;
+  const q = pastFilter.trim().toLowerCase();
+  const pastShown = q ? threads.filter(th => th.tickets.some(t => kindTitle(t).toLowerCase().includes(q))) : threads;
+  /** Back to the welcome view: the next message starts a new conversation (nothing is lost). */
+  const startFresh = () => { refocus.current = true; setChosen(null); setFresh(true); setPast(false); };
 
   /** Drawer-side slash commands; a returned string is shown under the composer as a hint. */
   const command = async (name: CommandName, arg: string): Promise<string | void> => {
     switch (name) {
       case 'resume':
-        if (!tickets.length) return 'No past conversations yet';
+        if (!threads.length) return 'No past conversations yet';
         setPastFilter(arg); setPast(true); setPastFocus(n => n + 1);
         return;
       case 'new': case 'clear':
-        refocus.current = true; setChosen(null); setFresh(true); setPast(false);
+        startFresh();
         return;
       case 'cancel':
         if (!active) return 'Nothing is running';
@@ -137,6 +154,7 @@ export function Drawer({ projectId }: { projectId: string }) {
             <span className="po-badge po-model" title="Claude model for this project's runs (change it with /model)">{project.model}</span>
           )}
           <span className={`po-badge ${mode}`} title="Who works this project's tickets (change it in Team)">{mode === 'claude' ? 'Claude Code' : 'Simulated'}</span>
+          <button type="button" className="po-hbtn" aria-label="New conversation" title="New conversation (/new)" onClick={startFresh}>＋ New</button>
           <button type="button" className="po-hbtn" onClick={() => setTeam(true)} title="Edit team">Team · {project.team.length}</button>
           <button type="button" className={`po-hbtn${menu ? ' on' : ''}`} aria-label="Project menu" aria-expanded={!!menu} onClick={() => { setMenu(m => (m ? null : 'open')); setMenuError(null); }}>⋯</button>
           <button type="button" className="po-hbtn" aria-label="Close console" onClick={close}>✕</button>
@@ -173,9 +191,9 @@ export function Drawer({ projectId }: { projectId: string }) {
             : <span className="po-dim po-grow">no conversations yet — ask below</span>}
           {shown && <span className={`po-chip ${shown.status}`}>{shown.status === 'waiting' ? '⏸ waiting for you' : kindStatus(shown)}</span>}
           {queued.length > 0 && <span className="po-chip queued" title={queued.map(t => t.title).join('\n')}>+{queued.length} queued</span>}
-          {tickets.length > 0 && (
+          {threads.length > 0 && (
             <button type="button" className={`po-hbtn${past ? ' on' : ''}`} aria-expanded={past} onClick={() => { setPast(o => !o); setPastFilter(''); }}>
-              Past conversations · {tickets.length}
+              Past conversations · {threads.length}
             </button>
           )}
         </div>
@@ -185,17 +203,19 @@ export function Drawer({ projectId }: { projectId: string }) {
             onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); setPast(false); } }} />
           <ul className="po-past" aria-label="Past conversations">
             {pastShown.length === 0 && <li className="po-dim po-past-none">no conversation matches</li>}
-            {pastShown.map(t => {
-              const roles = Object.keys(t.agentStates) as RoleId[];
+            {pastShown.map(({ root, latest, tickets: ts }) => {
+              const roles = [...new Set(ts.flatMap(t => Object.keys(t.agentStates) as RoleId[]))];
+              const turns = ts.reduce((n, t) => n + (t.usage?.turns ?? 0), 0);
               return (
-                <li key={t.id}>
-                  <button type="button" className={`po-past-item${t.id === shown?.id ? ' on' : ''}`} onClick={() => { setChosen(t.id); setFresh(false); setPast(false); }}>
-                    <span className="po-past-title">{kindIcon(t)} {kindTitle(t)}</span>
+                <li key={root.id}>
+                  <button type="button" className={`po-past-item${root.id === openRoot ? ' on' : ''}`} onClick={() => { setChosen(root.id); setFresh(false); setPast(false); }}>
+                    <span className="po-past-title">{kindIcon(latest)} {kindTitle(root)}</span>
                     <span className="po-past-meta">
-                      <span className="po-dim">{relativeDate(t.createdAt)}</span>
-                      <span className={`po-chip ${t.status}`}>{kindStatus(t)}</span>
+                      <span className="po-dim">{relativeDate(latest.createdAt)}</span>
+                      <span className={`po-chip ${latest.status}`}>{kindStatus(latest)}</span>
+                      <span className="po-dim" title="Messages in this conversation">{ts.length} message{ts.length === 1 ? '' : 's'}</span>
                       {roles.length > 0 && <span title={roles.map(roleShort).join(', ')}>{roles.map(roleEmoji).join('')}</span>}
-                      {t.usage && <span className="po-dim" title="Uses your Claude plan — not charged">{t.usage.turns} turns</span>}
+                      {turns > 0 && <span className="po-dim" title="Uses your Claude plan — not charged">{turns} turns</span>}
                     </span>
                   </button>
                 </li>
@@ -232,14 +252,17 @@ export function Drawer({ projectId }: { projectId: string }) {
             <div className="po-welcome-title">{project.name} is ready.</div>
             <div>Ask a question, or describe a change — the PM answers, or plans it for your approval.</div>
           </div></div>
-          : tab === 'feed' ? <Feed ticketId={shown.id} onShow={setTab} />
+          : tab === 'feed' ? <Feed ticketIds={thread.map(t => t.id)} onShow={setTab} />
           : tab === 'raw' ? <RawLog ticketId={shown.id} />
-          : tab === 'changes' ? <Changes ticketId={shown.id} repos={project.repos?.map(r => r.name)} />
-          : <PlanView ticket={shown} />}
+          : tab === 'changes' ? <Changes ticketId={latestWith(t => !!diffs[t.id]?.length).id} repos={project.repos?.map(r => r.name)} />
+          : <PlanView ticket={latestWith(t => !!t.plan)} />}
       </div>
 
-      <Composer key={continueFrom?.id ?? ''} projectId={project.id} active={active} continueFrom={continueFrom} fresh={fresh} refocus={refocus}
-        onCreated={() => { setChosen(null); setFresh(false); }} onCommand={command} />
+      <Composer key={openRoot ?? ''} projectId={project.id} active={active} latest={shown} refocus={refocus}
+        onCreated={(created, followUp) => {
+          // a follow-up stays in this conversation; a new conversation opens once its ticket arrives
+          refocus.current = true; setFresh(false); setChosen(followUp ? openRoot ?? null : created?.id ?? null);
+        }} onCommand={command} />
       {team && <TeamDialog project={project} onClose={() => setTeam(false)} />}
     </aside>
   );
@@ -316,11 +339,16 @@ function ModeSwitch({ mode, onChange }: { mode: TicketMode; onChange: (m: Ticket
   );
 }
 
-/** Input box: no running ticket → new ticket (or a follow-up of the picked finished ticket); running → message to the team, or a queued ticket with the toggle on. */
-function Composer({ projectId, active, continueFrom, fresh, refocus, onCreated, onCommand }: {
-  projectId: string; active: Ticket | undefined; continueFrom?: Ticket; onCreated: () => void;
-  /** /new: the next message is a new ticket even while one runs. */
-  fresh?: boolean;
+/**
+ * Input box. A conversation is open (`latest` = its newest ticket): running / waiting → message to the team; otherwise
+ * a follow-up ticket of it. Nothing open → a new conversation (queued while another ticket runs). The toggle forces a new one.
+ */
+function Composer({ projectId, active, latest, refocus, onCreated, onCommand }: {
+  projectId: string;
+  /** The project's running ticket (any conversation). */
+  active: Ticket | undefined;
+  latest: Ticket | undefined;
+  onCreated: (created: Ticket | undefined, followUp: boolean) => void;
   refocus?: { current: boolean };
   onCommand?: (name: CommandName, arg: string) => Promise<string | void>;
 }) {
@@ -335,8 +363,9 @@ function Composer({ projectId, active, continueFrom, fresh, refocus, onCreated, 
   /** Esc closed the popup; it opens again when the text changes. */
   const [dismissed, setDismissed] = useState(false);
   const box = useRef<HTMLTextAreaElement>(null);
-  const continuing = !!continueFrom && !asTicket;
-  const creating = !active || asTicket || continuing || !!fresh;
+  const toTeam = !!latest && !asTicket && isActive(latest);
+  const continuing = !!latest && !asTicket && !toTeam;
+  const creating = !toTeam;
   const rowsShown = dismissed ? [] : suggest(text);
   const sel = rowsShown.length ? Math.min(pick, rowsShown.length - 1) : 0;
 
@@ -362,12 +391,15 @@ function Composer({ projectId, active, continueFrom, fresh, refocus, onCreated, 
     if (t.startsWith('/')) { void runCommand(t); return; }
     if (!t || busy) return;
     setBusy(true); setError(null);
-    const r = continuing ? await api('POST', paths.tickets(projectId), { text: t, parentTicketId: continueFrom!.id, mode })
-      : creating ? await api('POST', paths.tickets(projectId), { text: t, mode }) : await api('POST', paths.messages(active!.id), { text: t });
+    const r = toTeam ? await api<Ticket>('POST', paths.messages(latest!.id), { text: t })
+      : await api<Ticket>('POST', paths.tickets(projectId), continuing ? { text: t, parentTicketId: latest!.id, mode } : { text: t, mode });
     setBusy(false);
     if (!r.ok) { setError(r.error); return; }
     setText('');
-    if (creating) { setAsTicket(false); onCreated(); }
+    if (creating) {
+      const created = r.data && typeof r.data === 'object' && typeof r.data.id === 'string' ? r.data : undefined;
+      setAsTicket(false); onCreated(created, continuing);
+    }
     box.current?.focus();
   };
   const key = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -382,8 +414,8 @@ function Composer({ projectId, active, continueFrom, fresh, refocus, onCreated, 
     }
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); }
   };
-  const hint = continuing ? 'Continue this conversation…' : !active ? (mode === 'ask' ? 'Ask a question…' : mode === 'ticket' ? 'Describe a change…' : 'Ask anything, or describe a change…')
-    : asTicket || fresh ? 'queue a new ticket…' : 'message the team…';
+  const hint = continuing ? 'Continue this conversation…' : toTeam ? 'message the team…' : active ? 'queue a new ticket…'
+    : mode === 'ask' ? 'Ask a question…' : mode === 'ticket' ? 'Describe a change…' : 'Ask anything, or describe a change…';
   const rows = Math.min(6, Math.max(1, text.split('\n').length));
   const unknown = text.startsWith('/') && !rowsShown.length && !dismissed && !parseCommand(text)?.known && !/\s/.test(text.trim());
 
@@ -410,13 +442,13 @@ function Composer({ projectId, active, continueFrom, fresh, refocus, onCreated, 
         </button>
       </div>
       <div className="po-composer-foot">
-        {active || continueFrom ? (
+        {active || latest ? (
           <label className="po-toggle">
             <input type="checkbox" checked={asTicket} onChange={e => setAsTicket(e.target.checked)} />
             <span>New ticket instead</span>
           </label>
         ) : <span className="po-dim">Auto decides: questions get an answer, changes become a ticket</span>}
-        {continuing && <span className="po-dim po-follow-of">follow-up of “{continueFrom!.title}”</span>}
+        {continuing && <span className="po-dim po-follow-of">follow-up of “{latest!.title}”</span>}
         <span className="po-grow" />
         {creating && <ModeSwitch mode={mode} onChange={setMode} />}
         <span className="po-dim">⏎ send · ⇧⏎ newline</span>
