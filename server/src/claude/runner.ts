@@ -12,10 +12,17 @@ const STDERR_TAIL = 2000;
 
 export type RunnerEvent =
   | { kind: 'init'; sessionId: string; model: string }
-  | { kind: 'text'; text: string }
+  /** A finished text block; messageId = the API message id when the CLI sent one. */
+  | { kind: 'text'; text: string; messageId?: string }
+  /** --include-partial-messages: a content block of a top-level assistant message started streaming. */
+  | { kind: 'block_start'; messageId: string; index: number; blockType: string }
+  /** --include-partial-messages: a chunk of a streaming text block (top level only; subagent deltas are dropped). */
+  | { kind: 'text_delta'; messageId: string; index: number; text: string }
   | { kind: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
   | { kind: 'tool_result'; id: string; isError: boolean; content: string }
   | { kind: 'raw'; line: string };
+
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export interface RunOptions {
   cwd: string;
@@ -24,6 +31,8 @@ export interface RunOptions {
   resume?: string;
   /** `--model <name>`; missing or 'default' = Claude Code's default (no flag). Not restored on resume: pass it every run. */
   model?: string;
+  /** `--effort <level>`; missing = the CLI's default. Like the model, passed on every run. */
+  effort?: Effort;
   /** Extra directories (--add-dir). Not confirmed read-only under acceptEdits, so the orchestrator does not use it for owner folders (it copies docs instead). */
   addDirs?: string[];
   allowedTools: string[];
@@ -86,14 +95,16 @@ export function childEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  * CLI args. The prompt is NOT among them: a bare `-p` makes the CLI read the prompt from stdin, which avoids the
  * ~32K Windows command-line limit and any quoting issues (newlines, quotes, a leading '-'). Checked with claude 2.1.332.
  */
-export function buildArgs(o: Pick<RunOptions, 'role' | 'maxTurns' | 'resume' | 'allowedTools' | 'addDirs' | 'model'>): string[] {
+export function buildArgs(o: Pick<RunOptions, 'role' | 'maxTurns' | 'resume' | 'allowedTools' | 'addDirs' | 'model' | 'effort'>): string[] {
   // dontAsk denies Edit/Write even when listed in --allowedTools (found by the live run, claude 2.1.x), so roles that
   // edit files use acceptEdits (auto-accepts edits in the cwd; anything not allowed is still denied non-interactively).
   const edits = o.allowedTools.some(t => t === 'Edit' || t === 'Write' || t === 'MultiEdit');
-  const args = ['-p', '--agent', o.role, '--output-format', 'stream-json', '--verbose',
+  // --include-partial-messages: token streaming (stream_event lines with text deltas; needs -p + stream-json + --verbose)
+  const args = ['-p', '--agent', o.role, '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
     '--permission-mode', edits ? 'acceptEdits' : 'dontAsk', '--max-turns', String(o.maxTurns)];
   if (o.resume) args.push('--resume', o.resume);
   if (o.model && o.model !== 'default') args.push('--model', o.model);
+  if (o.effort) args.push('--effort', o.effort);
   // extra readable folders; like --allowedTools they are not restored on resume, so every run passes them again
   for (const d of o.addDirs ?? []) args.push('--add-dir', d);
   // --allowedTools is variadic, so it goes last. Omitted when empty (the CLI rejects a bare flag).
@@ -110,17 +121,37 @@ function contentText(c: unknown): string {
   return c == null ? '' : JSON.stringify(c);
 }
 
-/** Parse one stdout line. Every line yields a `raw` event first; known JSON shapes add typed events. */
+/** A stream_event line (--include-partial-messages) → block_start / text_delta; anything else → nothing. */
+function streamEvents(o: any): RunnerEvent[] {
+  // subagents (Task) stream too: only the role's own top-level messages are streamed to the feed
+  if (o.parent_tool_use_id) return [];
+  const e = o.event;
+  const messageId = str(o.api_message_id);
+  if (!e || !messageId || typeof e.index !== 'number') return [];
+  if (e.type === 'content_block_start') return [{ kind: 'block_start', messageId, index: e.index, blockType: str(e.content_block?.type) }];
+  if (e.type === 'content_block_delta' && e.delta?.type === 'text_delta' && str(e.delta.text)) {
+    return [{ kind: 'text_delta', messageId, index: e.index, text: e.delta.text }];
+  }
+  return [];
+}
+
+/**
+ * Parse one stdout line. Every line yields a `raw` event first (except stream_event lines: one per token would flood
+ * the log, and the finished message still arrives as an assistant line); known JSON shapes add typed events.
+ */
 export function parseLine(line: string): { events: RunnerEvent[]; result?: ResultLine } {
-  const events: RunnerEvent[] = [{ kind: 'raw', line }];
   let o: any;
-  try { o = JSON.parse(line); } catch { return { events }; }
+  try { o = JSON.parse(line); } catch { return { events: [{ kind: 'raw', line }] }; }
+  if (o && typeof o === 'object' && o.type === 'stream_event') return { events: streamEvents(o) };
+  const events: RunnerEvent[] = [{ kind: 'raw', line }];
   if (!o || typeof o !== 'object') return { events };
   if (o.type === 'system' && o.subtype === 'init') {
     events.push({ kind: 'init', sessionId: str(o.session_id), model: str(o.model) });
   } else if (o.type === 'assistant' && Array.isArray(o.message?.content)) {
     for (const c of o.message.content) {
-      if (c?.type === 'text' && str(c.text).trim()) events.push({ kind: 'text', text: c.text });
+      if (c?.type === 'text' && str(c.text).trim()) {
+        events.push({ kind: 'text', text: c.text, ...(str(o.message.id) ? { messageId: o.message.id } : {}) });
+      }
       else if (c?.type === 'tool_use') events.push({ kind: 'tool_use', id: str(c.id), name: str(c.name), input: c.input && typeof c.input === 'object' ? c.input : {} });
     }
   } else if (o.type === 'user' && Array.isArray(o.message?.content)) {
