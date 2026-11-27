@@ -16,12 +16,15 @@ import { TeamDialog } from './TeamDialog';
 import { rootOf, threadOf, threadsOf } from './threads';
 import { PastConversations, threadTitle, visibleThreads } from './PastConversations';
 import { loadHistory } from '../state/socket';
+import { MemoryPanel } from './MemoryPanel';
 
 export const DRAWER_WIDTH = 560;
 /** Full-screen chat: most of the window, a strip of the office stays visible on the left. */
 export const FULL_WIDTH = `max(${DRAWER_WIDTH}px, calc(100vw - 96px))`;
-type Tab = 'feed' | 'raw' | 'changes' | 'plan';
-const TABS: { id: Tab; label: string }[] = [{ id: 'feed', label: 'Feed' }, { id: 'raw', label: 'Raw log' }, { id: 'changes', label: 'Changes' }, { id: 'plan', label: 'Plan' }];
+type Tab = 'feed' | 'raw' | 'changes' | 'plan' | 'memory';
+const TABS: { id: Tab; label: string }[] = [
+  { id: 'feed', label: 'Feed' }, { id: 'raw', label: 'Raw log' }, { id: 'changes', label: 'Changes' }, { id: 'plan', label: 'Plan' }, { id: 'memory', label: 'Memory' },
+];
 
 /** Newest first. */
 const byNewest = (a: Ticket, b: Ticket) => b.createdAt.localeCompare(a.createdAt);
@@ -188,6 +191,7 @@ export function Drawer({ projectId }: { projectId: string }) {
         return;
       case 'status': case 'help': setCard(name); return;
       case 'team': setTeam(true); return;
+      case 'memory': setTab('memory'); return;
       case 'model': {
         const m = arg.toLowerCase();
         if (!isModel(m)) return `Unknown model — pick ${Object.keys(MODEL_DESC).join(', ')}`;
@@ -291,7 +295,8 @@ export function Drawer({ projectId }: { projectId: string }) {
 
       {card && <CommandCard kind={card} project={project} onClose={() => setCard(null)} />}
       <div className="po-body">
-        {!shown ? <div className="po-scroll"><div className="po-empty po-welcome">
+        {tab === 'memory' ? <MemoryPanel projectId={project.id} />
+          : !shown ? <div className="po-scroll"><div className="po-empty po-welcome">
             <div className="po-welcome-title">{project.name} is ready.</div>
             <div>Ask a question, or describe a change — the PM answers, or plans it for your approval.</div>
           </div></div>
