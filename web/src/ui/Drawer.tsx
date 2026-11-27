@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { roleDef, type Project, type RoleId, type Stage, type Ticket, type TicketMode } from '@office/shared';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { roleDef, type Project, type RoleId, type Stage, type Ticket } from '@office/shared';
 import { useOffice } from '../state/store';
 import { api, paths } from './api';
 import { accentCss, kindIcon, kindStatus, kindTitle, ticketKind, canResume, isActive, relativeDate, roleEmoji, roleShort, STATUS_ICON } from './format';
 import { ClaudeBanner, useClaudeStatus } from './claudeStatus';
-import { COMMANDS, MODEL_DESC, isModel, parseCommand, suggest, type CommandName } from './slash';
+import { COMMANDS, MODEL_DESC, isModel, type CommandName } from './slash';
+import { Composer, type ComposerHandle } from './Composer';
 import { Feed } from './Feed';
 import { RawLog } from './RawLog';
 import { Changes } from './Changes';
@@ -96,6 +97,14 @@ export function Drawer({ projectId }: { projectId: string }) {
     if (running) { void stop(); return; }
     if (!fromComposer) close();
   };
+  const composer = useRef<ComposerHandle>(null);
+  const feeds = useOffice(s => s.feed);
+  /** The owner's messages in the open conversation, oldest first (↑ recall in the composer). */
+  const yourTexts = useMemo(() => thread.flatMap(t => {
+    const f = feeds[t.id] ?? [];
+    const own = t.text.trim() && !(f[0]?.kind === 'user' && f[0].text.trim() === t.text.trim()) ? [t.text] : [];
+    return [...own, ...f.filter(i => i.kind === 'user').map(i => i.text)];
+  }), [thread, feeds]);
   const escapeRef = useRef(escape);
   escapeRef.current = escape;
 
@@ -277,14 +286,14 @@ export function Drawer({ projectId }: { projectId: string }) {
             <div className="po-welcome-title">{project.name} is ready.</div>
             <div>Ask a question, or describe a change — the PM answers, or plans it for your approval.</div>
           </div></div>
-          : tab === 'feed' ? <Feed ticketIds={thread.map(t => t.id)} onShow={setTab} />
+          : tab === 'feed' ? <Feed ticketIds={thread.map(t => t.id)} onShow={setTab} onEdit={t => composer.current?.prefill(t)} />
           : tab === 'raw' ? <RawLog ticketId={shown.id} />
           : tab === 'changes' ? <Changes ticketId={latestWith(t => !!diffs[t.id]?.length).id} repos={project.repos?.map(r => r.name)} />
           : <PlanView ticket={latestWith(t => !!t.plan)} />}
       </div>
 
       {running && <Working ticket={running} busy={stopBusy} error={stopError} onStop={() => void stop()} />}
-      <Composer key={openRoot ?? ''} projectId={project.id} active={active} latest={shown} refocus={refocus} onEscape={() => escape(true)}
+      <Composer ref={composer} key={openRoot ?? ''} projectId={project.id} history={yourTexts} active={active} latest={shown} refocus={refocus} onEscape={() => escape(true)}
         onCreated={(created, followUp) => {
           // a follow-up stays in this conversation; a new conversation opens once its ticket arrives
           refocus.current = true; setFresh(false); setChosen(followUp ? openRoot ?? null : created?.id ?? null);

@@ -74,6 +74,15 @@ describe('office store', () => {
     expect(msgs[0].status).toBeUndefined();
   });
 
+  it('user.message attachments reach the feed item; ticket.done stopped marks the end and the ticket', () => {
+    apply(ev({ type: 'ticket.created', ticket: { ...T, status: 'running' } }));
+    apply(ev({ type: 'user.message', text: 'see', attachments: [{ id: 'a', name: 'a.png', path: '/a.png' }] }));
+    apply(ev({ type: 'ticket.done', stopped: true }));
+    expect(feed().find(f => f.kind === 'user')!.attachments).toEqual([{ id: 'a', name: 'a.png', path: '/a.png' }]);
+    expect(feed()[feed().length - 1]).toMatchObject({ kind: 'stage', text: 'done', detail: 'stopped' });
+    expect(useOffice.getState().tickets.t.stopped).toBe(true);
+  });
+
   it('gate.open adds a gate item and sets openGate; gate.closed clears it', () => {
     apply(ev({ type: 'ticket.created', ticket: T }));
     apply(ev({ type: 'gate.open', gate: 'plan', payload: null }));

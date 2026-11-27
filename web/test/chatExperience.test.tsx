@@ -7,6 +7,7 @@ import { Drawer } from '../src/ui/Drawer';
 import { Feed } from '../src/ui/Feed';
 import { Markdown } from '../src/ui/Markdown';
 import { highlight } from '../src/ui/highlight';
+import { resetComposerHistory } from '../src/ui/Composer';
 
 const P: Project = { id: 'p', name: 'Shop', folder: '.', accent: 'cyan', team: ['pm', 'frontend'], slot: 0, looks: {} as Project['looks'], createdAt: '' };
 const tk = (id: string, o: Partial<Ticket> = {}): Ticket =>
@@ -19,6 +20,7 @@ const SYS = { found: true, version: '2', loggedIn: true, accountType: 'pro', sig
 
 beforeEach(() => {
   resetOffice();
+  resetComposerHistory();
   calls = [];
   reply = () => undefined;
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
@@ -160,5 +162,125 @@ describe('copy, highlight, tables, links', () => {
     expect(links[0].textContent).toBe('the docs');
     for (const a of links) { expect(a.target).toBe('_blank'); expect(a.rel).toContain('noopener'); }
     expect(container.textContent).toContain('[this](javascript:alert(1))');
+  });
+});
+
+describe('composer: attachments, @files, recall, edit-and-resend', () => {
+  const file = (name: string, body = 'hello', type = 'text/plain') => new File([body], name, { type });
+  const uploads = () => calls.filter(c => c.url === '/api/projects/p/attachments');
+
+  it('pasting a file uploads it (JSON base64) and shows a chip; send carries the attachment ids', async () => {
+    reply = (url, method, body) => (url === '/api/projects/p/attachments'
+      ? { status: 201, body: { id: 'att1', name: (body as { name: string }).name, path: 'C:/data/attachments/p/att1-notes.txt' } }
+      : method === 'POST' && url === '/api/projects/p/tickets' ? { status: 201, body: tk('n', { status: 'queued' }) } : undefined);
+    open([]);
+    fireEvent.paste(box(), { clipboardData: { files: [file('notes.txt')] } });
+    await waitFor(() => expect(uploads()).toHaveLength(1));
+    expect(uploads()[0].body).toEqual({ name: 'notes.txt', dataBase64: btoa('hello') });
+    const chips = screen.getByRole('list', { name: /attachments/i });
+    await waitFor(() => expect(chips.textContent).not.toMatch(/uploading/));
+    expect(chips.textContent).toContain('notes.txt');
+    fireEvent.change(box(), { target: { value: 'Read this' } });
+    fireEvent.keyDown(box(), { key: 'Enter' });
+    await waitFor(() => expect(calls.some(c => c.url === '/api/projects/p/tickets')).toBe(true));
+    expect(calls.find(c => c.url === '/api/projects/p/tickets')!.body).toEqual({ text: 'Read this', mode: 'auto', attachments: ['att1'] });
+    await waitFor(() => expect(screen.queryByRole('list', { name: /attachments/i })).toBeNull());
+  });
+
+  it('dropping files adds chips; × removes one; a too-large file is refused on the client', async () => {
+    reply = url => (url === '/api/projects/p/attachments' ? { status: 201, body: { id: 'a', name: 'x.png', path: '/x' } } : undefined);
+    open([]);
+    const big = file('huge.pdf');
+    Object.defineProperty(big, 'size', { value: 11 * 1024 * 1024 });
+    fireEvent.drop(document.querySelector('.po-composer')!, { dataTransfer: { files: [file('x.png', 'p', 'image/png'), big], types: ['Files'] } });
+    await waitFor(() => expect(uploads()).toHaveLength(1));
+    const chips = screen.getByRole('list', { name: /attachments/i });
+    expect(chips.textContent).toMatch(/huge\.pdf.*too large/);
+    fireEvent.click(screen.getByRole('button', { name: /remove huge\.pdf/i }));
+    expect(chips.textContent).not.toContain('huge.pdf');
+  });
+
+  it('an upload error shows on the chip', async () => {
+    reply = url => (url === '/api/projects/p/attachments' ? { status: 415, body: { error: 'unsupported file type' } } : undefined);
+    open([]);
+    fireEvent.paste(box(), { clipboardData: { files: [file('a.exe')] } });
+    await waitFor(() => expect(screen.getByRole('list', { name: /attachments/i }).textContent).toContain('unsupported file type'));
+  });
+
+  it('messages to a running ticket carry attachments too', async () => {
+    reply = url => (url === '/api/projects/p/attachments' ? { status: 201, body: { id: 'z', name: 'a.txt', path: '/a' } } : undefined);
+    open([tk('r', { status: 'running', stage: 'build', mode: 'ticket' })]);
+    fireEvent.paste(box(), { clipboardData: { files: [file('a.txt')] } });
+    await waitFor(() => expect(screen.getByRole('list', { name: /attachments/i }).textContent).not.toMatch(/uploading/));
+    fireEvent.change(box(), { target: { value: 'see file' } });
+    fireEvent.keyDown(box(), { key: 'Enter' });
+    await waitFor(() => expect(posts().some(c => c.url === '/api/tickets/r/messages')).toBe(true));
+    expect(posts().find(c => c.url === '/api/tickets/r/messages')!.body).toEqual({ text: 'see file', attachments: ['z'] });
+  });
+
+  it('@ opens a file search popup (GET files?q=); Enter puts @path in the text', async () => {
+    reply = url => (url.startsWith('/api/projects/p/files') ? { status: 200, body: { files: ['src/Login.tsx', 'src/login.css'] } } : undefined);
+    open([]);
+    fireEvent.change(box(), { target: { value: 'Look at @log' } });
+    const list = await screen.findByRole('listbox', { name: /files/i });
+    expect(calls.some(c => c.url === '/api/projects/p/files?q=log')).toBe(true);
+    expect(list.textContent).toContain('src/Login.tsx');
+    fireEvent.keyDown(box(), { key: 'ArrowDown' });
+    fireEvent.keyDown(box(), { key: 'Enter' });
+    expect(box().value).toBe('Look at @src/login.css ');
+    expect(screen.queryByRole('listbox', { name: /files/i })).toBeNull();
+    expect(posts()).toHaveLength(0);
+  });
+
+  it('Esc closes the @ popup without stopping anything', async () => {
+    reply = url => (url.startsWith('/api/projects/p/files') ? { status: 200, body: { files: ['a.ts'] } } : undefined);
+    open([]);
+    fireEvent.change(box(), { target: { value: '@a' } });
+    await screen.findByRole('listbox', { name: /files/i });
+    fireEvent.keyDown(box(), { key: 'Escape' });
+    expect(screen.queryByRole('listbox', { name: /files/i })).toBeNull();
+  });
+
+  it('↑ on an empty composer recalls the previous message, ↑ again the one before, ↓ back', () => {
+    const A = tk('a', { text: 'First question', mode: 'ask', answered: true });
+    const B = tk('b', { text: 'Second one', parentTicketId: 'a', mode: 'ask', answered: true, createdAt: '2026-11-26T10:05:00Z' });
+    open([A, B], { feed: { b: [{ kind: 'user', text: 'Second one', id: 'user:1', ts: '' }] } });
+    fireEvent.click(screen.getByRole('button', { name: /past conversations/i }));
+    fireEvent.click(screen.getByRole('button', { name: /First question/ }));
+    fireEvent.keyDown(box(), { key: 'ArrowUp' });
+    expect(box().value).toBe('Second one');
+    fireEvent.keyDown(box(), { key: 'ArrowUp' });
+    expect(box().value).toBe('First question');
+    fireEvent.keyDown(box(), { key: 'ArrowDown' });
+    expect(box().value).toBe('Second one');
+    fireEvent.change(box(), { target: { value: 'typed' } });
+    fireEvent.keyDown(box(), { key: 'ArrowUp' });
+    expect(box().value).toBe('typed');
+  });
+
+  it('✎ on your last message puts it back in the composer; sending continues the thread', async () => {
+    const A = tk('a', { text: 'First question', mode: 'ask', answered: true });
+    const B = tk('b', { text: 'Second one', parentTicketId: 'a', mode: 'ask', answered: true, createdAt: '2026-11-26T10:05:00Z' });
+    open([A, B]);
+    fireEvent.click(screen.getByRole('button', { name: /past conversations/i }));
+    fireEvent.click(screen.getByRole('button', { name: /First question/ }));
+    const edits = screen.getAllByRole('button', { name: /edit and resend/i });
+    expect(edits).toHaveLength(1);
+    fireEvent.click(edits[0]);
+    expect(box().value).toBe('Second one');
+    fireEvent.change(box(), { target: { value: 'Second one, shorter' } });
+    fireEvent.keyDown(box(), { key: 'Enter' });
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(posts()[0]).toMatchObject({ url: '/api/projects/p/tickets', body: { text: 'Second one, shorter', parentTicketId: 'b' } });
+  });
+
+  it('attachments on your messages are listed in the bubble; a stopped answer says so', () => {
+    useOffice.setState({
+      tickets: { t: tk('t', { text: 'Q', attachments: [{ id: 'a1', name: 'shot.png', path: '/x/shot.png' }] }) },
+      feed: { t: [{ kind: 'stage', text: 'done', detail: 'stopped', id: 'end:9', ts: '' }] },
+    });
+    render(<Feed ticketId="t" />);
+    expect(screen.getByRole('list', { name: /attached files/i }).textContent).toContain('shot.png');
+    expect(screen.getByText(/Stopped by you/)).toBeTruthy();
   });
 });

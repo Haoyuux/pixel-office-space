@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { applyTicketEvent, type DiffFile, type Project, type RoleId, type ServerEvent, type Ticket, type TicketEvent } from '@office/shared';
+import { applyTicketEvent, type Attachment, type DiffFile, type Project, type RoleId, type ServerEvent, type Ticket, type TicketEvent } from '@office/shared';
 
 export interface FeedItem {
   kind: 'message' | 'tool' | 'gate' | 'user' | 'stage';
@@ -11,6 +11,8 @@ export interface FeedItem {
   ts: string;
   /** The PM's answer to an Ask (rendered as markdown-ish text). */
   answer?: boolean;
+  /** Files attached to an owner message. */
+  attachments?: Attachment[];
 }
 
 /** The PM's raw structured reply carrying an answer (shown again, cleanly, as the answer message). */
@@ -78,7 +80,7 @@ function fold(v: TicketView, e: TicketEvent): TicketView {
       feed[at] = { ...feed[at], status: e.decision, ...(e.note ? { detail: e.note } : {}) };
       return { ...v, feed };
     }
-    case 'user.message': return push(item({ kind: 'user', text: e.text, id: `user:${e.seq}` }));
+    case 'user.message': return push(item({ kind: 'user', text: e.text, id: `user:${e.seq}`, ...(e.attachments?.length ? { attachments: e.attachments } : {}) }));
     case 'ticket.stage': return push(item({ kind: 'stage', text: e.stage, detail: e.roles.join(', '), id: `stage:${e.seq}` }));
     case 'ticket.answered': {
       // the answer is the PM's last message; its raw JSON reply before it is noise
@@ -89,7 +91,7 @@ function fold(v: TicketView, e: TicketEvent): TicketView {
         .filter((f, i) => i === at || !(f.kind === 'message' && f.role === 'pm' && RAW_ANSWER.test(f.text)));
       return { ...v, feed };
     }
-    case 'ticket.done': return push(item({ kind: 'stage', text: 'done', id: `end:${e.seq}` }));
+    case 'ticket.done': return push(item({ kind: 'stage', text: 'done', id: `end:${e.seq}`, ...(e.stopped ? { detail: 'stopped' } : {}) }));
     case 'ticket.failed': return push(item({ kind: 'stage', text: 'failed', detail: e.reason, id: `end:${e.seq}` }));
     case 'ticket.cancelled': return push(item({ kind: 'stage', text: 'cancelled', id: `end:${e.seq}` }));
     case 'log.raw': return { ...v, raw: [...v.raw, e.line] };
