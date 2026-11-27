@@ -258,6 +258,12 @@
 .po-files button:hover { background: var(--po-panel-2); }
 .po-files button.on { background: #18202f; box-shadow: inset 2px 0 0 var(--accent); }
 .po-file-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.po-repo-head { margin: 0 0 4px; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--po-dim); }
+.po-badge.po-repos {
+  color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.po-repos-found { color: var(--accent); }
 .po-add { color: var(--po-green); }
 .po-del { color: var(--po-red); }
 .po-file-head { font-size: 12px; font-weight: 700; padding: 4px 0; color: var(--po-text); }

@@ -4,6 +4,7 @@ import { useOffice } from '../state/store';
 import { api, paths } from './api';
 import { accentCss } from './format';
 import { Modal, RolePicker } from './Modal';
+import { GitBanner, ReposFound } from './GitBanner';
 
 /** `+ Add Project`: name, folder (validated by the server), accent, team. Opens the new project's drawer on success. */
 export function AddProjectDialog({ onClose }: { onClose: () => void }) {
@@ -15,6 +16,8 @@ export function AddProjectDialog({ onClose }: { onClose: () => void }) {
   const [team, setTeam] = useState<RoleId[]>(DEFAULT_TEAM);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Saved, with git feedback to show (repos found / not a git repo) before closing. */
+  const [created, setCreated] = useState<Project | null>(null);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -23,9 +26,27 @@ export function AddProjectDialog({ onClose }: { onClose: () => void }) {
     const r = await api<Project>('POST', paths.projects(), { name: name.trim(), folder: folder.trim(), accent, team });
     setBusy(false);
     if (!r.ok) { setError(r.error); return; }
-    onClose();
     if (r.data?.id) useOffice.getState().select(r.data.id);
+    if (r.data && (r.data.gitKind === 'none' || r.data.repos?.length)) { setCreated(r.data); return; }
+    onClose();
   };
+
+  if (created) {
+    return (
+      <Modal title="add project" accent={accentCss(created.accent)} onClose={onClose}>
+        <div className="po-form">
+          <p className="po-hint">Created <b>{created.name}</b>.</p>
+          <ReposFound repos={created.repos} />
+          {!created.repos?.length && created.gitKind === 'none' && (
+            <GitBanner projectId={created.id} text="Not a git repo — Claude agents work on a git branch." />
+          )}
+          <div className="po-actions">
+            <button type="button" className="po-btn primary" autoFocus onClick={onClose}>Open project</button>
+          </div>
+        </div>
+      </Modal>
+    );
+  }
 
   return (
     <Modal title="add project" accent={accentCss(accent)} onClose={onClose}>
