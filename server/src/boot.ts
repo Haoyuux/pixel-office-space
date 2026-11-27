@@ -6,6 +6,7 @@ import { ClaudeOrchestrator, type Runner } from './orchestrator/claude';
 import { RoutingOrchestrator, type Mode } from './orchestrator/routing';
 import { realScheduler, type Scheduler } from './orchestrator/types';
 import { ClaudeRunner } from './claude/runner';
+import { MemoryStore } from './memory';
 
 export interface BootOptions {
   dataDir: string;
@@ -30,16 +31,18 @@ export function boot(opts: BootOptions): {
 } {
   const log = new TicketLog(join(opts.dataDir, 'projects'));
   const recovered = log.recover();
+  // one store: the API edits it and the claude orchestrator reads/teaches it (its changes reach the clients)
+  const memory = new MemoryStore(opts.dataDir);
   const simulated = new SimulatedOrchestrator({ log, scheduler: opts.scheduler ?? realScheduler, stageMs: opts.stageMs, random: opts.random });
   let office: Office | undefined;
   const claude = new ClaudeOrchestrator({
     log, runner: opts.runner ?? new ClaudeRunner(), dataDir: opts.dataDir, getProject: id => office?.store.get(id),
-    onDetect: (id, d) => office?.setGit(id, d),
+    onDetect: (id, d) => office?.setGit(id, d), memory,
   });
   const orchestrator = new RoutingOrchestrator(opts.forceMode
     ? { claude: opts.forceMode === 'simulated' ? simulated : claude, simulated: opts.forceMode === 'simulated' ? simulated : claude }
     : { claude, simulated });
-  office = createOffice({ dataDir: opts.dataDir, orchestrator, log, assetsDir: opts.assetsDir, claudeSystem: opts.claudeSystem });
+  office = createOffice({ dataDir: opts.dataDir, orchestrator, log, assetsDir: opts.assetsDir, claudeSystem: opts.claudeSystem, memory });
   for (const t of recovered.filter(t => t.status === 'queued')) {
     const p = office.store.get(t.projectId);
     if (p) orchestrator.adopt(p, t);

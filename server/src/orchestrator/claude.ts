@@ -15,8 +15,9 @@ import { attachmentsDir, attachmentsNote } from '../attachments';
 import { MAX_TURNS, ROLE_TOOLS } from '../claude/roles';
 import {
   bouncePrompt, CONTINUE, deliverNotesPrompt, diffSummary, fixJsonPrompt, followUpPrompt, planPrompt, previousContext,
-  projectDocsRule, repoContext, reviewPrompt, SHARED_MODULES_RULE, stagePrompt, testPrompt, withOwnerNotes,
+  projectDocsRule, repoContext, reviewPrompt, SHARED_MODULES_RULE, stagePrompt, teamMemoryBlock, testPrompt, withOwnerNotes,
 } from '../claude/prompts';
+import type { MemoryStore } from '../memory';
 import { extractJson, isProse, pmValidator, reviewValidator, testValidator, type PmReply } from '../claude/parse';
 
 export { ConflictError };
@@ -40,6 +41,8 @@ export interface ClaudeOrchestratorOptions {
   onDetect?: (projectId: string, d: RepoDetection) => void;
   /** Streaming text deltas are coalesced to at most one event per this many ms per message (tests: 0). */
   deltaIntervalMs?: number;
+  /** Team memory: read into every agent prompt; the PM's lessons are added when a ticket/answer completes. */
+  memory?: Pick<MemoryStore, 'list' | 'learn'>;
 }
 
 export const STOPPED_TEXT = 'Stopped by you.';
@@ -84,6 +87,8 @@ interface Ws {
 interface Run {
   ticket: Ticket; project: Project; seq: number;
   plan?: Plan; projectMap?: string;
+  /** The PM's lessons for the team memory (plan/answer JSON "memory"), added once the ticket ends done. */
+  lessons?: string[];
   bounces: Record<BounceFrom, number>; stuckFrom?: BounceFrom; lastIssues: Issue[];
   sessions: Partial<Record<RoleId, string>>;
   /** Per-role chain so two runs never share a session concurrently. */
@@ -438,6 +443,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     // outside ticket mode a reply that is clearly prose (no JSON at all) is the answer, not a failure
     const prose = mode === 'ticket' ? undefined : (text: string): PmReply => ({ kind: 'answer', answer: text.trim() });
     const reply = await this.structured(run, 'pm', 'plan', folder, prompt, resume, pmValidator(run.project.team, mode), what, fresh, prose);
+    if (reply.memory?.length) run.lessons = [...(run.lessons ?? []), ...reply.memory];
     if (reply.kind === 'answer') return this.answer(run, reply.answer);
     const { projectMap, ...clean } = reply.plan;
     run.plan = clean;
@@ -631,7 +637,14 @@ export class ClaudeOrchestrator implements Orchestrator {
     if (run.ws?.units.some(u => u.sharedModules)) parts.push(SHARED_MODULES_RULE);
     const files = attachmentsNote(run.ticket.attachments);
     if (files) parts.push(files);
+    const memory = this.memoryOf(run);
+    if (memory) parts.push(memory);
     return parts.join('\n\n');
+  }
+
+  /** The project's team memory block (read fresh for every prompt); never fails a run. */
+  private memoryOf(run: Run): string {
+    try { return teamMemoryBlock(this.opts.memory?.list(run.project.id) ?? []); } catch { return ''; }
   }
 
   /**
@@ -1129,6 +1142,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     if (how === 'done') {
       for (const r of roles) this.state(run, r, 'done');
       this.emit(run, { type: 'ticket.done', ...(done.stopped ? { stopped: true } : {}) });
+      this.learn(run);
     } else if (how === 'cancelled') this.emit(run, { type: 'ticket.cancelled' });
     else this.emit(run, { type: 'ticket.failed', reason });
     for (const r of roles) this.state(run, r, 'idle');
@@ -1141,6 +1155,13 @@ export class ClaudeOrchestrator implements Orchestrator {
       this.currentByProject.set(pid, nextId);
       this.bg(nxt, () => this.start(nxt));
     }
+  }
+
+  /** The ticket/answer completed: the PM's lessons go into the team memory (best effort). */
+  private learn(run: Run) {
+    if (!run.lessons?.length || !this.opts.memory) return;
+    try { this.opts.memory.learn(run.project.id, run.lessons, run.ticket.id); }
+    catch (err) { console.error(err); }
   }
 
   // ---- emit helpers ----

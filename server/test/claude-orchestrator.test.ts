@@ -9,6 +9,7 @@ import * as realGit from '../src/claude/git';
 import { ROLE_TOOLS } from '../src/claude/roles';
 import type { RunOptions, RunResult } from '../src/claude/runner';
 import { TicketLog } from '../src/ticketLog';
+import { MemoryStore } from '../src/memory';
 
 {
   const cfg = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'po-gitcfg-')), 'gitconfig');
@@ -105,7 +106,7 @@ class FakeRunner {
 let runner: FakeRunner;
 let events: ServerEvent[];
 let dataDir: string;
-const make = (git?: GitApi, extra: { deltaIntervalMs?: number } = {}) => {
+const make = (git?: GitApi, extra: { deltaIntervalMs?: number; memory?: MemoryStore } = {}) => {
   runner = new FakeRunner(); events = []; dataDir = tmp('po-data-');
   const o = new ClaudeOrchestrator({ log: new TicketLog(path.join(dataDir, 'tickets')), runner, dataDir, git, ...extra });
   o.onEvent(e => events.push(e));
@@ -1507,6 +1508,64 @@ describe('ClaudeOrchestrator: chat experience (streaming, effort, stop, attachme
     o.startTicket(project(repo), 'Hello?', { mode: 'ask' });
     await o.idle();
     expect(runner.of('pm')[0].o.addDirs).toBeUndefined();
+  });
+});
+
+describe('ClaudeOrchestrator: team memory', () => {
+  let repo: string;
+  beforeEach(() => { repo = mkRepo(); });
+  const withMemory = () => {
+    const memory = new MemoryStore(tmp('po-mem-'));
+    const o = make(undefined, { memory });
+    return { o, memory };
+  };
+
+  it('every agent prompt (plan, stages, review, test) carries the <team-memory> block; none when memory is empty', async () => {
+    const { o, memory } = withMemory();
+    memory.add('p1', { text: 'Always use tabs' });
+    const t = await toFinal(o, repo);
+    for (const kind of ['plan', 'stage', 'review', 'test'] as const) {
+      const calls = runner.calls.filter(c => c.kind === kind);
+      expect(calls.length).toBeGreaterThan(0);
+      for (const c of calls) expect(c.o.prompt).toContain('<team-memory>\n- Always use tabs\n</team-memory>');
+    }
+    o.cancel(t.id);
+    await o.idle();
+    const plain = make();
+    await toPlanGate(plain, mkRepo());
+    expect(runner.of('pm')[0].o.prompt).not.toContain('<team-memory>');
+  });
+
+  it('answer prompts carry it too; the answer\'s lessons are added (source pm) after it completes, de-duplicated', async () => {
+    const { o, memory } = withMemory();
+    memory.add('p1', { text: 'The API lives in server/' });
+    runner.script = c => c.o.role === 'pm'
+      ? { result: fence({ kind: 'answer', answer: 'Two buttons.', memory: ['the api lives in SERVER/', 'Leave module is in src/leave'] }) } : undefined;
+    const t = o.startTicket(project(repo), 'Which buttons?', { mode: 'ask' });
+    await o.idle();
+    expect(runner.of('pm')[0].o.prompt).toContain('<team-memory>\n- The API lives in server/');
+    expect(o.find(t.id)!.status).toBe('done');
+    const list = memory.list('p1');
+    expect(list.map(e => e.text)).toEqual(['The API lives in server/', 'Leave module is in src/leave']);
+    expect(list[1]).toMatchObject({ source: 'pm', ticketId: t.id });
+  });
+
+  it('plan lessons wait for the ticket to finish: none at the plan gate, added after final approval; a cancelled ticket adds none', async () => {
+    const { o, memory } = withMemory();
+    runner.script = c => c.o.role === 'pm' && c.kind === 'plan' ? { result: fence({ ...PLAN, memory: ['Run tests with npm test'] }) } : undefined;
+    const t = await toFinal(o, repo);
+    expect(memory.list('p1')).toEqual([]);
+    o.decide(t.id, 'final', 'approved');
+    await o.idle();
+    expect(o.find(t.id)!.status).toBe('done');
+    expect(memory.list('p1').map(e => e.text)).toEqual(['Run tests with npm test']);
+
+    const { o: o2, memory: m2 } = withMemory();
+    runner.script = c => c.o.role === 'pm' && c.kind === 'plan' ? { result: fence({ ...PLAN, memory: ['Never learned'] }) } : undefined;
+    const t2 = await toPlanGate(o2, mkRepo());
+    o2.cancel(t2.id);
+    await o2.idle();
+    expect(m2.list('p1')).toEqual([]);
   });
 });
 

@@ -8,6 +8,8 @@ import type { MemoryEntry, Project, ServerEvent } from '@office/shared';
 import { createOffice, type Office } from '../src/app';
 import { SimulatedOrchestrator } from '../src/orchestrator/simulated';
 import { TicketLog } from '../src/ticketLog';
+import { boot as bootServer } from '../src/boot';
+import type { RunOptions, RunResult } from '../src/claude/runner';
 import { tmp, projectDir, ManualScheduler } from './helpers';
 
 let office: Office;
@@ -82,6 +84,35 @@ describe('team memory API', () => {
     await request(office.server).post(`/api/projects/${p.id}/memory`).send({ text: 'A fact' });
     await request(office.server).delete(`/api/projects/${p.id}`).send({});
     expect(existsSync(join(dataDir, 'memory', `${p.id}.json`))).toBe(false);
+  });
+
+  it('booted server: the PM\'s answer lessons reach the memory API and the clients (memory.updated); the prompt carries memory', async () => {
+    const prompts: string[] = [];
+    const answer = { kind: 'answer', answer: 'Two buttons.', memory: ['Leave lives in src/leave'] };
+    const runner = {
+      run(o: RunOptions): Promise<RunResult> {
+        prompts.push(o.prompt);
+        o.onEvent({ kind: 'init', sessionId: 's1', model: 'm' });
+        const result = '```json\n' + JSON.stringify(answer) + '\n```';
+        return Promise.resolve({ sessionId: 's1', result, isError: false, subtype: 'success', numTurns: 1, costUsd: 0.01, durationMs: 5, exitCode: 0 });
+      },
+    };
+    const b = bootServer({ dataDir: tmp(), runner });
+    office = b.office;
+    await new Promise<void>(r => office.server.listen(0, '127.0.0.1', () => r()));
+    const p = await addProject();
+    await request(office.server).post(`/api/projects/${p.id}/memory`).send({ text: 'Owner fact' });
+    const { ws, msgs } = await connect();
+    await request(office.server).post(`/api/projects/${p.id}/tickets`).send({ text: 'Which buttons?', mode: 'ask' });
+    await b.claude.idle();
+    await settle();
+    expect(prompts[0]).toContain('<team-memory>\n- Owner fact\n</team-memory>');
+    const entries = (await request(office.server).get(`/api/projects/${p.id}/memory`)).body.entries as MemoryEntry[];
+    expect(entries.map(e => [e.text, e.source])).toEqual([['Owner fact', 'owner'], ['Leave lives in src/leave', 'pm']]);
+    const types = msgs.map(m => m.type);
+    expect(types).toContain('memory.updated');
+    expect(types.indexOf('memory.updated')).toBeGreaterThan(types.indexOf('ticket.done'));
+    ws.close();
   });
 
   it('memory routes sit behind the request guards (foreign origin refused)', async () => {
