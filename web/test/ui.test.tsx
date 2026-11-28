@@ -249,6 +249,18 @@ describe('GateCard', () => {
     expect(posts()[0].body).toEqual({ decision: 'retry', note: 'use MeV2.webp' });
   });
 
+  it('install: lists who wants which packages; Install posts approved, Skip posts skip', async () => {
+    const detail = JSON.stringify({ from: 'build', requests: [{ role: 'frontend', repo: 'angular', specs: ['left-pad@1', 'motion@^12'] }] });
+    render(<GateCard ticketId="t" item={{ ...gate(), text: 'install', detail }} />);
+    expect(screen.getByText('Install new packages?')).toBeTruthy();
+    expect(screen.getByText(/left-pad@1 motion@\^12/)).toBeTruthy();
+    expect(screen.getByText(/in angular/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Skip' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Install' }));
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(posts()[0]).toMatchObject({ url: '/api/tickets/t/gates/install', body: { decision: 'approved' } });
+  });
+
   it('stuck from QA says "Accept & continue" (not "Accept & test")', () => {
     render(<GateCard ticketId="t" item={{ ...gate(), detail: '{"from":"test","bounces":3}' }} />);
     expect(screen.getByRole('button', { name: 'Accept & continue' })).toBeTruthy();
