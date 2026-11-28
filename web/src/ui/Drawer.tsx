@@ -214,16 +214,28 @@ export function Drawer({ projectId }: { projectId: string }) {
       case 'model': {
         const m = arg.toLowerCase();
         if (!isModel(m)) return `Unknown model — pick ${Object.keys(MODEL_DESC).join(', ')}`;
-        const r = await api<Project>('PATCH', paths.project(project.id), { model: m });
-        if (!r.ok) return r.error;
-        // the server broadcasts project.updated too; apply the reply now so the header updates at once
-        const u = r.data;
-        if (u && typeof u === 'object' && u.id === project.id) useOffice.setState(s => ({ projects: { ...s.projects, [u.id]: u } }));
-        return `Model: ${m === 'default' ? "Claude Code's default" : m} (applies to the next run)`;
+        return (await patchProject({ model: m })) ?? `Model: ${m === 'default' ? "Claude Code's default" : m} (applies to the next run)`;
+      }
+      case 'autopilot': {
+        const a = arg.toLowerCase();
+        if (a && a !== 'on' && a !== 'off') return 'Use /autopilot, /autopilot on or /autopilot off';
+        return setAutopilot(a ? a === 'on' : !project.autopilot);
       }
       default: return;
     }
   };
+
+  /** PATCH the project; the server broadcasts project.updated too, but the reply is applied now so the header updates at once. */
+  const patchProject = async (body: Partial<Project>): Promise<string | null> => {
+    const r = await api<Project>('PATCH', paths.project(project.id), body);
+    if (!r.ok) return r.error;
+    const u = r.data;
+    if (u && typeof u === 'object' && u.id === project.id) useOffice.setState(s => ({ projects: { ...s.projects, [u.id]: u } }));
+    return null;
+  };
+  const setAutopilot = async (on: boolean): Promise<string> => (await patchProject({ autopilot: on }))
+    ?? (on ? 'Autopilot on: plans, package installs and final merges are approved for you; a stuck ticket gets one extra round, then waits for you.'
+      : 'Autopilot off: the team waits for your approval again.');
 
   return (
     <aside className={`po-drawer${full ? ' full' : ''}`} style={{ ['--accent' as string]: accent, width: full ? FULL_WIDTH : DRAWER_WIDTH }} aria-label={`${project.name} console`}>
@@ -241,6 +253,9 @@ export function Drawer({ projectId }: { projectId: string }) {
           {project.model && project.model !== 'default' && (
             <span className="po-badge po-model" title="Claude model for this project's runs (change it with /model)">{project.model}</span>
           )}
+          {project.autopilot && (
+            <span className="po-badge po-autopilot" title="Autopilot: tickets run without asking (turn it off with /autopilot off)">autopilot</span>
+          )}
           <span className={`po-badge ${mode}`} title="Who works this project's tickets (change it in Team)">{mode === 'claude' ? 'Claude Code' : 'Simulated'}</span>
           <RunButton projectId={project.id} onOpen={() => setTab('run')} />
           <PushButton projectId={project.id} />
@@ -254,6 +269,9 @@ export function Drawer({ projectId }: { projectId: string }) {
         {menu && (
           <div className="po-menu" role="menu">
             {menu === 'open' ? <>
+              <button type="button" role="menuitem" onClick={() => { setMenu(null); void setAutopilot(!project.autopilot); }}>
+                ✈ Autopilot: {project.autopilot ? 'on' : 'off'}
+              </button>
               <button type="button" role="menuitem" disabled={!active} onClick={() => setMenu('cancel')}>⊘ Cancel running ticket…</button>
               <button type="button" role="menuitem" className="danger" onClick={() => setMenu('delete')}>🗑 Delete project…</button>
             </> : menu === 'cancel' ? <div className="po-confirm">

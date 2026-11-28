@@ -114,6 +114,27 @@ describe('slash commands', () => {
     expect((screen.getByRole('radio', { name: 'Auto' }) as HTMLInputElement).checked).toBe(true);
   });
 
+  it('/autopilot toggles it on (PATCH) and the header shows the badge; /autopilot off turns it off', async () => {
+    reply = (url, method) => (method === 'PATCH' ? { status: 200, body: { ...P, ...(mutations().at(-1)!.body as object) } } : { status: 200, body: SYS });
+    openDrawer();
+    expect(screen.queryByTitle(/autopilot/i)).toBeNull();
+    run('/autopilot');
+    await waitFor(() => expect(mutations()).toHaveLength(1));
+    expect(mutations()[0]).toMatchObject({ method: 'PATCH', url: '/api/projects/p', body: { autopilot: true } });
+    expect((await screen.findByTitle(/autopilot/i)).textContent).toBe('autopilot');
+    run('/autopilot off');
+    await waitFor(() => expect(mutations()).toHaveLength(2));
+    expect(mutations()[1]).toMatchObject({ body: { autopilot: false } });
+  });
+
+  it('the ⋯ menu toggles autopilot', async () => {
+    reply = (url, method) => (method === 'PATCH' ? { status: 200, body: { ...P, ...(mutations().at(-1)!.body as object) } } : { status: 200, body: SYS });
+    openDrawer([], { autopilot: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Project menu' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: /Autopilot: on/ }));
+    await waitFor(() => expect(mutations()[0]).toMatchObject({ body: { autopilot: false } }));
+  });
+
   it('/model sonnet PATCHes the project and the header shows it', async () => {
     reply = (url, method) => (method === 'PATCH' ? { status: 200, body: { ...P, model: 'sonnet' } } : { status: 200, body: SYS });
     openDrawer();
