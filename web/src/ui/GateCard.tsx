@@ -12,11 +12,14 @@ const CHOICES: Record<GateKind, { decision: GateDecision; label: string; tone: s
     { decision: 'accept', label: 'Accept & test', tone: 'ghost' }, // 'Accept & continue' when stuck in test (QA)
     { decision: 'cancel', label: 'Cancel ticket', tone: 'danger' },
   ],
+  install: [{ decision: 'approved', label: 'Install', tone: 'primary' }, { decision: 'skip', label: 'Skip', tone: 'ghost' }],
 };
 
 const RESOLVED: Record<GateDecision, string> = {
-  approved: '✓ approved', changes: '↺ changes requested', retry: '↺ one more round', accept: '→ accepted as is, moving on', cancel: '⊘ ticket cancelled',
+  approved: '✓ approved', changes: '↺ changes requested', retry: '↺ one more round', accept: '→ accepted as is, moving on', cancel: '⊘ ticket cancelled', skip: '⊘ skipped',
 };
+
+const gateLabel = (g: GateKind) => g === 'plan' ? 'plan' : g === 'final' ? 'final changes' : g === 'install' ? 'packages' : 'stuck';
 
 const parse = (s?: string): Record<string, unknown> => { try { return s ? JSON.parse(s) : {}; } catch { return {}; } };
 
@@ -42,7 +45,7 @@ export function GateCard({ ticketId, item, onShow }: { ticketId: string; item: F
   if (!open && item.status === 'open') {
     return (
       <div className="po-gate closed">
-        <span className="po-gate-kind">{gate === 'plan' ? 'plan' : gate === 'final' ? 'final changes' : 'stuck'}</span>
+        <span className="po-gate-kind">{gateLabel(gate)}</span>
         <span>the ticket ended before a decision</span>
       </div>
     );
@@ -52,7 +55,7 @@ export function GateCard({ ticketId, item, onShow }: { ticketId: string; item: F
     const decision = item.status as GateDecision;
     return (
       <div className="po-gate closed">
-        <span className="po-gate-kind">{gate === 'plan' ? 'plan' : gate === 'final' ? 'final changes' : 'stuck'}</span>
+        <span className="po-gate-kind">{gateLabel(gate)}</span>
         <span>{RESOLVED[decision] ?? decision}</span>
         {item.detail && !item.detail.startsWith('{') && <span className="po-dim"> — “{item.detail}”</span>}
       </div>
@@ -67,6 +70,10 @@ export function GateCard({ ticketId, item, onShow }: { ticketId: string; item: F
   /** A plain retry would repeat a round that changed nothing: the note is required (the server refuses otherwise). */
   const unchanged = gate === 'stuck' && p.unchanged === true;
   const needsNote = (d: GateDecision) => unchanged && d === 'retry' && !note.trim();
+  const asks = gate === 'install' && Array.isArray(p.requests)
+    ? (p.requests as { role?: unknown; repo?: unknown; specs?: unknown }[]).filter(a => Array.isArray(a?.specs))
+      .map(a => ({ role: String(a.role ?? ''), repo: typeof a.repo === 'string' ? a.repo : '', specs: (a.specs as unknown[]).map(String) }))
+    : [];
   const body = gate === 'plan'
     ? <>
         <div className="po-gate-title">Approve the plan?</div>
@@ -78,6 +85,12 @@ export function GateCard({ ticketId, item, onShow }: { ticketId: string; item: F
           <div className="po-gate-title">Approve the final changes?</div>
           <div className="po-gate-text">The team is done. Review the diff before it lands.</div>
           <div className="po-dim">{files} file{files === 1 ? '' : 's'} changed · <button type="button" className="po-link" onClick={() => onShow?.('changes')}>open Changes</button></div>
+        </>
+      : gate === 'install'
+      ? <>
+          <div className="po-gate-title">Install new packages?</div>
+          <ul className="po-gate-asks">{asks.map((a, n) => <li key={n}><b>{a.role}</b> wants <code>{a.specs.join(' ')}</code>{a.repo ? <span className="po-dim"> in {a.repo}</span> : null}</li>)}</ul>
+          <div className="po-dim">Installed with --no-save: your package.json changes only when you accept the ticket.</div>
         </>
       : <>
           <div className="po-gate-title">The team is stuck</div>

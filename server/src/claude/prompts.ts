@@ -209,8 +209,10 @@ export function projectDocsRule(parent: string, dir: string): string {
 }
 
 /** The worktree's node_modules is a link to the owner's checkout. */
-export const SHARED_MODULES_RULE = "node_modules is shared with the owner's checkout — never run npm install/ci/uninstall/update; " +
-  'if a new dependency is needed, say so in your report.';
+export const SHARED_MODULES_RULE = "node_modules is shared with the owner's checkout — never run npm install/ci/uninstall/update yourself. " +
+  'If packages are missing, put a line in your reply: `INSTALL: all` (install what package.json lists) or `INSTALL: name@version …` ' +
+  '(new packages — also add them to package.json). In a multi-repo project name the repo: `INSTALL <repo>: …`. ' +
+  "The office installs them in the owner's folder (new packages after the owner's OK) and tells you the result.";
 
 export function fixJsonPrompt(): string {
   return 'Your last reply did not contain valid JSON in the required shape. Reply again with only the corrected fenced ```json block.';

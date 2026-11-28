@@ -115,11 +115,11 @@
 .po-dh::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 2px; background: var(--accent); box-shadow: 0 0 12px var(--accent); }
 .po-dh-row { display: flex; align-items: center; gap: 8px; height: 46px; min-width: 0; }
 .po-dh-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent); flex: none; }
-.po-dh-name { margin: 0; font-size: 15px; font-weight: 800; letter-spacing: 0.14em; color: var(--accent); text-shadow: 0 0 14px color-mix(in srgb, var(--accent) 50%, transparent); white-space: nowrap; }
+.po-dh-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; margin: 0; font-size: 15px; font-weight: 800; letter-spacing: 0.14em; color: var(--accent); text-shadow: 0 0 14px color-mix(in srgb, var(--accent) 50%, transparent); white-space: nowrap; }
 .po-dh-folder { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--po-dim); font-size: 11px; direction: rtl; text-align: left; }
 .po-hbtn {
   height: 26px; padding: 0 9px; border-radius: 5px; border: 1px solid var(--po-line-2); background: rgba(0, 0, 0, 0.25);
-  cursor: pointer; font-size: 12px; flex: none;
+  cursor: pointer; font-size: 12px; flex: none; white-space: nowrap;
 }
 .po-hbtn:hover, .po-hbtn.on { border-color: var(--accent); }
 .po-menu {
@@ -539,7 +539,7 @@ fieldset.po-mode .po-mode-opt input { accent-color: var(--accent); }
 .po-gate-warn { margin: 6px 0 2px; padding: 6px 9px; border-radius: 5px; border: 1px solid #6b5326; background: rgba(245, 194, 107, 0.08); color: #f5c26b; font-size: 12px; }
 
 /* ⬆ Push */
-.po-push-wrap { position: relative; display: inline-flex; }
+.po-push-wrap { position: relative; display: inline-flex; flex: none; }
 .po-push-msg { position: absolute; top: calc(100% + 6px); right: 0; z-index: 30; width: max-content; max-width: 360px; padding: 6px 9px;
   border: 1px solid var(--po-line); border-radius: 6px; background: var(--po-panel, #11131a); font-size: 11px; line-height: 1.4;
   white-space: pre-wrap; overflow-wrap: anywhere; cursor: pointer; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4); }

@@ -20,7 +20,7 @@ const STAGE_STATE: Record<Exclude<Stage, 'done'>, AgentState> = {
 const BUSY: AgentState[] = ['summoned', 'planning', 'designing', 'coding', 'reviewing', 'testing', 'documenting', 'waiting'];
 const WORKING: AgentState[] = ['planning', 'designing', 'coding', 'reviewing', 'testing', 'documenting'];
 const GATE_DECISIONS: Record<GateKind, GateDecision[]> = {
-  plan: ['approved', 'changes'], final: ['approved', 'changes'], stuck: ['retry', 'accept', 'cancel'],
+  plan: ['approved', 'changes'], final: ['approved', 'changes'], stuck: ['retry', 'accept', 'cancel'], install: [],
 };
 export const REVIEW_BOUNCE = 0.25;
 export const TEST_BOUNCE = 0.15;

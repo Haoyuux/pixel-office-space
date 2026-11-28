@@ -1,10 +1,11 @@
 import { spawn, execFile, execFileSync, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import readline from 'node:readline';
 import { DEV_LOG_MAX, type DevServerState, type Project, type ServerEvent } from '@office/shared';
 import { ConflictError, ValidationError } from './errors';
 import { killTree } from './claude/runner';
+import type { Installer } from './installer';
 
 /** Scripts tried in this order when the owner does not name one. */
 export const DEFAULT_SCRIPTS = ['dev', 'start', 'serve', 'preview'];
@@ -26,6 +27,8 @@ export function urlsIn(line: string): { url: string; local: boolean }[] {
     return { url, local: LOCAL_HOST.test(url) };
   });
 }
+
+const sameDir = (d: string) => { const r = resolve(d); return process.platform === 'win32' ? r.toLowerCase() : r; };
 
 export interface RunTarget { cwd: string; scripts: string[]; script?: string }
 
@@ -62,7 +65,7 @@ export class DevServers {
   /** Processes told to stop that have not closed yet. */
   private dying = new Set<ChildProcess>();
   private listeners: ((e: ServerEvent) => void)[] = [];
-  constructor(private opts: { now?: () => string; graceMs?: number } = {}) {}
+  constructor(private opts: { now?: () => string; graceMs?: number; installer?: Pick<Installer, 'busy'> } = {}) {}
 
   onEvent(cb: (e: ServerEvent) => void) { this.listeners.push(cb); }
   private now() { return this.opts.now?.() ?? new Date().toISOString(); }
@@ -73,6 +76,11 @@ export class DevServers {
   /** Every started server (snapshot). */
   all(): DevServerState[] { return [...this.procs.values()].map(p => p.state); }
   isLive(projectId: string) { const s = this.state(projectId).status; return s === 'starting' || s === 'running'; }
+  /** A Run-tab `npm install` is running in this folder (ticket installs wait for it). */
+  installing(cwd: string): boolean {
+    const k = sameDir(cwd);
+    return [...this.procs.values()].some(p => p.state.script === 'install' && (p.state.status === 'starting' || p.state.status === 'running') && !!p.state.cwd && sameDir(p.state.cwd) === k);
+  }
 
   /** `install: true` runs `npm install` instead of a script (missing packages); it ends by itself. */
   start(project: Pick<Project, 'id' | 'folder' | 'repos'>, requested?: unknown, install = false): DevServerState {
@@ -80,7 +88,10 @@ export class DevServers {
     if (requested !== undefined && requested !== null && requested !== '' && typeof requested !== 'string') throw new ValidationError('script must be a string');
     const target = runTarget(project);
     if (!target) throw new ValidationError(`No package.json found in ${project.folder}: ▶ Run starts npm scripts (dev / start)`);
-    if (install) return this.spawn(project.id, target.cwd, 'install', 'npm install');
+    if (install) {
+      if (this.opts.installer?.busy(target.cwd)) throw new ConflictError('An install for a ticket is running in this folder — try again in a moment');
+      return this.spawn(project.id, target.cwd, 'install', 'npm install');
+    }
     const script = (requested as string | undefined) || target.script;
     if (!script) {
       throw new ValidationError(`package.json has no ${DEFAULT_SCRIPTS.join(' / ')} script${target.scripts.length ? ` (it has: ${target.scripts.join(', ')})` : ''}`);

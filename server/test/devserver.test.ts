@@ -145,3 +145,31 @@ describe('push API', () => {
     expect((await request(office.server).post('/api/projects/nope/push').send({})).status).toBe(404);
   });
 });
+
+describe('dev server install vs ticket installs', () => {
+  it('refuses the Run tab install while a ticket install runs in that folder', () => {
+    const folder = appFolder();
+    const d = new DevServers({ installer: { busy: () => true } });
+    expect(() => d.start({ id: 'p', folder }, undefined, true)).toThrow(/install for a ticket/);
+  });
+
+  it('installing(cwd) is true only while its npm install runs', async () => {
+    const folder = appFolder({ install: 'node -e "setTimeout(()=>{},300)"' });
+    const d = new DevServers();
+    expect(d.installing(folder)).toBe(false);
+    d.start({ id: 'p', folder }, undefined, true);
+    expect(d.installing(folder)).toBe(true);
+    await d.shutdown();
+  });
+});
+
+describe('review fix #2', () => {
+  it('an install that prints a URL still counts as installing', async () => {
+    const folder = appFolder({ install: 'node -e "console.log(\'npm notice https://github.com/npm/cli/releases\');setTimeout(()=>{},3000)"' });
+    const d = new DevServers();
+    d.start({ id: 'p', folder }, undefined, true);
+    await until(() => d.state('p').status === 'running');
+    expect(d.installing(folder)).toBe(true);
+    await d.shutdown();
+  }, 30000);
+});

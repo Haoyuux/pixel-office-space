@@ -38,8 +38,8 @@ export type TicketStatus = 'queued' | 'running' | 'waiting' | 'done' | 'failed' 
 export interface PlanTask { role: RoleId; text: string; files: string[] }
 export interface Plan { summary: string; acceptance: string[]; areas: string[]; tasks: PlanTask[] }
 export interface DiffFile { path: string; patch: string }
-export type GateKind = 'plan' | 'final' | 'stuck';
-export type GateDecision = 'approved' | 'changes' | 'retry' | 'accept' | 'cancel';
+export type GateKind = 'plan' | 'final' | 'stuck' | 'install';
+export type GateDecision = 'approved' | 'changes' | 'retry' | 'accept' | 'cancel' | 'skip';
 export type AgentState = 'idle' | 'summoned' | 'planning' | 'designing' | 'coding' | 'reviewing' | 'testing'
   | 'documenting' | 'waiting' | 'done' | 'failed';
 export interface Ticket {
