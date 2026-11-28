@@ -19,6 +19,7 @@ import {
 } from '../claude/prompts';
 import type { MemoryStore } from '../memory';
 import { Installer, needsApproval, parseInstallRequests } from '../installer';
+import { killStrays } from '../strays';
 import { extractJson, isProse, pmValidator, reviewValidator, testValidator, type PmReply } from '../claude/parse';
 
 export { ConflictError };
@@ -46,6 +47,8 @@ export interface ClaudeOrchestratorOptions {
   memory?: Pick<MemoryStore, 'list' | 'learn'>;
   /** Runs the npm installs agents ask for (`INSTALL:` lines) in the owner's folder. */
   installer?: Pick<Installer, 'install' | 'lockOnly'>;
+  /** Stops processes still running from inside a ticket folder (tests inject a fake); returns their pids. */
+  strays?: (dir: string) => Promise<number[]>;
 }
 
 export const STOPPED_TEXT = 'Stopped by you.';
@@ -486,6 +489,8 @@ export class ClaudeOrchestrator implements Orchestrator {
 
   private async prepareWorktree(run: Run) {
     const folder = run.project.folder;
+    // a server an agent left running in the folder (earlier attempt) makes rebuilding it fail with EBUSY on Windows
+    await this.freeFolder(run, run.ws?.path ?? run.parent?.workspace?.worktree ?? workspacePath(this.opts.dataDir, run.project.id, run.ticket.id));
     if (run.ws) {
       // Resume: the worktrees may have been removed since; re-attach the branches
       await this.attachAll(run.ws);
@@ -594,6 +599,7 @@ export class ClaudeOrchestrator implements Orchestrator {
    * (dotnet/MSBuild, a test runner) must not fail a ticket whose work is done; leftovers are reported in the log.
    */
   private async removeWs(run: Run, ws: Ws) {
+    await this.freeFolder(run, ws.path);
     const left: string[] = [];
     for (const u of ws.units) {
       // drop the node_modules junction first so the removal never descends into the owner's node_modules
@@ -951,6 +957,18 @@ export class ClaudeOrchestrator implements Orchestrator {
     this.finish(run, 'done');
   }
 
+  /** Stop processes running from inside a ticket folder — only ever under `<dataDir>/wt`. Never throws. */
+  private async freeFolder(run: Run, dir: string) {
+    const root = path.resolve(this.opts.dataDir, 'wt') + path.sep;
+    const d = path.resolve(dir);
+    const inside = process.platform === 'win32' ? d.toLowerCase().startsWith(root.toLowerCase()) : d.startsWith(root);
+    if (!inside) return;
+    try {
+      const pids = await (this.opts.strays ?? killStrays)(d);
+      if (pids.length) this.log(run, 'pm', `Stopped ${pids.length} process(es) left running in the ticket folder (pid ${pids.join(', ')}).`);
+    } catch { /* best effort */ }
+  }
+
   // ---- package installs (agents ask with INSTALL lines; never run npm against the shared node_modules) ----
 
   /** Read the INSTALL lines of a reply: declared packages install now, new ones wait for the owner's OK. */
@@ -1244,6 +1262,13 @@ ${lock.output}`);
     run.ended = true;
     for (const ac of run.aborts) ac.abort();
     run.aborts.clear();
+    // a failed ticket keeps its worktree for Resume: stop what agents left running there (it would block Resume)
+    if (how === 'failed' && run.ws) {
+      const ws = run.ws;
+      const p = Promise.allSettled([...run.inflight]).then(() => this.freeFolder(run, ws.path)).catch(() => undefined);
+      this.pending.add(p);
+      void p.finally(() => this.pending.delete(p));
+    }
     // cancel removes the worktree (branch kept); a failed ticket keeps it so its work can be inspected/resumed
     if (how === 'cancelled' && run.ws) {
       const ws = run.ws;

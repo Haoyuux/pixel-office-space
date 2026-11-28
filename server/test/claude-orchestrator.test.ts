@@ -120,9 +120,12 @@ class FakeInstaller {
 let runner: FakeRunner;
 let events: ServerEvent[];
 let dataDir: string;
+/** Folders the orchestrator asked to free of stray processes (never real ones in tests). */
+let freed: string[] = [];
 const make = (git?: GitApi, extra: { deltaIntervalMs?: number; memory?: MemoryStore; installer?: FakeInstaller } = {}) => {
+  freed = [];
   runner = new FakeRunner(); events = []; dataDir = tmp('po-data-');
-  const o = new ClaudeOrchestrator({ log: new TicketLog(path.join(dataDir, 'tickets')), runner, dataDir, git, ...extra });
+  const o = new ClaudeOrchestrator({ log: new TicketLog(path.join(dataDir, 'tickets')), runner, dataDir, git, strays: async d => { freed.push(d); return []; }, ...extra });
   o.onEvent(e => events.push(e));
   return o;
 };
@@ -1715,5 +1718,36 @@ describe('ClaudeOrchestrator: package installs', () => {
     await o.idle();
     expect(fs.readFileSync(path.join(repo, 'package.json'), 'utf8')).toContain('left-pad');
     expect(inst.calls).toEqual([{ cwd: repo, specs: [], noSave: false }]);
+  });
+});
+
+describe('ClaudeOrchestrator: stray processes in ticket folders', () => {
+  let repo: string;
+  beforeEach(() => { repo = mkRepo(); });
+
+  it('frees the ticket folder before building it and before removing it on accept', async () => {
+    const o = make();
+    const t = await toFinal(o, repo);
+    const ws = workspacePath(dataDir, 'p1', t.id);
+    expect(freed).toEqual([ws]);
+    o.decide(t.id, 'final', 'approved');
+    await o.idle();
+    expect(freed).toEqual([ws, ws]);
+  });
+
+  it('frees the folder when a ticket fails (its servers would block Resume)', async () => {
+    const o = make();
+    runner.script = c => (c.kind === 'stage' && c.o.role === 'frontend' ? { isError: true, result: 'boom' } : undefined);
+    const t = await toFinal(o, repo);
+    expect(o.find(t.id)!.status).toBe('failed');
+    expect(freed.filter(d => d === workspacePath(dataDir, 'p1', t.id)).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('never touches folders outside the office worktree root', async () => {
+    const o = make();
+    await toFinal(o, repo);
+    const root = path.join(dataDir, 'wt') + path.sep;
+    expect(freed.length).toBeGreaterThan(0);
+    for (const d of freed) expect(d.startsWith(root)).toBe(true);
   });
 });
