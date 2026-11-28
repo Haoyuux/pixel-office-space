@@ -53,11 +53,11 @@ describe('Installer', () => {
     const i = new Installer({ exec: f.exec });
     const a = i.install('/r', []);
     await flush(); f.gates.shift()!();
-    expect(await a).toMatchObject({ ok: true, command: 'npm install', output: 'added 1 package' });
+    expect(await a).toMatchObject({ ok: true, command: 'npm install --no-save', output: 'added 1 package' });
     const b = i.install('/r', ['a@1'], { noSave: true });
     await flush(); f.gates.shift()!();
     await b;
-    expect(f.calls.map(c => c.args)).toEqual([['install'], ['install', '--no-save', 'a@1']]);
+    expect(f.calls.map(c => c.args)).toEqual([['install', '--no-save'], ['install', '--no-save', 'a@1']]);
   });
 
   it('one install per folder at a time; other folders run in parallel', async () => {
@@ -94,7 +94,7 @@ describe('Installer', () => {
 
   it('a failing npm reports ok: false with its output', async () => {
     const i = new Installer({ exec: async () => ({ code: 1, output: 'E404 not found' }) });
-    expect(await i.install('/r', [])).toEqual({ ok: false, command: 'npm install', output: 'E404 not found' });
+    expect(await i.install('/r', [])).toEqual({ ok: false, command: 'npm install --no-save', output: 'E404 not found' });
   });
 });
 
@@ -117,7 +117,7 @@ describe('review fixes', () => {
       ['install', '--no-save', 'left-pad@1'],
       ['install', '--no-save', 'left-pad@1'],
       ['install', '--no-save', 'left-pad@2', 'b@1'],
-      ['install'],
+      ['install', '--no-save'],
     ]);
   });
 
@@ -133,5 +133,21 @@ describe('review fixes', () => {
       { repo: '', specs: [], bad: ['(needed', 'animations)'] }]);
     expect(parseInstallRequests('INSTALL: none needed')).toEqual([]);
     expect(parseInstallRequests('INSTALL: x;rm ok')).toEqual([{ repo: '', specs: [], bad: ['x;rm'] }]);
+  });
+});
+
+describe('lockfiles', () => {
+  it('installs in the owner folder never write its package-lock (always --no-save)', async () => {
+    const calls: string[][] = [];
+    const i = new Installer({ exec: async (_c, args) => { calls.push(args); return { code: 0, output: '' }; } });
+    await i.install('/r', []);
+    expect(calls).toEqual([['install', '--no-save']]);
+  });
+
+  it('lockOnly regenerates a worktree lockfile without touching node_modules', async () => {
+    const calls: { cwd: string; args: string[] }[] = [];
+    const i = new Installer({ exec: async (cwd, args) => { calls.push({ cwd, args }); return { code: 0, output: 'up to date' }; } });
+    expect(await i.lockOnly('/wt')).toMatchObject({ ok: true });
+    expect(calls).toEqual([{ cwd: '/wt', args: ['install', '--package-lock-only', '--no-audit', '--no-fund'] }]);
   });
 });
