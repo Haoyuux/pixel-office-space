@@ -68,6 +68,7 @@ const GATE_DECISIONS: Record<GateKind, GateDecision[]> = {
   plan: ['approved', 'changes'], final: ['approved', 'changes'], stuck: ['retry', 'accept', 'cancel'], install: ['approved', 'skip'],
 };
 export const MAX_BOUNCES = 3;
+export const AUTOPILOT_RETRY = 'Autopilot: one more round — the last fixes did not converge, try a different approach.';
 export const NOT_A_GIT_REPO = 'not-a-git-repo';
 const EDITORS: RoleId[] = ['frontend', 'backend', 'devops', 'uiux', 'writer'];
 const TEST_FILE = /(^|[\\/])(tests?|__tests__|spec)[\\/]|\.(test|spec)\.[a-z0-9]+$/i;
@@ -130,6 +131,8 @@ interface Run {
   installRerun: Partial<Record<BounceFrom, boolean>>;
   /** The stage the install gate continues. */
   installFrom?: WorkStage;
+  /** Autopilot already gave this ticket its one automatic stuck retry. */
+  autoRetried?: boolean;
 }
 interface InstallAsk { role: RoleId; repo: string; specs: string[] }
 
@@ -411,7 +414,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     if (!run.plan || stage === null || stage === 'plan') {
       if (run.plan) {
         this.state(run, 'pm', 'waiting');
-        this.emit(run, { type: 'gate.open', gate: 'plan', payload: run.plan });
+        this.openGate(run, 'plan', run.plan);
         return;
       }
       return this.runPlan(run);
@@ -474,9 +477,10 @@ export class ClaudeOrchestrator implements Orchestrator {
     run.plan = clean;
     if (projectMap) run.projectMap = projectMap;
     this.emit(run, { type: 'ticket.plan', plan: clean });
-    this.message(run, 'pm', `Plan ready: ${clean.tasks.length} tasks. Waiting for your approval.`);
+    const auto = !!(this.opts.getProject?.(run.project.id) ?? run.project).autopilot;
+    this.message(run, 'pm', `Plan ready: ${clean.tasks.length} tasks. ${auto ? 'Autopilot is on: starting the work.' : 'Waiting for your approval.'}`);
     this.state(run, 'pm', 'waiting');
-    this.emit(run, { type: 'gate.open', gate: 'plan', payload: clean });
+    this.openGate(run, 'plan', clean);
   }
 
   /** Ask: the PM answered. No gate, no worktree, no other roles; the ticket is done (usage is emitted by finish). */
@@ -782,7 +786,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     this.alive(run);
     this.emit(run, { type: 'ticket.diff', files });
     this.message(run, 'pm', 'All stages done. Please review the final changes.');
-    this.emit(run, { type: 'gate.open', gate: 'final', payload: null });
+    this.openGate(run, 'final', null);
   }
 
   private async runStage(run: Run, stage: WorkStage): Promise<void> {
@@ -860,7 +864,7 @@ export class ClaudeOrchestrator implements Orchestrator {
       if (run.bounces[stage] >= MAX_BOUNCES) {
         run.stuckFrom = stage;
         this.message(run, who, `This has bounced ${MAX_BOUNCES} times. I need your call.`);
-        this.emit(run, { type: 'gate.open', gate: 'stuck', payload: { from: stage, bounces: run.bounces[stage], issues, ...(run.idleBounce ? { unchanged: true } : {}) } });
+        this.openGate(run, 'stuck', { from: stage, bounces: run.bounces[stage], issues, ...(run.idleBounce ? { unchanged: true } : {}) });
         return;
       }
       this.message(run, who, stage === 'review'
@@ -972,6 +976,23 @@ export class ClaudeOrchestrator implements Orchestrator {
     } catch { /* best effort */ }
   }
 
+  /**
+   * Open a gate; with the project on Autopilot (read fresh) decide it at once: plan / install / final approved,
+   * stuck retried once per ticket with a nudge, after that the owner decides.
+   */
+  private openGate(run: Run, gate: GateKind, payload: unknown) {
+    this.emit(run, { type: 'gate.open', gate, payload });
+    if (!(this.opts.getProject?.(run.project.id) ?? run.project).autopilot) return;
+    let decision: GateDecision | null = gate === 'stuck' ? null : 'approved';
+    let note = 'autopilot';
+    if (gate === 'stuck' && !run.autoRetried) {
+      run.autoRetried = true;
+      decision = 'retry';
+      note = AUTOPILOT_RETRY;
+    }
+    if (decision) this.decide(run.ticket.id, gate, decision, note);
+  }
+
   // ---- package installs (agents ask with INSTALL lines; never run npm against the shared node_modules) ----
 
   /** Read the INSTALL lines of a reply: declared packages install now, new ones wait for the owner's OK. */
@@ -1024,7 +1045,7 @@ ${lock.output}`);
     run.installFrom = stage;
     for (const r of this.rolesFor(run, stage)) this.state(run, r, 'waiting');
     this.message(run, 'pm', 'New packages need your OK.');
-    this.emit(run, { type: 'gate.open', gate: 'install', payload: { from: stage, requests: run.pendingInstalls } });
+    this.openGate(run, 'install', { from: stage, requests: run.pendingInstalls });
   }
 
   private async decideInstall(run: Run, decision: GateDecision) {

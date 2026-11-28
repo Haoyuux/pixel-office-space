@@ -1752,3 +1752,49 @@ describe('ClaudeOrchestrator: stray processes in ticket folders', () => {
     for (const d of freed) expect(d.startsWith(root)).toBe(true);
   });
 });
+
+describe('ClaudeOrchestrator: autopilot', () => {
+  let repo: string;
+  beforeEach(() => { repo = mkRepo(); });
+  const auto = (on = true) => {
+    const p = { ...project(repo), autopilot: on };
+    runner = new FakeRunner(); events = []; dataDir = tmp('po-data-'); freed = [];
+    const o = new ClaudeOrchestrator({ log: new TicketLog(path.join(dataDir, 'tickets')), runner, dataDir, getProject: () => p,
+      strays: async () => [] });
+    o.onEvent(e => events.push(e));
+    return { o, p };
+  };
+
+  it('runs plan → merge without the owner: plan and final are decided with the note "autopilot"', async () => {
+    const { o, p } = auto();
+    const t = o.startTicket(p, 'Add forgot password link');
+    await o.idle();
+    expect(o.find(t.id)!.status).toBe('done');
+    expect(of('gate.closed').map(e => [e.gate, e.decision, e.note])).toEqual([['plan', 'approved', 'autopilot'], ['final', 'approved', 'autopilot']]);
+    expect(fs.existsSync(path.join(repo, 'ui.txt'))).toBe(true);
+    expect(pmText()).not.toMatch(/Waiting for your approval/);
+    expect(pmText()).toMatch(/Plan ready: \d+ tasks\. Autopilot is on/);
+  });
+
+  it('stuck: one automatic round with a note to try something else; the second stuck waits for the owner', async () => {
+    const { o, p } = auto();
+    runner.script = c => c.kind === 'review'
+      ? { result: fence({ approved: false, issues: [{ role: 'backend', file: 'backend.txt', note: 'still wrong' }] }) }
+      : undefined;
+    const t = o.startTicket(p, 'Add forgot password link');
+    await o.idle();
+    expect(of('gate.closed').filter(e => e.gate === 'stuck').map(e => e.decision)).toEqual(['retry']);
+    expect(runner.of('backend', 'bounce').some(c => c.o.prompt.includes('Autopilot: one more round'))).toBe(true);
+    expect(gates().filter(g => g === 'stuck')).toHaveLength(2);
+    expect(o.find(t.id)!.openGate).toBe('stuck');
+    expect(o.find(t.id)!.status).toBe('waiting');
+  });
+
+  it('off: gates wait as before', async () => {
+    const { o, p } = auto(false);
+    const t = o.startTicket(p, 'x');
+    await o.idle();
+    expect(o.find(t.id)!.openGate).toBe('plan');
+    expect(of('gate.closed')).toHaveLength(0);
+  });
+});
