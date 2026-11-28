@@ -772,6 +772,8 @@ export class ClaudeOrchestrator implements Orchestrator {
 
   private async next(run: Run, after: WorkStage | null): Promise<void> {
     this.alive(run);
+    // a stage's runs are all over: servers its agents left in the background would only hold ports and the folder
+    if (after && run.ws) await this.freeFolder(run, run.ws.path);
     const start = after ? PIPELINE.indexOf(after) + 1 : 0;
     const stage = PIPELINE.slice(start).find(s => this.rolesFor(run, s).length > 0);
     if (stage) return this.runStage(run, stage);
@@ -899,6 +901,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     }));
     this.alive(run);
     run.idleBounce = !(await this.commit(run, `office: fixes (${owners.join(', ')})`));
+    await this.freeFolder(run, run.ws!.path);
     for (const r of owners) this.state(run, r, 'waiting');
   }
 

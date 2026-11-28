@@ -9,6 +9,8 @@ const STRIPPED_ENV = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_GRACE_MS = 5000;
 const STDERR_TAIL = 2000;
+/** After the claude process exits, how long its output pipes may stay open (an orphan holding them) before the run settles. */
+const EXIT_GRACE_MS = 1500;
 
 export type RunnerEvent =
   | { kind: 'init'; sessionId: string; model: string }
@@ -285,10 +287,23 @@ export class ClaudeRunner {
           ? `claude CLI not found (${this.bin}); install Claude Code or set CLAUDE_BIN`
           : `claude process error: ${err.message}`));
       });
-      child.on('close', code => {
+      const done = (code: number | null) => {
         if (stopReason) return finish(stopReason);
         if (result) return finish(null, { ...result, sessionId: result.sessionId || sessionId, exitCode: code });
         finish(new Error(`claude exited with code ${code} without a result${stderr.trim() ? `:\n${stderr.trim()}` : ''}`));
+      };
+      child.on('close', done);
+      // 'close' waits for stdout/stderr to close, and a process the agent left running in the background (a dev or
+      // preview server) inherits them and keeps them open: once claude itself has exited, settle after a short grace
+      // for the last output lines instead of waiting for that process to end.
+      child.on('exit', code => {
+        const t = setTimeout(() => {
+          if (settled) return;
+          child.stdout?.destroy(); child.stderr?.destroy();
+          done(code);
+        }, EXIT_GRACE_MS);
+        t.unref();
+        timers.push(t);
       });
     });
   }
