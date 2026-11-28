@@ -45,7 +45,7 @@ export interface ClaudeOrchestratorOptions {
   /** Team memory: read into every agent prompt; the PM's lessons are added when a ticket/answer completes. */
   memory?: Pick<MemoryStore, 'list' | 'learn'>;
   /** Runs the npm installs agents ask for (`INSTALL:` lines) in the owner's folder. */
-  installer?: Pick<Installer, 'install'>;
+  installer?: Pick<Installer, 'install' | 'lockOnly'>;
 }
 
 export const STOPPED_TEXT = 'Stopped by you.';
@@ -140,7 +140,7 @@ export class ClaudeOrchestrator implements Orchestrator {
   private listeners: ((e: ServerEvent) => void)[] = [];
   private pending = new Set<Promise<unknown>>();
   private git: GitApi;
-  private installer: Pick<Installer, 'install'>;
+  private installer: Pick<Installer, 'install' | 'lockOnly'>;
   private installSeq = 0;
   private now: () => Date;
   /** Server is stopping: runs are aborted but tickets are left as they are (the next boot marks them interrupted). */
@@ -986,6 +986,13 @@ export class ClaudeOrchestrator implements Orchestrator {
     if (res.ok) {
       run.installed = true;
       this.message(run, 'pm', `📦 Installed packages${where}${role === 'pm' ? '' : ` for ${role}`}.`);
+      // the owner's lockfile is never written (--no-save): the ticket's own lockfile catches up in its worktree
+      if (role !== 'pm' && fs.existsSync(path.join(unit.path, 'package.json'))) {
+        const lock = await this.installer.lockOnly(unit.path);
+        if (run.ended) return;
+        if (!lock.ok) (run.notes[role] ??= []).push(`Office: updating package-lock.json${where} failed:
+${lock.output}`);
+      }
     } else {
       if (role !== 'pm') (run.notes[role] ??= []).push(`Office: npm install failed${where}:\n${res.output}`);
       this.message(run, 'pm', `npm install failed${where}. ${role === 'pm' ? 'Run it yourself in the project folder.' : `Told ${role}.`}`);

@@ -110,6 +110,10 @@ class FakeInstaller {
   async install(cwd: string, specs: string[], opts: { noSave?: boolean } = {}) {
     this.calls.push({ cwd, specs, noSave: !!opts.noSave });
     return { ok: this.ok, command: `npm install${specs.length ? ' ' + specs.join(' ') : ''}`, output: this.ok ? 'added 1 package' : 'E404 registry down' };
+  }  locks: string[] = [];
+  async lockOnly(cwd: string) {
+    this.locks.push(cwd);
+    return { ok: true, command: 'npm install --package-lock-only', output: 'up to date' };
   }
 }
 
@@ -1629,6 +1633,8 @@ describe('ClaudeOrchestrator: package installs', () => {
     await toFinal(o, repo);
     expect(inst.calls).toEqual([{ cwd: repo, specs: [], noSave: false }]);
     expect(of('agent.tool').filter(e => e.tool === 'npm').map(e => e.status)).toEqual(['running', 'ok']);
+    // the ticket's own lockfile is regenerated in its worktree (committed with its changes)
+    expect(inst.locks).toEqual([workspacePath(dataDir, 'p1', of('ticket.created')[0].ticket.id)]);
     expect(gates()).toEqual(['plan', 'final']);
   });
 

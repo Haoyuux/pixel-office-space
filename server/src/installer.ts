@@ -77,20 +77,36 @@ export class Installer {
 
   busy(cwd: string): boolean { return this.running.has(key(cwd)); }
 
-  /** npm install in `cwd`, after any earlier install there has finished. Never throws. */
-  install(cwd: string, specs: string[], opts: { noSave?: boolean } = {}): Promise<InstallResult> {
+  /** Rewrite `cwd`'s package-lock.json from its package.json; node_modules is not touched. Never throws. */
+  async lockOnly(cwd: string): Promise<InstallResult> {
+    const args = ['install', '--package-lock-only', '--no-audit', '--no-fund'];
+    const command = `npm ${args.join(' ')}`;
+    try {
+      const r = await this.exec(cwd, args);
+      return { ok: r.code === 0, command, output: r.output.slice(-OUTPUT_MAX) };
+    } catch (err) {
+      return { ok: false, command, output: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * npm install --no-save in `cwd` (the owner's folder), after any earlier install there has finished; packages
+   * installed earlier in that folder are passed again (npm prunes what package.json lacks). Never throws.
+   */
+  install(cwd: string, specs: string[], _opts: { noSave?: boolean } = {}): Promise<InstallResult> {
     const k = key(cwd);
     const p = (this.chains.get(k) ?? Promise.resolve()).catch(() => undefined).then(async (): Promise<InstallResult> => {
       while (this.others.some(f => f(cwd))) await new Promise(r => setTimeout(r, this.pollMs));
       const kept = new Map(this.extras.get(k) ?? []);
-      if (opts.noSave) for (const s of specs) kept.set(packageName(s), s);
-      const args = kept.size ? ['install', '--no-save', ...kept.values(), ...(opts.noSave ? [] : specs)]
-        : ['install', ...specs];
+      for (const s of specs) kept.set(packageName(s), s);
+      // --no-save: the owner's package.json / package-lock.json never change (an uncommitted lockfile would block
+      // the ticket's merge); the ticket's own lockfile is regenerated in its worktree (lockOnly)
+      const args = ['install', '--no-save', ...kept.values()];
       const command = `npm ${args.join(' ')}`;
       this.running.add(k);
       try {
         const r = await this.exec(cwd, args);
-        if (r.code === 0 && opts.noSave) this.extras.set(k, kept);
+        if (r.code === 0) this.extras.set(k, kept);
         return { ok: r.code === 0, command, output: r.output.slice(-OUTPUT_MAX) };
       } catch (err) {
         return { ok: false, command: 'npm install', output: err instanceof Error ? err.message : String(err) };
