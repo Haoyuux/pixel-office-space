@@ -79,7 +79,7 @@ export class DevServers {
   /** A Run-tab `npm install` is running in this folder (ticket installs wait for it). */
   installing(cwd: string): boolean {
     const k = sameDir(cwd);
-    return [...this.procs.values()].some(p => p.state.script === 'install' && p.state.status === 'starting' && !!p.state.cwd && sameDir(p.state.cwd) === k);
+    return [...this.procs.values()].some(p => p.state.script === 'install' && (p.state.status === 'starting' || p.state.status === 'running') && !!p.state.cwd && sameDir(p.state.cwd) === k);
   }
 
   /** `install: true` runs `npm install` instead of a script (missing packages); it ends by itself. */

@@ -18,7 +18,7 @@ import {
   projectDocsRule, repoContext, reviewPrompt, SHARED_MODULES_RULE, stagePrompt, teamMemoryBlock, testPrompt, withOwnerNotes,
 } from '../claude/prompts';
 import type { MemoryStore } from '../memory';
-import { Installer, parseInstallRequests, undeclared } from '../installer';
+import { Installer, needsApproval, parseInstallRequests } from '../installer';
 import { extractJson, isProse, pmValidator, reviewValidator, testValidator, type PmReply } from '../claude/parse';
 
 export { ConflictError };
@@ -969,7 +969,7 @@ export class ClaudeOrchestrator implements Orchestrator {
         continue;
       }
       if (!req.specs.length && req.bad.length) continue;
-      if (!req.specs.length || !undeclared(unit.repo, req.specs).length) await this.runInstall(run, role, unit, [], false);
+      if (!req.specs.length || !needsApproval(unit.repo, req.specs).length) await this.runInstall(run, role, unit, [], false);
       else run.pendingInstalls.push({ role, repo: unit.name, specs: req.specs });
     }
   }
