@@ -59,7 +59,7 @@ const STAGE_STATE: Record<Exclude<Stage, 'done'>, AgentState> = {
 const BUSY: AgentState[] = ['summoned', 'planning', 'designing', 'coding', 'reviewing', 'testing', 'documenting', 'waiting'];
 const WORKING: AgentState[] = ['planning', 'designing', 'coding', 'reviewing', 'testing', 'documenting'];
 const GATE_DECISIONS: Record<GateKind, GateDecision[]> = {
-  plan: ['approved', 'changes'], final: ['approved', 'changes'], stuck: ['retry', 'accept', 'cancel'],
+  plan: ['approved', 'changes'], final: ['approved', 'changes'], stuck: ['retry', 'accept', 'cancel'], install: ['approved', 'skip'],
 };
 export const MAX_BOUNCES = 3;
 export const NOT_A_GIT_REPO = 'not-a-git-repo';

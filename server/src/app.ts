@@ -17,6 +17,7 @@ import { ProjectFiles } from './files';
 import { MemoryStore } from './memory';
 import { buildSummary } from './summary';
 import { DevServers, runTarget } from './devserver';
+import type { Installer } from './installer';
 
 export interface Office {
   server: Server; store: ProjectStore; hub: Hub; close(): void;
@@ -33,9 +34,11 @@ export interface OfficeOptions {
   /** Team memory (shared with the claude orchestrator, which reads it into prompts and adds the PM's lessons). */
   memory?: MemoryStore;
   devServers?: DevServers;
+  /** Ticket package installs: the Run tab's install refuses while one runs in the same folder. */
+  installer?: Pick<Installer, 'busy'>;
 }
 
-const GATES: GateKind[] = ['plan', 'final', 'stuck'];
+const GATES: GateKind[] = ['plan', 'final', 'stuck', 'install'];
 
 /** Direct subfolders (no dot-folders/node_modules) that have a .git of their own. */
 function subfoldersWithGit(folder: string): string[] {
@@ -59,7 +62,7 @@ export function createOffice(opts: OfficeOptions): Office {
   const conversations = new ConversationStore(join(opts.dataDir, 'conversations.json'));
   const files = new ProjectFiles(git.lsFiles ?? realGit.lsFiles);
   const memory = opts.memory ?? new MemoryStore(opts.dataDir);
-  const devServers = opts.devServers ?? new DevServers();
+  const devServers = opts.devServers ?? new DevServers({ installer: opts.installer });
   const app = express();
   app.use(guardRequests);
   // uploads are JSON base64 (≤ 10 MB decoded): only this route accepts a large body
