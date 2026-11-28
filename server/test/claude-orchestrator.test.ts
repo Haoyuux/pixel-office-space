@@ -1729,10 +1729,11 @@ describe('ClaudeOrchestrator: stray processes in ticket folders', () => {
     const o = make();
     const t = await toFinal(o, repo);
     const ws = workspacePath(dataDir, 'p1', t.id);
-    expect(freed).toEqual([ws]);
+    // built (1) + after each of build, review, test (3): what agents left running never outlives its stage
+    expect(freed).toEqual([ws, ws, ws, ws]);
     o.decide(t.id, 'final', 'approved');
     await o.idle();
-    expect(freed).toEqual([ws, ws]);
+    expect(freed).toEqual([ws, ws, ws, ws, ws]);
   });
 
   it('frees the folder when a ticket fails (its servers would block Resume)', async () => {

@@ -190,6 +190,15 @@ describe('ClaudeRunner with a fake binary', () => {
     }
   });
 
+  it('settles once claude exits with a result, even if a process it left behind keeps the output pipe open', async () => {
+    const hb = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orphan-')), 'gc');
+    afterReap.push(hb);
+    const started = Date.now();
+    const r = await fake('orphan', hb).run(opts());
+    expect(r).toMatchObject({ result: 'done', isError: false, exitCode: 0 });
+    expect(Date.now() - started).toBeLessThan(8000);
+  }, 12000);
+
   it('sends the prompt via stdin: huge, multi-line, quotes, leading dash', async () => {
     const prompt = '-starts with a dash\nline "two" with quotes & %PATH% \\ back — ünïcode\n' + 'x'.repeat(100_000);
     const r = await fake('introspect').run(opts({ prompt }));

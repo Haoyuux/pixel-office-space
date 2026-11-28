@@ -28,6 +28,19 @@ switch (mode) {
     setInterval(() => {}, 1 << 30);
     break;
   }
+  case 'orphan': {
+    // Like an agent that started a preview server in the background: a grandchild inherits our stdout/stderr and
+    // outlives us, so the pipes stay open after we print the result and exit.
+    const gc = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 15000)'], {
+      stdio: ['ignore', 'inherit', 'inherit'], detached: process.platform === 'win32',
+    });
+    gc.unref();
+    fs.writeFileSync(`${arg}.pid`, String(gc.pid));
+    out({ type: 'system', subtype: 'init', session_id: 'fake-session', model: 'fake-model', tools: [] });
+    result('done');
+    process.exit(0);
+    break;
+  }
   case 'garbage': {
     process.stdout.write('this is not json\n');
     result('ok');
