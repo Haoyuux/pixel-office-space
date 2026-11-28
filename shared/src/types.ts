@@ -12,6 +12,8 @@ export interface Project {
   gitKind?: RepoDetection['kind'];
   /** Claude model for this project's runs (`--model`); missing / 'default' = Claude Code's default. */
   model?: ModelChoice;
+  /** Autopilot: gates are decided automatically (plan/install/final approved, one stuck retry). */
+  autopilot?: boolean;
 }
 export type ModelChoice = 'default' | 'opus' | 'sonnet' | 'haiku' | 'fable';
 export const MODEL_CHOICES: ModelChoice[] = ['default', 'opus', 'sonnet', 'haiku', 'fable'];

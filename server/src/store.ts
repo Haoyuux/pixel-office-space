@@ -10,7 +10,7 @@ const PALETTES = ['a', 'b', 'c'] as const;
 const ALL_LOOKS: Look[] = PALETTES.flatMap(palette => CHARACTERS.map(character => ({ character, palette })));
 
 export interface ProjectInput { name: string; folder: string; accent: Accent; team: RoleId[]; agentsMode?: AgentsMode }
-export interface ProjectPatch { name?: string; accent?: Accent; team?: RoleId[]; agentsMode?: AgentsMode; model?: ModelChoice }
+export interface ProjectPatch { name?: string; accent?: Accent; team?: RoleId[]; agentsMode?: AgentsMode; model?: ModelChoice; autopilot?: boolean }
 export const AGENTS_MODES: AgentsMode[] = ['claude', 'simulated'];
 const checkMode = (m: unknown): AgentsMode => {
   if (!AGENTS_MODES.includes(m as AgentsMode)) throw new ValidationError(`Unknown agents mode: ${String(m)}`);
@@ -88,6 +88,10 @@ export class ProjectStore {
     if (patch.team !== undefined) next.team = this.checkTeam(patch.team);
     if (patch.agentsMode !== undefined) next.agentsMode = checkMode(patch.agentsMode);
     if (patch.model !== undefined) next.model = checkModel(patch.model);
+    if (patch.autopilot !== undefined) {
+      if (typeof patch.autopilot !== 'boolean') throw new ValidationError('autopilot must be true or false');
+      next.autopilot = patch.autopilot;
+    }
     beforeSave?.(next);
     Object.assign(p, next);
     for (const k of Object.keys(p) as (keyof Project)[]) if (!(k in next)) delete p[k];

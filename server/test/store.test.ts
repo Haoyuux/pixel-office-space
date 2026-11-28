@@ -8,6 +8,15 @@ const newStore = () => new ProjectStore(join(tmp(), 'projects.json'));
 const input = (over: Record<string, unknown> = {}) => ({ name: 'Shop', folder: projectDir(), accent: 'cyan' as const, team: ['pm', 'qa'] as any, ...over });
 
 describe('ProjectStore', () => {
+  it('autopilot: stored when boolean, rejected otherwise', () => {
+    const s = newStore();
+    const p = s.add(input());
+    expect(p.autopilot).toBeUndefined();
+    expect(s.update(p.id, { autopilot: true }).autopilot).toBe(true);
+    expect(s.update(p.id, { autopilot: false }).autopilot).toBe(false);
+    expect(() => s.update(p.id, { autopilot: 'yes' as any })).toThrow(ValidationError);
+  });
+
   it('assigns slots in order; a removal closes the gap (later rooms move up), new projects go last', () => {
     const s = newStore();
     const a = s.add(input()), b = s.add(input()), c = s.add(input()), d = s.add(input());
