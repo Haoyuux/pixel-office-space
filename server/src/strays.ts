@@ -6,7 +6,7 @@ import { execFile } from 'node:child_process';
  * Before the office rebuilds or removes a ticket folder (and when a ticket ends) it stops those processes.
  * Matching is by command line: the process runs a file inside the folder.
  */
-export interface Proc { pid: number; cmd: string }
+export interface Proc { pid: number; cmd: string; ppid?: number }
 export interface StrayDeps { list(): Promise<Proc[]>; kill(pid: number): Promise<void> }
 
 const norm = (s: string, platform: NodeJS.Platform) => {
@@ -35,12 +35,14 @@ export const realDeps: StrayDeps = {
   async list() {
     if (process.platform === 'win32') {
       const out = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-        'Get-CimInstance Win32_Process | Where-Object { $_.CommandLine } | Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress']);
-      const rows = JSON.parse(out || '[]') as { ProcessId: number; CommandLine: string }[] | { ProcessId: number; CommandLine: string };
-      return (Array.isArray(rows) ? rows : [rows]).map(r => ({ pid: r.ProcessId, cmd: r.CommandLine }));
+        'Get-CimInstance Win32_Process | Where-Object { $_.CommandLine } | Select-Object ProcessId, ParentProcessId, CommandLine | ConvertTo-Json -Compress']);
+      type Row = { ProcessId: number; ParentProcessId: number; CommandLine: string };
+      const rows = JSON.parse(out || '[]') as Row[] | Row;
+      return (Array.isArray(rows) ? rows : [rows]).map(r => ({ pid: r.ProcessId, ppid: r.ParentProcessId, cmd: r.CommandLine }));
     }
-    const out = await exec('ps', ['-eo', 'pid=,args=']);
-    return out.split('\n').map(l => l.trim().match(/^(\d+)\s+(.*)$/)).filter(Boolean).map(m => ({ pid: Number(m![1]), cmd: m![2] }));
+    const out = await exec('ps', ['-eo', 'pid=,ppid=,args=']);
+    return out.split('\n').map(l => l.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter(Boolean)
+      .map(m => ({ pid: Number(m![1]), ppid: Number(m![2]), cmd: m![3] }));
   },
   async kill(pid) {
     if (process.platform === 'win32') await exec('taskkill', ['/PID', String(pid), '/T', '/F']);

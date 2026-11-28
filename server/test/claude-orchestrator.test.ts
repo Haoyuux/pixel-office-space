@@ -776,6 +776,7 @@ describe('ClaudeOrchestrator: follow-ups, resume, messages', () => {
     const log = new TicketLog(path.join(dataDir, 'tickets'));
     const rec = log.recover().find(x => x.id === t.id)!;
     expect(rec.reason).toBe('interrupted');
+    expect(log.interrupted).toEqual([t.id]);
     const r2 = new FakeRunner();
     const o2 = new ClaudeOrchestrator({ log, runner: r2, dataDir, getProject: () => project(repo) });
     const resumed = o2.resume(t.id);

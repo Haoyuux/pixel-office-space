@@ -53,8 +53,12 @@ export class TicketLog {
     return undefined;
   }
 
+  /** Ids the last recover() marked interrupted (they were running or waiting when the server stopped). */
+  interrupted: string[] = [];
+
   /** Rebuild every ticket; tickets that had started but never ended are marked failed/interrupted. */
   recover(): Ticket[] {
+    this.interrupted = [];
     if (!existsSync(this.dir)) return [];
     const out: Ticket[] = [];
     for (const pid of readdirSync(this.dir)) {
@@ -64,6 +68,7 @@ export class TicketLog {
           const seq = ((events.at(-1) as { seq?: number })?.seq ?? 0) + 1;
           const e: ServerEvent = { type: 'ticket.failed', reason: 'interrupted', projectId: pid, ticketId: t.id, seq, ts: new Date().toISOString() };
           this.append(e);
+          this.interrupted.push(t.id);
           out.push(applyTicketEvent(t, e)!);
         } else out.push(t);
       }

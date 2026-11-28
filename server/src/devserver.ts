@@ -1,11 +1,12 @@
 import { spawn, execFile, execFileSync, type ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import readline from 'node:readline';
 import { DEV_LOG_MAX, type DevServerState, type Project, type ServerEvent } from '@office/shared';
 import { ConflictError, ValidationError } from './errors';
 import { killTree } from './claude/runner';
 import type { Installer } from './installer';
+import { realDeps as realProcs, type StrayDeps } from './strays';
 
 /** Scripts tried in this order when the owner does not name one. */
 export const DEFAULT_SCRIPTS = ['dev', 'start', 'serve', 'preview'];
@@ -29,6 +30,9 @@ export function urlsIn(line: string): { url: string; local: boolean }[] {
 }
 
 const sameDir = (d: string) => { const r = resolve(d); return process.platform === 'win32' ? r.toLowerCase() : r; };
+
+/** A started dev server as recorded on disk: `pid` is the shell the office spawned (npm runs under it). */
+interface DevRecord { projectId: string; cwd: string; pid: number; startedAt: string }
 
 export interface RunTarget { cwd: string; scripts: string[]; script?: string }
 
@@ -65,7 +69,42 @@ export class DevServers {
   /** Processes told to stop that have not closed yet. */
   private dying = new Set<ChildProcess>();
   private listeners: ((e: ServerEvent) => void)[] = [];
-  constructor(private opts: { now?: () => string; graceMs?: number; installer?: Pick<Installer, 'busy'> } = {}) {}
+  constructor(private opts: {
+    now?: () => string; graceMs?: number; installer?: Pick<Installer, 'busy'>;
+    /** Where started servers are recorded, so the next office start can stop what a killed office left behind. */
+    stateFile?: string;
+    reap?: StrayDeps;
+  } = {}) {}
+
+  private records(): DevRecord[] {
+    if (!this.opts.stateFile) return [];
+    try { const r = JSON.parse(readFileSync(this.opts.stateFile, 'utf8')); return Array.isArray(r) ? r : []; } catch { return []; }
+  }
+  private saveRecords(r: DevRecord[]) {
+    if (!this.opts.stateFile) return;
+    try { writeFileSync(this.opts.stateFile, JSON.stringify(r)); } catch { /* best effort */ }
+  }
+
+  /**
+   * Office start: an office killed outright (a `tsx watch` restart on Windows, a crash) never stopped its dev servers,
+   * and their npm process lives on under the shell that is gone. Stop each recorded server's npm tree — only npm
+   * processes whose parent is a recorded shell pid (or that shell itself), never anything else — then clear the record.
+   */
+  async reapOrphans(): Promise<number[]> {
+    const recs = this.records();
+    if (!recs.length) return [];
+    const deps = this.opts.reap ?? realProcs;
+    const shells = new Set(recs.map(r => r.pid));
+    let pids: number[] = [];
+    try {
+      pids = (await deps.list())
+        .filter(p => (shells.has(p.pid) || (p.ppid !== undefined && shells.has(p.ppid))) && /npm/i.test(p.cmd))
+        .map(p => p.pid);
+    } catch { /* cannot list: nothing to do */ }
+    for (const pid of pids) { try { await deps.kill(pid); } catch { /* already gone */ } }
+    this.saveRecords([]);
+    return pids;
+  }
 
   onEvent(cb: (e: ServerEvent) => void) { this.listeners.push(cb); }
   private now() { return this.opts.now?.() ?? new Date().toISOString(); }
@@ -123,6 +162,13 @@ export class DevServers {
       return this.end(p, { status: 'failed', error: `Could not start npm: ${(e as Error).message}` });
     }
     p.child = child;
+    const pid = child.pid;
+    if (pid != null) {
+      this.saveRecords([...this.records().filter(r => r.projectId !== projectId), { projectId, cwd, pid, startedAt: p.state.startedAt! }]);
+    }
+    const forget = () => { if (pid != null) this.saveRecords(this.records().filter(r => r.pid !== pid)); };
+    child.once('close', forget);
+    child.once('error', forget);
     for (const s of [child.stdout!, child.stderr!]) readline.createInterface({ input: s }).on('line', l => this.line(p, l));
     child.on('error', err => this.end(p, { status: 'failed', error: `Could not start npm: ${err.message}` }));
     child.on('close', code => {
