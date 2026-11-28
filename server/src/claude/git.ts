@@ -12,10 +12,10 @@ const AUTHOR = [
 
 interface GitResult { code: number; stdout: string; stderr: string }
 
-function run(cwd: string, args: string[]): Promise<GitResult> {
+function run(cwd: string, args: string[], timeoutMs = 0): Promise<GitResult> {
   return new Promise((resolve) => {
     const child = execFile('git', [...AUTHOR, ...args], {
-      cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true,
+      cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true, timeout: timeoutMs,
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
     }, (err, stdout, stderr) => {
       const code = err ? (typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : 1) : 0;
@@ -243,4 +243,43 @@ export async function removeWorktree(repo: string, wtPath: string): Promise<void
   await run(repo, ['worktree', 'remove', '--force', wtPath]);
   if (fs.existsSync(wtPath)) fs.rmSync(wtPath, { recursive: true, force: true, maxRetries: 5 });
   await run(repo, ['worktree', 'prune']);
+}
+
+export type PushResult =
+  | { ok: true; branch: string; remote: string; output: string; upToDate: boolean }
+  | { ok: false; branch?: string; remote?: string; error: string };
+
+const PUSH_TIMEOUT_MS = 120_000;
+
+/**
+ * Push the checked-out branch: to its upstream when it has one, else to `origin` (setting the upstream).
+ * Uses the owner's own git credentials; a terminal prompt is never shown (GIT_TERMINAL_PROMPT=0), so a missing
+ * login fails with git's message instead of hanging. Never forces.
+ */
+export async function pushBranch(repo: string, timeoutMs = PUSH_TIMEOUT_MS): Promise<PushResult> {
+  if (!await isRepo(repo)) return { ok: false, error: 'This folder is not a git repository.' };
+  const branch = (await run(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
+  if (!branch || branch === 'HEAD') return { ok: false, error: 'The repository is not on a branch (detached HEAD), so there is nothing to push.' };
+  const up = await run(repo, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
+  const upstream = up.code === 0 ? up.stdout.trim() : '';
+  const remotes = (await run(repo, ['remote'])).stdout.split(/\r?\n/).map(r => r.trim()).filter(Boolean);
+  const remote = upstream ? upstream.slice(0, upstream.indexOf('/')) : remotes.includes('origin') ? 'origin' : remotes.length === 1 ? remotes[0] : '';
+  if (!remote) {
+    return { ok: false, branch, error: remotes.length
+      ? `This repository has several remotes (${remotes.join(', ')}) and the branch "${branch}" tracks none of them.`
+      : 'This repository has no remote. Add one first, e.g. git remote add origin https://github.com/<you>/<repo>.git' };
+  }
+  const args = upstream ? ['push', '--porcelain', remote, `HEAD:${upstream.slice(remote.length + 1)}`] : ['push', '--porcelain', '-u', remote, branch];
+  const started = Date.now();
+  const r = await run(repo, args, timeoutMs);
+  const output = `${r.stdout}${r.stderr}`.trim();
+  if (r.code !== 0) {
+    const timedOut = Date.now() - started >= timeoutMs - 250;
+    return { ok: false, branch, remote, error: timedOut
+      ? `git push did not finish within ${Math.round(timeoutMs / 1000)}s (it may be waiting for a login). Run it once in a terminal to sign in: git push ${remote} ${branch}`
+      : output || 'git push failed.' };
+  }
+  // --porcelain ref lines are "<flag>\t<from>:<to>\t<summary>"; '=' means already up to date
+  const refs = r.stdout.split(/\r?\n/).filter(l => /^[ +\-*!=]\t/.test(l));
+  return { ok: true, branch, remote, output, upToDate: refs.length > 0 && refs.every(l => l.startsWith('=')) };
 }

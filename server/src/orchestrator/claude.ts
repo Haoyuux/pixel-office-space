@@ -90,6 +90,8 @@ interface Run {
   /** The PM's lessons for the team memory (plan/answer JSON "memory"), added once the ticket ends done. */
   lessons?: string[];
   bounces: Record<BounceFrom, number>; stuckFrom?: BounceFrom; lastIssues: Issue[];
+  /** The last fix round (bounce) changed no files: a plain "one more round" would repeat it. */
+  idleBounce?: boolean;
   sessions: Partial<Record<RoleId, string>>;
   /** Per-role chain so two runs never share a session concurrently. */
   locks: Map<RoleId, Promise<unknown>>;
@@ -223,6 +225,10 @@ export class ClaudeOrchestrator implements Orchestrator {
     if (!GATE_DECISIONS[gate]?.includes(decision)) throw new ValidationError(`Decision ${decision} is not valid for ${gate}`);
     const run = this.runs.get(ticketId);
     if (!run || run.ended || run.ticket.openGate !== gate) throw new ConflictError(`Gate ${gate} is not open`);
+    // the same round again would change nothing: the team needs the owner's direction this time
+    if (gate === 'stuck' && decision === 'retry' && run.idleBounce && !note?.trim()) {
+      throw new ValidationError('The last round changed no files, so another round as is would fail the same way. Add a note telling the team what to do (or Accept / Cancel).');
+    }
     this.emit(run, { type: 'gate.closed', gate, decision, note });
     if (gate === 'plan') {
       if (decision === 'changes') return this.bg(run, () => this.runPlan(run, note));
@@ -821,7 +827,7 @@ export class ClaudeOrchestrator implements Orchestrator {
       if (run.bounces[stage] >= MAX_BOUNCES) {
         run.stuckFrom = stage;
         this.message(run, who, `This has bounced ${MAX_BOUNCES} times. I need your call.`);
-        this.emit(run, { type: 'gate.open', gate: 'stuck', payload: { from: stage, bounces: run.bounces[stage], issues } });
+        this.emit(run, { type: 'gate.open', gate: 'stuck', payload: { from: stage, bounces: run.bounces[stage], issues, ...(run.idleBounce ? { unchanged: true } : {}) } });
         return;
       }
       this.message(run, who, stage === 'review'
@@ -859,7 +865,7 @@ export class ClaudeOrchestrator implements Orchestrator {
       return this.exec(run, role, 'build', run.ws!.path, bouncePrompt(extra), run.sessions[role]);
     }));
     this.alive(run);
-    await this.commit(run, `office: fixes (${owners.join(', ')})`);
+    run.idleBounce = !(await this.commit(run, `office: fixes (${owners.join(', ')})`));
     for (const r of owners) this.state(run, r, 'waiting');
   }
 
@@ -1116,10 +1122,13 @@ export class ClaudeOrchestrator implements Orchestrator {
   }
 
   /** Commit every unit's worktree (ones with no changes are skipped). */
-  private async commit(run: Run, msg: string) {
-    if (!run.ws) return;
-    for (const u of run.ws.units) await this.git.commitAll(u.path, msg);
+  /** Commits every unit; true when any of them had changes (a git double that returns nothing counts as changed). */
+  private async commit(run: Run, msg: string): Promise<boolean> {
+    if (!run.ws) return false;
+    let changed = false;
+    for (const u of run.ws.units) if ((await this.git.commitAll(u.path, msg)) !== false) changed = true;
     this.alive(run);
+    return changed;
   }
 
   private alive(run: Run) { if (run.ended || this.stopping) throw new Ended(); }

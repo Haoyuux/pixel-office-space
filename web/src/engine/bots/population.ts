@@ -3,10 +3,10 @@ import type { Project, RoleId } from '@office/shared';
 import { dirFrom } from '../iso';
 import { loadCharacter } from '../assets';
 import type { PieceMeta } from '../pieces';
-import type { BuildingLayout, Spot } from '../layout/types';
+import type { BuildingLayout, RoomRect, Spot } from '../layout/types';
 import { WalkGrid } from '../walkgrid';
 import type { OfficeScene } from '../render/scene';
-import { Bot } from './bot';
+import { Bot, roomMoves } from './bot';
 import { OfficeLife, diffRoster, type ActivityId, type Intent } from './officeLife';
 import { isEmote } from './mood';
 import { SimClock, MAX_DT } from './simClock';
@@ -26,6 +26,8 @@ export class Population {
   /** look key per bot id, for the roster diff */
   private keys = new Map<string, string>();
   private leaving = new Set<Bot>();
+  /** The rooms of the last layout (to see which rooms moved). */
+  private rooms: RoomRect[] = [];
   private working = new Set<string>();
   private since = 0;
   private gen = 0;
@@ -56,6 +58,10 @@ export class Population {
     for (const id of diff.remove) this.remove(id);
     const grid = this.grid = new WalkGrid(layout, meta);
     for (const b of this.bots.values()) b.setGrid(grid);
+    // a removed project's gap closed: bots in (or walking to) a moved room move with it
+    const moves = roomMoves(this.rooms, layout.rooms);
+    this.rooms = layout.rooms;
+    if (moves.length) for (const b of [...this.bots.values(), ...this.leaving]) { b.setGrid(grid); b.relocate(moves); }
     if (this.life) this.life.setLayout(layout.spots, layout.seats);
     else {
       this.life = new OfficeLife({ spots: layout.spots, seats: layout.seats, random: this.random, now: this.clock.now, isNight: () => this.scene.night });
@@ -135,7 +141,7 @@ export class Population {
     for (const id of this.working) { const [p, r] = id.split(':'); this.scene.setWorking(p, r as RoleId, false); }
     this.working.clear();
     for (const b of [...this.bots.values(), ...this.leaving]) b.destroy();
-    this.bots.clear(); this.plans.clear(); this.keys.clear(); this.leaving.clear();
+    this.bots.clear(); this.plans.clear(); this.keys.clear(); this.leaving.clear(); this.rooms = [];
     this.life = null;
   }
 

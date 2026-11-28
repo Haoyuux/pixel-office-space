@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
-  isRepo, hasCommit, gitInit, baseInfo, createWorktree, commitAll, diff, mergeIntoBase, removeWorktree, slug, detectRepos,
+  isRepo, hasCommit, gitInit, baseInfo, createWorktree, commitAll, diff, mergeIntoBase, removeWorktree, slug, detectRepos, pushBranch,
 } from '../src/claude/git';
 
 const dirs: string[] = [];
@@ -359,5 +359,45 @@ describe('detectRepos', () => {
     fs.mkdirSync(path.join(d, 'plain'));
     expect(await detectRepos(d)).toEqual({ kind: 'none' });
     expect(await detectRepos(path.join(d, 'nope'))).toEqual({ kind: 'none' });
+  });
+});
+
+describe('pushBranch', () => {
+  it('pushes to origin and sets the upstream, then reports up to date', async () => {
+    const repo = await mkRepo();
+    const bare = tmp();
+    git(bare, 'init', '--bare', '-q');
+    git(repo, 'remote', 'add', 'origin', bare);
+    const branch = git(repo, 'rev-parse', '--abbrev-ref', 'HEAD');
+    const first = await pushBranch(repo);
+    expect(first).toMatchObject({ ok: true, branch, remote: 'origin', upToDate: false });
+    expect(git(bare, 'rev-parse', branch)).toBe(git(repo, 'rev-parse', 'HEAD'));
+    expect(git(repo, 'rev-parse', '--abbrev-ref', '@{u}')).toBe('origin/' + branch);
+    expect(await pushBranch(repo)).toMatchObject({ ok: true, upToDate: true });
+    fs.writeFileSync(path.join(repo, 'b.txt'), 'b\n');
+    git(repo, 'add', '.'); git(repo, 'commit', '-q', '-m', 'b');
+    expect(await pushBranch(repo)).toMatchObject({ ok: true, upToDate: false });
+    expect(git(bare, 'rev-parse', branch)).toBe(git(repo, 'rev-parse', 'HEAD'));
+  });
+
+  it('fails with a clear message: no remote, detached HEAD, rejected (never forces)', async () => {
+    const repo = await mkRepo();
+    expect(await pushBranch(repo)).toMatchObject({ ok: false, error: expect.stringContaining('no remote') });
+    const bare = tmp();
+    git(bare, 'init', '--bare', '-q');
+    git(repo, 'remote', 'add', 'origin', bare);
+    expect((await pushBranch(repo)).ok).toBe(true);
+    // someone else pushed: ours is behind → rejected, not forced
+    const other = tmp();
+    git(other, 'clone', '-q', bare, '.');
+    fs.writeFileSync(path.join(other, 'c.txt'), 'c\n');
+    git(other, 'add', '.'); git(other, 'commit', '-q', '-m', 'c'); git(other, 'push', '-q');
+    fs.writeFileSync(path.join(repo, 'd.txt'), 'd\n');
+    git(repo, 'add', '.'); git(repo, 'commit', '-q', '-m', 'd');
+    const r = await pushBranch(repo);
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.error).toMatch(/rejected|fetch first|non-fast-forward/i);
+    git(repo, 'checkout', '-q', '--detach');
+    expect(await pushBranch(repo)).toMatchObject({ ok: false, error: expect.stringContaining('detached') });
   });
 });

@@ -21,7 +21,7 @@ const stop = (signal: NodeJS.Signals) => {
   if (stopping) return;
   stopping = true;
   console.log(`${signal}: stopping agents...`);
-  orchestrator.shutdown().catch(() => undefined).finally(() => process.exit(0));
+  Promise.all([orchestrator.shutdown(), office.devServers.shutdown()]).catch(() => undefined).finally(() => process.exit(0));
 };
 for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(s, () => stop(s));
-process.on('exit', () => killLiveSync());
+process.on('exit', () => { killLiveSync(); office.devServers.killAllSync(); });
