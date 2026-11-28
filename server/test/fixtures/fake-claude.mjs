@@ -41,6 +41,16 @@ switch (mode) {
     process.exit(0);
     break;
   }
+  case 'linger': {
+    // Like the CLI with a background shell task still running (a preview server): the result is printed, but the
+    // process stays alive with its child.
+    const gc = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    fs.writeFileSync(`${arg}.pid`, String(gc.pid));
+    out({ type: 'system', subtype: 'init', session_id: 'fake-session', model: 'fake-model', tools: [] });
+    result('done');
+    setInterval(() => {}, 1 << 30);
+    break;
+  }
   case 'garbage': {
     process.stdout.write('this is not json\n');
     result('ok');

@@ -11,6 +11,8 @@ const DEFAULT_GRACE_MS = 5000;
 const STDERR_TAIL = 2000;
 /** After the claude process exits, how long its output pipes may stay open (an orphan holding them) before the run settles. */
 const EXIT_GRACE_MS = 1500;
+/** After the result line, how long the CLI may stay alive (a background task still running) before it is stopped. */
+const RESULT_GRACE_MS = 3000;
 
 export type RunnerEvent =
   | { kind: 'init'; sessionId: string; model: string }
@@ -274,7 +276,19 @@ export class ClaudeRunner {
           if (e.kind === 'init' && e.sessionId) sessionId = e.sessionId;
           emit(e);
         }
-        if (p.result) result = p.result;
+        if (p.result && !result) {
+          result = p.result;
+          // The result line is the end of the run. The CLI may stay alive while a background shell task it started
+          // (a dev / preview server) runs: after a short grace, stop it and everything it started, and settle.
+          const t = setTimeout(() => {
+            if (settled) return;
+            killTree(child, 0, () => {}); // the agent is done: no grace for what it left running
+            child.stdout?.destroy(); child.stderr?.destroy();
+            done(child.exitCode);
+          }, RESULT_GRACE_MS);
+          t.unref();
+          timers.push(t);
+        }
       });
       readline.createInterface({ input: child.stderr! }).on('line', line => {
         stderr = (stderr + line + '\n').slice(-STDERR_TAIL);

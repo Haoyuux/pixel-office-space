@@ -199,6 +199,19 @@ describe('ClaudeRunner with a fake binary', () => {
     expect(Date.now() - started).toBeLessThan(8000);
   }, 12000);
 
+  it('ends the run once the result is in, even if claude stays alive for a background task (and stops that task)', async () => {
+    const hb = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'linger-')), 'gc');
+    afterReap.push(hb);
+    const started = Date.now();
+    const r = await fake('linger', hb).run(opts());
+    expect(r).toMatchObject({ result: 'done', isError: false });
+    expect(Date.now() - started).toBeLessThan(10000);
+    const gc = Number(fs.readFileSync(hb + '.pid', 'utf8'));
+    let alive = true;
+    for (let i = 0; i < 40 && alive; i++) { try { process.kill(gc, 0); await sleep(100); } catch { alive = false; } }
+    expect(alive).toBe(false);
+  }, 20000);
+
   it('sends the prompt via stdin: huge, multi-line, quotes, leading dash', async () => {
     const prompt = '-starts with a dash\nline "two" with quotes & %PATH% \\ back — ünïcode\n' + 'x'.repeat(100_000);
     const r = await fake('introspect').run(opts({ prompt }));
