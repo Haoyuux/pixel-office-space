@@ -7,6 +7,7 @@ import { RoutingOrchestrator, type Mode } from './orchestrator/routing';
 import { realScheduler, type Scheduler } from './orchestrator/types';
 import { ClaudeRunner } from './claude/runner';
 import { Installer } from './installer';
+import { autoResume } from './autoResume';
 import { MemoryStore } from './memory';
 
 export interface BootOptions {
@@ -51,5 +52,7 @@ export function boot(opts: BootOptions): {
     const p = office.store.get(t.projectId);
     if (p) orchestrator.adopt(p, t);
   }
+  // tickets a restart interrupted carry on by themselves (a code change under `tsx watch`, a crash, Ctrl+C)
+  autoResume(log.interrupted, log, orchestrator);
   return { office, orchestrator, simulated, claude, log };
 }

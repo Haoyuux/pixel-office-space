@@ -62,7 +62,9 @@ export function createOffice(opts: OfficeOptions): Office {
   const conversations = new ConversationStore(join(opts.dataDir, 'conversations.json'));
   const files = new ProjectFiles(git.lsFiles ?? realGit.lsFiles);
   const memory = opts.memory ?? new MemoryStore(opts.dataDir);
-  const devServers = opts.devServers ?? new DevServers({ installer: opts.installer });
+  const devServers = opts.devServers ?? new DevServers({ installer: opts.installer, stateFile: join(opts.dataDir, 'devservers.json') });
+  // dev servers a killed office left running (their ports pile up: 3000, 3001, …): stop them
+  void devServers.reapOrphans().then(pids => { if (pids.length) console.log(`Stopped ${pids.length} dev server(s) left by the previous run`); });
   const app = express();
   app.use(guardRequests);
   // uploads are JSON base64 (≤ 10 MB decoded): only this route accepts a large body

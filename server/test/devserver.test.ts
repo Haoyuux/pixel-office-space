@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import request from 'supertest';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DevServerState, Project, ServerEvent } from '@office/shared';
 import { createOffice, type Office } from '../src/app';
@@ -172,4 +172,36 @@ describe('review fix #2', () => {
     expect(d.installing(folder)).toBe(true);
     await d.shutdown();
   }, 30000);
+});
+
+describe('dev servers left behind by an office that was killed', () => {
+  it('records each started server and forgets it when it ends', async () => {
+    const stateFile = join(projectDir('state'), 'devservers.json');
+    const folder = appFolder();
+    const d = new DevServers({ stateFile });
+    const s = d.start({ id: 'p', folder });
+    const rec = JSON.parse(readFileSync(stateFile, 'utf8'));
+    expect(rec).toEqual([{ projectId: 'p', cwd: s.cwd, pid: expect.any(Number), startedAt: expect.any(String) }]);
+    await d.shutdown();
+    await until(() => JSON.parse(readFileSync(stateFile, 'utf8')).length === 0);
+  }, 30000);
+
+  it('on start-up stops the orphaned tree of each recorded server (by its dead shell pid) and clears the record', async () => {
+    const stateFile = join(projectDir('state'), 'devservers.json');
+    writeFileSync(stateFile, JSON.stringify([{ projectId: 'p', cwd: 'D:/app', pid: 100, startedAt: '2026-11-28T00:00:00Z' }]));
+    const killed: number[] = [];
+    const d = new DevServers({
+      stateFile,
+      reap: {
+        list: async () => [
+          { pid: 200, ppid: 100, cmd: 'node npm-cli.js run dev' }, // npm, orphaned under the dead shell
+          { pid: 300, ppid: 999, cmd: 'node vite.js' }, // someone else's
+        ],
+        kill: async pid => { killed.push(pid); },
+      },
+    });
+    expect(await d.reapOrphans()).toEqual([200]);
+    expect(killed).toEqual([200]);
+    expect(JSON.parse(readFileSync(stateFile, 'utf8'))).toEqual([]);
+  });
 });
