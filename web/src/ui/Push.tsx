@@ -63,7 +63,7 @@ export function PushButton({ projectId }: { projectId: string }) {
   return <span className="po-push-wrap">
     <button type="button" className="po-hbtn po-push" disabled={busy} aria-label="Push to GitHub"
       title="Push the checked-out branch to GitHub with your git login (/push)" onClick={() => void act()}>
-      {busy ? '⬆ Pushing…' : note && !note.ok ? '⚠ Push' : '⬆ Push'}
+      {busy ? '⬆…' : note && !note.ok ? '⚠⬆' : '⬆'}
     </button>
     {note && (
       <span className={`po-push-msg${note.ok ? ' ok' : ' err'}`} role="status" title="Click to dismiss" onClick={() => setNote(null)}>{note.text}</span>

@@ -99,7 +99,7 @@ export function RunButton({ projectId, onOpen }: { projectId: string; onOpen: ()
     <button type="button" className={`po-hbtn po-run${live ? ' on' : ''}`} disabled={busy}
       title={error ?? (live ? 'Stop the dev server' : 'Run the dev server (npm run dev / start)')} aria-label={live ? 'Stop dev server' : 'Run dev server'}
       onClick={() => void act()}>
-      {live ? (s.status === 'starting' ? '◌ ■' : '■ Stop') : error ? '⚠ Run' : '▶ Run'}
+      {live ? (s.status === 'starting' ? '◌' : '■') : error ? '⚠▶' : '▶'}
     </button>
   </>;
 }
