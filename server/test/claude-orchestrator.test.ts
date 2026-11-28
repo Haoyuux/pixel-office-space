@@ -103,10 +103,20 @@ class FakeRunner {
   of(role: RoleId, kind?: Kind) { return this.calls.filter(c => c.o.role === role && (!kind || c.kind === kind)); }
 }
 
+/** Records installs instead of running npm. */
+class FakeInstaller {
+  calls: { cwd: string; specs: string[]; noSave: boolean }[] = [];
+  constructor(public ok = true) {}
+  async install(cwd: string, specs: string[], opts: { noSave?: boolean } = {}) {
+    this.calls.push({ cwd, specs, noSave: !!opts.noSave });
+    return { ok: this.ok, command: `npm install${specs.length ? ' ' + specs.join(' ') : ''}`, output: this.ok ? 'added 1 package' : 'E404 registry down' };
+  }
+}
+
 let runner: FakeRunner;
 let events: ServerEvent[];
 let dataDir: string;
-const make = (git?: GitApi, extra: { deltaIntervalMs?: number; memory?: MemoryStore } = {}) => {
+const make = (git?: GitApi, extra: { deltaIntervalMs?: number; memory?: MemoryStore; installer?: FakeInstaller } = {}) => {
   runner = new FakeRunner(); events = []; dataDir = tmp('po-data-');
   const o = new ClaudeOrchestrator({ log: new TicketLog(path.join(dataDir, 'tickets')), runner, dataDir, git, ...extra });
   o.onEvent(e => events.push(e));
@@ -1594,5 +1604,110 @@ describe('short worktree paths (Windows 260-char limit)', () => {
   it('keeps the workspace path short: <dataDir>/wt/<8>/<8>', () => {
     const p = workspacePath('D:/data', '7f3c2a1b-1111-2222-3333-444444444444', '9e8d7c6b-5555-6666-7777-888888888888');
     expect(p).toBe(path.join('D:/data', 'wt', '7f3c2a1b', '9e8d7c6b'));
+  });
+});
+
+describe('ClaudeOrchestrator: package installs', () => {
+  let repo: string;
+  let inst: FakeInstaller;
+  /** A repo with node_modules (so the worktree links it) and package.json declaring motion. */
+  beforeEach(() => {
+    repo = mkRepo();
+    fs.mkdirSync(path.join(repo, 'node_modules', 'motion'), { recursive: true });
+    fs.writeFileSync(path.join(repo, '.gitignore'), 'node_modules/\n');
+    fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ name: 'shop', dependencies: { motion: '^12' } }));
+    git(repo, 'add', '-A'); git(repo, 'commit', '-q', '-m', 'pkg');
+    inst = new FakeInstaller();
+  });
+  const fe = (reply: string) => (c: Call): Reply | undefined =>
+    c.kind === 'stage' && c.o.role === 'frontend' && runner.of('frontend', 'stage').length === 1 ? { result: reply, write: { 'ui.txt': 'ui\n' } } : undefined;
+  const prompts = (role: RoleId) => runner.of(role).map(c => c.o.prompt).join('\n');
+
+  it('declared package → npm install in the owner repo, shown as a tool, no gate', async () => {
+    const o = make(undefined, { installer: inst });
+    runner.script = fe('done\nINSTALL: motion@^12');
+    await toFinal(o, repo);
+    expect(inst.calls).toEqual([{ cwd: repo, specs: [], noSave: false }]);
+    expect(of('agent.tool').filter(e => e.tool === 'npm').map(e => e.status)).toEqual(['running', 'ok']);
+    expect(gates()).toEqual(['plan', 'final']);
+  });
+
+  it('new package → install gate; Install runs --no-save and the ticket continues', async () => {
+    const o = make(undefined, { installer: inst });
+    runner.script = fe('done\nINSTALL: left-pad@1');
+    const t = await toFinal(o, repo);
+    expect(gates()).toEqual(['plan', 'install']);
+    expect(of('gate.open').at(-1)!.payload).toEqual({ from: 'build', requests: [{ role: 'frontend', repo: '', specs: ['left-pad@1'] }] });
+    expect(inst.calls).toEqual([]);
+    o.decide(t.id, 'install', 'approved');
+    await o.idle();
+    expect(inst.calls).toEqual([{ cwd: repo, specs: ['left-pad@1'], noSave: true }]);
+    expect(gates()).toEqual(['plan', 'install', 'final']);
+  });
+
+  it('Skip → the agent is told the owner declined; the ticket continues', async () => {
+    const o = make(undefined, { installer: inst });
+    runner.script = fe('done\nINSTALL: left-pad@1');
+    const t = await toFinal(o, repo);
+    o.decide(t.id, 'install', 'skip');
+    await o.idle();
+    expect(inst.calls).toEqual([]);
+    expect(prompts('frontend')).toMatch(/declined installing left-pad@1/);
+    expect(gates()).toEqual(['plan', 'install', 'final']);
+  });
+
+  it('review fails after an install → review runs again once, not a bounce', async () => {
+    const o = make(undefined, { installer: inst });
+    runner.script = (c, n) => c.kind === 'review' && n === 1
+      ? { result: fence({ approved: false, issues: [{ role: 'frontend', file: 'ui.txt', note: 'motion/react missing' }] }) + '\nINSTALL: all' }
+      : undefined;
+    await toFinal(o, repo);
+    expect(of('ticket.failed').map(e => e.reason)).toEqual([]);
+    expect(runner.of('techlead', 'review')).toHaveLength(2);
+    expect(runner.of('frontend', 'bounce')).toHaveLength(0);
+    expect(gates()).toEqual(['plan', 'final']);
+  });
+
+  it('the install re-run happens once per round: a review that keeps failing still bounces and gets stuck', async () => {
+    const o = make(undefined, { installer: inst });
+    runner.script = c => c.kind === 'review'
+      ? { result: fence({ approved: false, issues: [{ role: 'frontend', file: 'ui.txt', note: 'still broken' }] }) + '\nINSTALL: all' }
+      : undefined;
+    await toFinal(o, repo);
+    expect(gates()).toEqual(['plan', 'stuck']);
+    expect(runner.of('frontend', 'bounce')).toHaveLength(2);
+    expect(runner.of('techlead', 'review')).toHaveLength(6);
+  });
+
+  it('npm failure → error tool event, failure text reaches the agent, ticket not failed', async () => {
+    inst = new FakeInstaller(false);
+    const o = make(undefined, { installer: inst });
+    runner.script = fe('done\nINSTALL: all');
+    const t = await toFinal(o, repo);
+    expect(of('agent.tool').filter(e => e.tool === 'npm').at(-1)!.status).toBe('error');
+    expect(prompts('frontend')).toMatch(/npm install failed[\s\S]*E404 registry down/);
+    expect(o.find(t.id)!.status).not.toBe('failed');
+    expect(gates()).toEqual(['plan', 'final']);
+  });
+
+  it('a bad spec installs nothing and the agent is told', async () => {
+    const o = make(undefined, { installer: inst });
+    runner.script = fe('done\nINSTALL: x;rm');
+    await toFinal(o, repo);
+    expect(inst.calls).toEqual([]);
+    expect(prompts('frontend')).toMatch(/not a valid package spec/);
+  });
+
+  it('accepting a ticket that changed package.json runs npm install in the owner repo after the merge', async () => {
+    const o = make(undefined, { installer: inst });
+    runner.script = c => c.kind === 'stage' && c.o.role === 'frontend'
+      ? { result: 'done', write: { 'package.json': JSON.stringify({ name: 'shop', dependencies: { motion: '^12', 'left-pad': '1' } }) } }
+      : undefined;
+    const t = await toFinal(o, repo);
+    expect(inst.calls).toEqual([]);
+    o.decide(t.id, 'final', 'approved');
+    await o.idle();
+    expect(fs.readFileSync(path.join(repo, 'package.json'), 'utf8')).toContain('left-pad');
+    expect(inst.calls).toEqual([{ cwd: repo, specs: [], noSave: false }]);
   });
 });

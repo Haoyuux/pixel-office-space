@@ -18,6 +18,7 @@ import {
   projectDocsRule, repoContext, reviewPrompt, SHARED_MODULES_RULE, stagePrompt, teamMemoryBlock, testPrompt, withOwnerNotes,
 } from '../claude/prompts';
 import type { MemoryStore } from '../memory';
+import { Installer, parseInstallRequests, undeclared } from '../installer';
 import { extractJson, isProse, pmValidator, reviewValidator, testValidator, type PmReply } from '../claude/parse';
 
 export { ConflictError };
@@ -43,6 +44,8 @@ export interface ClaudeOrchestratorOptions {
   deltaIntervalMs?: number;
   /** Team memory: read into every agent prompt; the PM's lessons are added when a ticket/answer completes. */
   memory?: Pick<MemoryStore, 'list' | 'learn'>;
+  /** Runs the npm installs agents ask for (`INSTALL:` lines) in the owner's folder. */
+  installer?: Pick<Installer, 'install'>;
 }
 
 export const STOPPED_TEXT = 'Stopped by you.';
@@ -116,7 +119,16 @@ interface Run {
   /** Resume (interrupted): roles whose next prompt starts with "Continue where you left off." */
   continuing: Set<RoleId>;
   resumeFrom?: { stage: Stage | null };
+  /** New packages agents asked for: they wait for the owner's OK (install gate) at the end of the stage. */
+  pendingInstalls: InstallAsk[];
+  /** An install ran during the current review/test stage. */
+  installed: boolean;
+  /** The stage already re-ran once because of an install since the last bounce. */
+  installRerun: Partial<Record<BounceFrom, boolean>>;
+  /** The stage the install gate continues. */
+  installFrom?: WorkStage;
 }
+interface InstallAsk { role: RoleId; repo: string; specs: string[] }
 
 class Ended extends Error { constructor() { super('ticket ended'); this.name = 'Ended'; } }
 class StageFailed extends Error {}
@@ -128,12 +140,15 @@ export class ClaudeOrchestrator implements Orchestrator {
   private listeners: ((e: ServerEvent) => void)[] = [];
   private pending = new Set<Promise<unknown>>();
   private git: GitApi;
+  private installer: Pick<Installer, 'install'>;
+  private installSeq = 0;
   private now: () => Date;
   /** Server is stopping: runs are aborted but tickets are left as they are (the next boot marks them interrupted). */
   private stopping = false;
 
   constructor(private opts: ClaudeOrchestratorOptions) {
     this.git = opts.git ?? realGit;
+    this.installer = opts.installer ?? new Installer();
     this.now = opts.now ?? (() => new Date());
   }
 
@@ -242,6 +257,7 @@ export class ClaudeOrchestrator implements Orchestrator {
       run.merging = true;
       return this.bg(run, () => this.approveFinal(run));
     }
+    if (gate === 'install') return this.bg(run, () => this.decideInstall(run, decision));
     // stuck
     if (decision === 'cancel') { this.finish(run, 'cancelled'); return; }
     const from = run.stuckFrom ?? 'review';
@@ -321,7 +337,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     const run: Run = {
       ticket, project, seq, bounces: { review: 0, test: 0 }, lastIssues: [], sessions: {}, locks: new Map(),
       aborts: new Set(), inflight: new Set(), streams: new Set(), notes: {}, usage: { turns: 0, costUsd: 0, durationMs: 0 }, ended: false,
-      inherited: new Set(), continuing: new Set(),
+      inherited: new Set(), continuing: new Set(), pendingInstalls: [], installed: false, installRerun: {},
     };
     this.runs.set(ticket.id, run);
     return run;
@@ -775,6 +791,7 @@ export class ClaudeOrchestrator implements Orchestrator {
       let approved = true;
       /** Some verdict said "not approved" with no items at all: never turned into a pass by the guard below. */
       let bare = false;
+      run.installed = false;
       const summary = stage === 'review' ? diffSummary(await this.diffAll(run)) : '';
       this.alive(run);
       const remarks = (role: RoleId, notes: string[]) => {
@@ -797,6 +814,7 @@ export class ClaudeOrchestrator implements Orchestrator {
       }));
       this.alive(run);
       if (stage === 'test') await this.commit(run, 'office: test (qa)');
+      if (run.pendingInstalls.length) return this.openInstallGate(run, stage);
       for (const r of roles) this.state(run, r, 'waiting');
       // fair review: an item on a file outside every repo can't be fixed by the devs → a PM note, never a bounce
       const outside = [...issues, ...unassigned].filter(i => i.file !== undefined && !this.inRepos(run, i.file));
@@ -817,9 +835,16 @@ export class ClaudeOrchestrator implements Orchestrator {
       if (!approved && !all.length) all.push({ role: 'pm', note: `The ${stage === 'review' ? 'review' : 'tests'} did not pass.` });
       issues.splice(0, issues.length, ...this.route(run, stage, all));
       if (approved || !issues.length) {
+        run.installRerun[stage] = false;
         // no further step is pending for these roles: deliver any owner notes that arrived during the stage
         for (const r of roles) await this.deliverNotes(run, r);
         return this.next(run, stage);
+      }
+      // packages were installed while reviewing/testing: the failure may have been the missing packages
+      if (run.installed && !run.installRerun[stage]) {
+        run.installRerun[stage] = true;
+        this.message(run, 'pm', `Packages were installed during the ${stage}; running it again.`);
+        return this.runStage(run, stage);
       }
       run.lastIssues = issues;
       run.bounces[stage]++;
@@ -849,6 +874,7 @@ export class ClaudeOrchestrator implements Orchestrator {
     await Promise.all(roles.map(r => this.deliverNotes(run, r)));
     await this.commit(run, `office: ${stage} (${roles.join(', ')})`);
     for (const r of roles) this.state(run, r, 'waiting');
+    if (run.pendingInstalls.length) return this.openInstallGate(run, stage);
     return this.next(run, stage);
   }
 
@@ -856,6 +882,7 @@ export class ClaudeOrchestrator implements Orchestrator {
   private async bounce(run: Run, issues: Issue[]) {
     this.alive(run);
     const owners = [...new Set(issues.map(i => i.role))];
+    run.installRerun = {};
     this.emit(run, { type: 'ticket.stage', stage: 'build', roles: owners });
     for (const r of owners) this.state(run, r, 'coding');
     await Promise.all(owners.map(role => {
@@ -886,7 +913,13 @@ export class ClaudeOrchestrator implements Orchestrator {
   private async approveFinal(run: Run) {
     const ws = run.ws!;
     const changed: Unit[] = [];
-    for (const u of ws.units) if ((await this.git.diff(u.repo, u.base.head, u.branch)).length) changed.push(u);
+    /** Units whose package.json changed: npm install in the owner's folder once merged (package-lock catches up). */
+    const pkg = new Set<Unit>();
+    for (const u of ws.units) {
+      const files = await this.git.diff(u.repo, u.base.head, u.branch);
+      if (files.length) changed.push(u);
+      if (u.sharedModules && files.some(f => f.path === 'package.json')) pkg.add(u);
+    }
     this.alive(run);
     if (!changed.length) {
       this.message(run, 'pm', 'No changes were made — nothing to merge.');
@@ -899,6 +932,7 @@ export class ClaudeOrchestrator implements Orchestrator {
       const res = await this.git.mergeIntoBase(u.repo, u.branch, u.base.branch);
       this.alive(run);
       if (res.merged) {
+        u.merged = true;
         this.workspace(run, true);
         this.message(run, 'pm', `Merged ${u.branch} into ${u.base.branch}.`);
       } else {
@@ -912,8 +946,72 @@ export class ClaudeOrchestrator implements Orchestrator {
       const f = path.join(run.project.folder, MAP_FILE);
       if (!fs.existsSync(f)) { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, run.projectMap); }
     }
+    for (const u of changed) if (u.merged && pkg.has(u)) await this.runInstall(run, 'pm', u, [], false);
     await this.removeWs(run, ws);
     this.finish(run, 'done');
+  }
+
+  // ---- package installs (agents ask with INSTALL lines; never run npm against the shared node_modules) ----
+
+  /** Read the INSTALL lines of a reply: declared packages install now, new ones wait for the owner's OK. */
+  private async takeInstalls(run: Run, role: RoleId, text: string) {
+    const ws = run.ws!;
+    for (const req of parseInstallRequests(text ?? '')) {
+      const unit = req.repo ? ws.units.find(u => u.name === req.repo) : ws.units.length === 1 ? ws.units[0] : undefined;
+      const tell = (n: string) => (run.notes[role] ??= []).push(`Office: ${n}`);
+      if (!unit) {
+        tell(`INSTALL needs one of these repo names: ${ws.units.map(u => `INSTALL ${u.name}: …`).join(', ')}. Nothing was installed.`);
+        continue;
+      }
+      if (req.bad.length) tell(`${req.bad.map(b => `"${b}"`).join(', ')} is not a valid package spec; nothing was installed for it.`);
+      if (!unit.sharedModules) {
+        tell(`${unit.name || 'this repo'} has its own node_modules in your worktree: install there yourself.`);
+        continue;
+      }
+      if (!req.specs.length && req.bad.length) continue;
+      if (!req.specs.length || !undeclared(unit.repo, req.specs).length) await this.runInstall(run, role, unit, [], false);
+      else run.pendingInstalls.push({ role, repo: unit.name, specs: req.specs });
+    }
+  }
+
+  /** npm in the owner's repo folder, shown in the feed as a tool block; a failure goes to the agent. */
+  private async runInstall(run: Run, role: RoleId, unit: Unit, specs: string[], noSave: boolean) {
+    const where = run.ws?.multi ? ` in ${unit.name}` : '';
+    const toolId = `install-${++this.installSeq}`;
+    const label = `npm install${noSave ? ' --no-save' : ''}${specs.length ? ' ' + specs.join(' ') : ''}${where}`;
+    this.emit(run, { type: 'agent.tool', role, tool: 'npm', summary: label, status: 'running', toolId });
+    const res = await this.installer.install(unit.repo, specs, { noSave });
+    if (run.ended) return;
+    this.emit(run, { type: 'agent.tool', role, tool: 'npm', summary: label, detail: res.output, status: res.ok ? 'ok' : 'error', toolId });
+    if (res.ok) {
+      run.installed = true;
+      this.message(run, 'pm', `📦 Installed packages${where}${role === 'pm' ? '' : ` for ${role}`}.`);
+    } else {
+      if (role !== 'pm') (run.notes[role] ??= []).push(`Office: npm install failed${where}:\n${res.output}`);
+      this.message(run, 'pm', `npm install failed${where}. ${role === 'pm' ? 'Run it yourself in the project folder.' : `Told ${role}.`}`);
+    }
+  }
+
+  private openInstallGate(run: Run, stage: WorkStage) {
+    run.installFrom = stage;
+    for (const r of this.rolesFor(run, stage)) this.state(run, r, 'waiting');
+    this.message(run, 'pm', 'New packages need your OK.');
+    this.emit(run, { type: 'gate.open', gate: 'install', payload: { from: stage, requests: run.pendingInstalls } });
+  }
+
+  private async decideInstall(run: Run, decision: GateDecision) {
+    const asks = run.pendingInstalls.splice(0);
+    const from = run.installFrom ?? 'build';
+    run.installFrom = undefined;
+    for (const a of asks) {
+      const unit = run.ws!.units.find(u => u.name === a.repo);
+      if (decision === 'approved' && unit) await this.runInstall(run, a.role, unit, a.specs, true);
+      else (run.notes[a.role] ??= []).push(`Office: the owner declined installing ${a.specs.join(' ')}. Do without them.`);
+    }
+    this.alive(run);
+    if (from === 'review' || from === 'test') return this.runStage(run, from);
+    await Promise.all([...new Set(asks.map(a => a.role))].map(r => this.deliverNotes(run, r)));
+    return this.next(run, from);
   }
 
   /**
@@ -1073,6 +1171,7 @@ export class ClaudeOrchestrator implements Orchestrator {
       const why = res.subtype === 'error_max_turns' ? `hit the turn limit (${maxTurns})` : (res.result || res.subtype || `exit ${res.exitCode}`);
       throw new StageFailed(`${roleName(role)} could not finish the ${stage} step: ${why}`);
     }
+    if (role !== 'pm' && run.ws) await this.takeInstalls(run, role, res.result);
     return res;
   }
 
